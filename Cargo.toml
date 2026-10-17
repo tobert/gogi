@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+members = ["crates/gogi-proto", "crates/gogi-fake", "crates/gogi-conformance"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+indexmap = { version = "2", features = ["serde"] }
+sha2 = "0.10"
+thiserror = "2"
