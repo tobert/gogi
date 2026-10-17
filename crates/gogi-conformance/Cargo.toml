@@ -1,0 +1,16 @@
+[package]
+name = "gogi-conformance"
+description = "Checks a live council v2 server against the contract."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gogi-proto = { path = "../gogi-proto" }
+serde.workspace = true
+serde_json.workspace = true
+ureq = { version = "2", default-features = false }
+
+[dev-dependencies]
+gogi-fake = { path = "../gogi-fake" }

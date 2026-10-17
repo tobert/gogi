@@ -196,8 +196,11 @@ fn build(store: &mut Store, c: &Context, dry_run: bool) -> Built {
         cuts.push((snapshot_id(&r.tokens[..cut.tokens], &counts), *cut));
     }
     let head = cuts.last().unwrap().0.clone();
-    let best = cuts.iter().rev().find(|(id, _)| store.has(id));
-    let (kept, from) = best.map_or((0, None), |(id, cut)| (cut.tokens, Some(id.clone())));
+    // The longest held snapshot whose tokens begin the context: a boundary of this context, or
+    // the head a generation held after its reply.
+    let n = r.end;
+    let best = store.snaps.iter().filter(|(_, s)| s.tokens.len() <= n && r.tokens.starts_with(&s.tokens)).max_by(|a, b| a.1.tokens.len().cmp(&b.1.tokens.len()).then(b.0.cmp(a.0)));
+    let (kept, from) = best.map_or((0, None), |(id, s)| (s.tokens.len(), Some(id.clone())));
     if !dry_run {
         let mut parent = None;
         for (id, cut) in &cuts {

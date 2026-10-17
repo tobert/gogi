@@ -48,8 +48,9 @@ function of that hash, between -6 and 6, so the same prefix gives the same bits.
 ## Held state
 
 - Snapshot ids hash the identity, the tokens, and the boundary counts along them.
-- A build starts from the longest boundary held and reports `kept`, `fed`, and `from`. A
-  generation holds the head after its reply.
+- A build starts from the longest held snapshot whose tokens begin the context, and reports
+  `kept`, `fed`, and `from`. A generation holds the head after its reply, so the next request
+  starts there even though the reply is not marked `snap`.
 - Pins keep a snapshot and its parents. `pin_bytes` caps the rows they hold together.
   `max_snapshots` drops the oldest unpinned snapshots first.
 - With `--state-dir`, specs, pins, and the snapshots pins keep survive a restart. Other
