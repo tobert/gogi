@@ -22,6 +22,8 @@ pub enum Capability {
     Pins,
     /// Snapshots report `tier`, and pinned snapshots move between tiers.
     Tiers,
+    /// Generations accept `decisions` that ride with them.
+    Ride,
     #[serde(other)]
     Unknown,
 }

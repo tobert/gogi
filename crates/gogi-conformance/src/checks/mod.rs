@@ -5,6 +5,7 @@ mod generations;
 mod pins;
 mod reads;
 mod restart;
+mod ride;
 
 use gogi_proto::context::ContextBuilt;
 use gogi_proto::identity::{Capability, ServerIdentity};

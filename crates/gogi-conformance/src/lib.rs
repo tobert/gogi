@@ -51,6 +51,7 @@ pub fn run(mut opts: Opts, print: bool) -> Report {
         s.specs();
         s.decisions();
         s.reads();
+        s.ride();
         s.replay();
         match opts.restart.as_mut() {
             Some(restart) => s.restart(restart),

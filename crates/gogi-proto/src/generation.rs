@@ -48,6 +48,35 @@ pub struct GenerationRequest {
     pub sample: Option<Sample>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+    /// Decisions that ride with the generation. Capability `ride`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<RidingDecision>,
+}
+
+/// When a riding decision is asked: after the prompt, before the reply, or after the reply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RideWhen {
+    Before,
+    After,
+}
+
+/// A held spec's questions, asked of the context in a late system turn during a generation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RidingDecision {
+    pub spec_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<Vec<String>>,
+    pub when: RideWhen,
+}
+
+/// A riding decision's answers, in a decision read's shape.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RideAnswers {
+    pub spec_id: String,
+    pub when: RideWhen,
+    pub answers: serde_json::Map<String, Value>,
 }
 
 impl GenerationRequest {
@@ -183,6 +212,9 @@ pub struct GenerationDone {
     /// Absent when the server does not report them.
     #[serde(default)]
     pub stats: Option<ReplyStats>,
+    /// The answers of each riding decision, in request order.
+    #[serde(default)]
+    pub decisions: Vec<RideAnswers>,
 }
 
 impl GenerationDone {
@@ -274,7 +306,7 @@ mod tests {
     #[test]
     fn the_request_rules_each_refuse() {
         let ctx = Context { messages: vec![crate::message::Message::user("u")], ..Default::default() };
-        let r = GenerationRequest { context: ctx, max_tokens: Some(8), sample: Some(Sample { temperature: Some(0.0), ..Default::default() }), stream: None };
+        let r = GenerationRequest { context: ctx, max_tokens: Some(8), sample: Some(Sample { temperature: Some(0.0), ..Default::default() }), stream: None, decisions: Vec::new() };
         r.validate().unwrap();
         assert!(GenerationRequest { max_tokens: Some(0), ..r.clone() }.validate().is_err());
         assert!(GenerationRequest { context: Context::default(), ..r.clone() }.validate().is_err());

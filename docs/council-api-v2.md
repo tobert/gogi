@@ -273,6 +273,17 @@ POST /council/v2/generations
   last bits depend on how the prompt was fed, so replays agree within a
   small tolerance, not bit for bit as rule 1 asks of answers. Nothing means
   anything by them yet; they are logged to calibrate against outcomes.
+- **`decisions`** ride with the generation (capability `ride`):
+  `[{spec_id, ask?, when}]`, with `when` either `before`, after the prompt,
+  or `after`, after the reply. The server asks the held spec's questions in
+  a late system turn after the context or the reply, so the turn's
+  thinking stays in view, reads each answer's letter after the most likely
+  letters of the questions before it, and drops those rows; the reply is
+  the same as without them. `done.decisions` answers each in request order,
+  `{spec_id, when, answers}`, each answer in a decision read's shape. A
+  spec the server does not hold is a `404`. Like `stats`, the answers are
+  the model's account of its own work; nothing means anything by them until
+  they are calibrated against outcomes.
 - **A prompt that leaves no room is a `413`** with `error.type`
   `context_full`, `prompt_tokens`, and `context_tokens`, before anything
   runs. The client shortens the context.
@@ -308,6 +319,7 @@ As v1, plus:
 | `think` | Decisions accept `think` with `tokens` above 0. |
 | `pins` | `/council/v2/pins`. |
 | `tiers` | Snapshots report `tier`, and pinned snapshots move between tiers. |
+| `ride` | Generations accept `decisions`. |
 
 ## Extensions
 
@@ -348,14 +360,10 @@ A server serves the model-specific rest under its own prefix and lists it in
 - **Thinking at decision time.** `think` costs about 21 ms a token on
   mkviolet, which does not serve it yet. Whether it pays, and at what
   length, is the bench's next measurement.
-- **Decisions that ride with a generation.** Queued after the stateless
-  draft settles. A generation could carry `decisions: [{spec_id, ask?,
-  when}]`, with `when` one of `before` (after the prompt), `after` (after
-  the reply), or `each_call` (after each parsed tool call), each read as a
-  late system turn on rows past the head and then dropped, and answered in
-  `done` in a decision read's shape. Like `stats`, they mean nothing until
-  they are calibrated against outcomes, so the first use is logging them
-  beside each case.
+- **Riding decisions at each tool call.** `when: "each_call"` would ask
+  after each parsed tool call, before the reply goes on, which needs the
+  server to pause a decode. Whether it pays depends on what `after` and the
+  per-call `stats` show once calibrated.
 - **Tool-result size.** A tool result is written whole into a context,
   even when the context then has no room for another turn. The client's
   preview and storage rules for large results are its own.
