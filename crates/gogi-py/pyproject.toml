@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "gogi"
+version = "0.1.0"
+description = "The council API contract: validation, spec ids, and pooling math."
+requires-python = ">=3.9"
+
+[tool.maturin]
+python-source = "python"
+module-name = "gogi._gogi"

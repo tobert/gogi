@@ -6,6 +6,7 @@ as documents and as code.
 - `docs/` holds the contract. Start with `docs/council-api-v2.md`.
 - `crates/gogi-proto` is the contract with no I/O.
 - `crates/gogi-fake` is a fake server over a toy model.
+- `crates/gogi-py` binds the validation and math to Python (`cd crates/gogi-py && maturin develop && pytest tests`).
 - `crates/gogi-conformance` checks a live server:
 
 ```

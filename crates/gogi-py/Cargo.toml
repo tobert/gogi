@@ -1,0 +1,16 @@
+[package]
+name = "gogi-py"
+description = "Python bindings for gogi-proto: validation, spec ids, and the pooling math."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "_gogi"
+crate-type = ["cdylib"]
+
+[dependencies]
+gogi-proto = { path = "../gogi-proto" }
+serde_json.workspace = true
+pyo3 = { version = "0.30", features = ["extension-module"] }
