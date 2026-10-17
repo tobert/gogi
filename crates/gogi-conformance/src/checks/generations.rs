@@ -19,6 +19,12 @@ impl Suite {
         self.r.check("generation: kept and fed make prompt", u.kept + u.fed == u.prompt && u.prompt > 0, &g["usage"]);
         self.r.check("generation: completion is at most max_tokens, and equals it when the reply was cut", u.completion <= 300 && (g["finish"] != json!("length") || u.completion == 300), &g);
         self.r.check("generation reuses the build", u.kept >= num(&b["tokens"]) as u64, (&g["usage"], &b["tokens"]));
+        let parts: Vec<&Value> = [&g["stats"]["reasoning"], &g["stats"]["content"]].into_iter().chain(g["tool_calls"].as_array().into_iter().flatten().map(|c| &c["stats"])).collect();
+        if g.get("stats").is_some() {
+            self.r.check("reply stats are well formed where reported", parts.iter().all(|p| well_formed_stats(p)), &parts);
+        } else {
+            self.r.skip("reply stats are well formed where reported", "the server reports no stats");
+        }
         self.r.check("generation holds its head", g["head"].is_string(), &g["head"]);
         let ids: Vec<&str> = done.tool_calls.iter().map(|c| c.id()).collect();
         let mut unique = ids.clone();
@@ -90,7 +96,8 @@ impl Suite {
                 self.r.check("stream sends a token event for each token", tokens as u64 >= u.completion.min(1), (tokens, u.completion));
                 if let Some((_, d)) = last {
                     if self.decode::<GenerationDone>("stream done has the contract's fields", d).is_some() {
-                        self.r.check("stream done is the reply the plain call gave", ["content", "reasoning", "tool_calls"].iter().all(|k| d[*k] == g[*k]), (d, &g));
+                        self.r.check("stream done is the reply the plain call gave", ["content", "reasoning"].iter().all(|k| d[*k] == g[*k]) && without_stats(&d["tool_calls"]) == without_stats(&g["tool_calls"]), (d, &g));
+                        self.r.check("stream stats are the plain call's within 1e-6", stats_close(d, &g, 1e-6), (&d["stats"], &g["stats"]));
                     }
                 }
             }
@@ -138,4 +145,71 @@ pub(crate) fn filler_text(n: usize, seed: &str) -> String {
 /// reply renders to is the server's, so it is read, not computed from `usage`.
 fn head_tokens(g: &Value) -> i64 {
     g["snapshots"].as_array().and_then(|s| s.iter().find(|x| x["id"] == g["head"])).map_or(i64::MAX, |x| num(&x["tokens"]))
+}
+
+/// A reply's tool calls without their `stats`, which are diagnostics: a server may compute them
+/// from logits whose last bits depend on how the prompt was fed.
+fn without_stats(calls: &Value) -> Value {
+    let mut c = calls.clone();
+    if let Some(a) = c.as_array_mut() {
+        for call in a {
+            if let Some(o) = call.as_object_mut() {
+                o.remove("stats");
+            }
+        }
+    }
+    c
+}
+
+/// Whether two replies' `stats`, and their calls' `stats`, agree within `tol`; replies without
+/// stats agree.
+fn stats_close(a: &Value, b: &Value, tol: f64) -> bool {
+    fn close(x: &Value, y: &Value, tol: f64) -> bool {
+        match (x, y) {
+            (Value::Number(p), Value::Number(q)) => (p.as_f64().unwrap_or(f64::NAN) - q.as_f64().unwrap_or(f64::NAN)).abs() <= tol,
+            (Value::Object(p), Value::Object(q)) => p.len() == q.len() && p.iter().all(|(k, v)| q.get(k).is_some_and(|w| close(v, w, tol))),
+            (Value::Array(p), Value::Array(q)) => p.len() == q.len() && p.iter().zip(q).all(|(v, w)| close(v, w, tol)),
+            _ => x == y,
+        }
+    }
+    let calls = |v: &Value| -> Value { Value::Array(v["tool_calls"].as_array().map(|a| a.iter().map(|c| c["stats"].clone()).collect()).unwrap_or_default()) };
+    close(&a["stats"], &b["stats"], tol) && close(&calls(a), &calls(b), tol)
+}
+
+/// Token stats are null, or `tokens` of at least 1 with `min_logprob <= mean_logprob <= 0` and
+/// `0 <= mean_entropy <= max_entropy`.
+fn well_formed_stats(s: &Value) -> bool {
+    if s.is_null() {
+        return true;
+    }
+    let f = |k: &str| s[k].as_f64().unwrap_or(f64::NAN);
+    s["tokens"].as_u64().is_some_and(|n| n >= 1)
+        && f("min_logprob") <= f("mean_logprob") + 1e-12
+        && f("mean_logprob") <= 1e-12
+        && f("mean_entropy") >= -1e-12
+        && f("mean_entropy") <= f("max_entropy") + 1e-12
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Null stats pass; stats with no tokens, a minimum above the mean, a positive mean log
+    /// probability, or a mean entropy above the maximum fail.
+    #[test]
+    fn stats_checks_can_fail() {
+        let ok = json!({"tokens": 3, "mean_logprob": -0.1, "min_logprob": -0.5, "mean_entropy": 0.2, "max_entropy": 0.9});
+        assert!(well_formed_stats(&Value::Null) && well_formed_stats(&ok));
+        for (k, v) in [("tokens", json!(0)), ("min_logprob", json!(-0.01)), ("mean_logprob", json!(0.2)), ("mean_entropy", json!(1.5))] {
+            let mut bad = ok.clone();
+            bad[k] = v;
+            assert!(!well_formed_stats(&bad), "{}", bad);
+        }
+        let a = json!({"stats": {"reasoning": ok, "content": null}, "tool_calls": [{"stats": ok}]});
+        let mut b = a.clone();
+        b["tool_calls"][0]["stats"]["mean_logprob"] = json!(-0.1 + 1e-9);
+        assert!(stats_close(&a, &b, 1e-6));
+        b["tool_calls"][0]["stats"]["mean_logprob"] = json!(-0.2);
+        assert!(!stats_close(&a, &b, 1e-6));
+    }
 }

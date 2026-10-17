@@ -68,8 +68,32 @@ impl GenerationRequest {
 /// never dropped. The server names each call with the `id` a later `tool` message answers.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ReplyToolCall {
-    Parsed { id: String, name: String, arguments: Map<String, Value> },
-    Unparsed { id: String, name: Option<String>, raw: String, error: String },
+    Parsed { id: String, name: String, arguments: Map<String, Value>, stats: Option<TokenStats> },
+    Unparsed { id: String, name: Option<String>, raw: String, error: String, stats: Option<TokenStats> },
+}
+
+/// How the sampled tokens of one part of a reply looked to the model: their untempered log
+/// probabilities and the entropy, in nats, of each distribution they came from. Diagnostics:
+/// a server may compute them from logits whose last bits depend on how the prompt was fed, so
+/// they agree across replays within a small tolerance, not bit for bit.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TokenStats {
+    pub tokens: u64,
+    pub mean_logprob: f64,
+    pub min_logprob: f64,
+    pub mean_entropy: f64,
+    pub max_entropy: f64,
+}
+
+/// The stats of a reply's thinking and its text; `None` for a part with no tokens.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplyStats {
+    #[serde(default)]
+    pub reasoning: Option<TokenStats>,
+    #[serde(default)]
+    pub content: Option<TokenStats>,
 }
 
 impl ReplyToolCall {
@@ -92,6 +116,8 @@ impl<'de> Deserialize<'de> for ReplyToolCall {
             arguments: Option<Value>,
             raw: Option<String>,
             error: Option<String>,
+            #[serde(default)]
+            stats: Option<TokenStats>,
         }
         let r = Raw::deserialize(de)?;
         if r.id.is_empty() {
@@ -99,11 +125,11 @@ impl<'de> Deserialize<'de> for ReplyToolCall {
         }
         match (r.arguments, r.raw, r.error) {
             (Some(Value::Object(arguments)), None, None) => match r.name {
-                Some(name) if !name.is_empty() => Ok(ReplyToolCall::Parsed { id: r.id, name, arguments }),
+                Some(name) if !name.is_empty() => Ok(ReplyToolCall::Parsed { id: r.id, name, arguments, stats: r.stats }),
                 _ => Err(D::Error::custom("a parsed tool call has no name")),
             },
             (Some(_), None, None) => Err(D::Error::custom("tool call arguments are not an object")),
-            (None, Some(raw), Some(error)) => Ok(ReplyToolCall::Unparsed { id: r.id, name: r.name, raw, error }),
+            (None, Some(raw), Some(error)) => Ok(ReplyToolCall::Unparsed { id: r.id, name: r.name, raw, error, stats: r.stats }),
             _ => Err(D::Error::custom("a tool call has either `arguments` or both `raw` and `error`")),
         }
     }
@@ -112,8 +138,8 @@ impl<'de> Deserialize<'de> for ReplyToolCall {
 impl Serialize for ReplyToolCall {
     fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
         let v = match self {
-            ReplyToolCall::Parsed { id, name, arguments } => serde_json::json!({"id": id, "name": name, "arguments": arguments}),
-            ReplyToolCall::Unparsed { id, name, raw, error } => serde_json::json!({"id": id, "name": name, "raw": raw, "error": error}),
+            ReplyToolCall::Parsed { id, name, arguments, stats } => serde_json::json!({"id": id, "name": name, "arguments": arguments, "stats": stats}),
+            ReplyToolCall::Unparsed { id, name, raw, error, stats } => serde_json::json!({"id": id, "name": name, "raw": raw, "error": error, "stats": stats}),
         };
         v.serialize(ser)
     }
@@ -154,6 +180,9 @@ pub struct GenerationDone {
     pub head: Option<SnapshotId>,
     /// The context's snapshots.
     pub snapshots: Vec<SnapshotInfo>,
+    /// Absent when the server does not report them.
+    #[serde(default)]
+    pub stats: Option<ReplyStats>,
 }
 
 impl GenerationDone {
@@ -163,7 +192,7 @@ impl GenerationDone {
         let mut calls = Vec::new();
         for c in &self.tool_calls {
             match c {
-                ReplyToolCall::Parsed { id, name, arguments } => {
+                ReplyToolCall::Parsed { id, name, arguments, .. } => {
                     calls.push(crate::message::ToolCall { id: id.clone(), name: name.clone(), arguments: arguments.clone() })
                 }
                 ReplyToolCall::Unparsed { .. } => return None,

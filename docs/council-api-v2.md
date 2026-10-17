@@ -11,7 +11,8 @@ This draft replaces `docs/council-api.md` (v1) and the three servers' own
 context routes: the HIP megakernel's `/mk/v1`, lfm2d's `/v1/opinion`, and
 mkviolet, which serves both. "Converting" below says what each one changes.
 mkviolet serves this draft (`src/council_v2.rs`, `src/held.rs`), and
-kaijutsu's mk provider and council speak it on the `council-v2` branch.
+kaijutsu's mk provider and council speak it. `gogi-conformance` checks a
+server against it.
 
 ## What changes from v1
 
@@ -162,7 +163,9 @@ PUT /council/v2/pins/kernel-7f3a
   characters and without a slash, such as a kernel id. It names pins only.
 - **`PUT` replaces the owner's whole set** and renews its time, so a client
   that restarts sends its set again and drops what it no longer needs.
-  `DELETE` drops the set; `GET` lists it. An owner with no pins is a `404`.
+  `DELETE` drops the set; `GET` lists it as `{owner, snapshots: [<id>…],
+  expires_in_s}`, naming only the snapshots that were held when pinned. An
+  owner with no pins is a `404`.
 - **A pin keeps a snapshot and the snapshots it is built on** from
   eviction, in memory and on disk. A pinned snapshot may move to a slower
   tier; it is never dropped. A pin on a snapshot the server does not hold
@@ -260,6 +263,16 @@ POST /council/v2/generations
   most a few tokens of feeding, so the next request, which sends the reply
   and what follows, starts there. Otherwise `head` is `null` and the next
   request starts from the last boundary.
+- **`stats`** in `done`, when a server reports them, describe how the
+  sampled tokens looked to the model: for the reply's `reasoning` and
+  `content`, and for each tool call as its own `stats`,
+  `{tokens, mean_logprob, min_logprob, mean_entropy, max_entropy}`, from
+  each token's untempered log probability and the entropy, in nats, of the
+  distribution it came from. A part with no tokens has `null`. They are
+  diagnostics, not answers: a server may compute them from logits whose
+  last bits depend on how the prompt was fed, so replays agree within a
+  small tolerance, not bit for bit as rule 1 asks of answers. Nothing means
+  anything by them yet; they are logged to calibrate against outcomes.
 - **A prompt that leaves no room is a `413`** with `error.type`
   `context_full`, `prompt_tokens`, and `context_tokens`, before anything
   runs. The client shortens the context.
@@ -335,6 +348,14 @@ A server serves the model-specific rest under its own prefix and lists it in
 - **Thinking at decision time.** `think` costs about 21 ms a token on
   mkviolet, which does not serve it yet. Whether it pays, and at what
   length, is the bench's next measurement.
+- **Decisions that ride with a generation.** Queued after the stateless
+  draft settles. A generation could carry `decisions: [{spec_id, ask?,
+  when}]`, with `when` one of `before` (after the prompt), `after` (after
+  the reply), or `each_call` (after each parsed tool call), each read as a
+  late system turn on rows past the head and then dropped, and answered in
+  `done` in a decision read's shape. Like `stats`, they mean nothing until
+  they are calibrated against outcomes, so the first use is logging them
+  beside each case.
 - **Tool-result size.** A tool result is written whole into a context,
   even when the context then has no room for another turn. The client's
   preview and storage rules for large results are its own.
