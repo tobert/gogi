@@ -5,7 +5,7 @@ live. Kaijutsu is the client and mkviolet is the server; both speak it.
 
 Until kaijutsu's `council-v2` branch merges, kaijutsu's copy of these documents
 is the one being edited. The files here are a snapshot of kaijutsu commit
-`e3a7e060` and change only when gogi's code and a live server show that the
+`4cba4313` and change only when gogi's code and a live server show that the
 document is wrong.
 
 | File | Holds |

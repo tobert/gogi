@@ -1,0 +1,14 @@
+[package]
+name = "gogi-proto"
+description = "The council API contract as code: wire types, validation, canonical JSON, and pooling math. No I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
