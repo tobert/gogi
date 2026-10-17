@@ -1,5 +1,5 @@
 use gogi_proto::generation::GenerationDone;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::http::sse_events;
 use crate::{Suite, num};
@@ -48,7 +48,7 @@ impl Suite {
             // held head is not a prefix of the next request.
             let prefix = done.tool_calls.iter().any(|c| matches!(c, gogi_proto::generation::ReplyToolCall::Parsed { .. })) || g["reasoning"].as_str().is_none_or(str::is_empty);
             if prefix {
-                self.r.check("second turn starts from the held head", !held || num(&g2["usage"]["kept"]) + 2 >= (u.prompt + u.completion) as i64, (&g2["usage"], &g["usage"]));
+                self.r.check("second turn starts from the held head", !held || num(&g2["usage"]["kept"]) >= head_tokens(&g), (&g2["usage"], &g["head"], &g["snapshots"]));
             } else {
                 self.r.skip("second turn starts from the held head", "the reply is a text answer with thinking, which the template may drop once a user message follows");
             }
@@ -64,8 +64,7 @@ impl Suite {
                 let mut c3 = self.ctx(m3);
                 c3["thinking"] = json!(false);
                 if let Some(q2) = self.generate("second turn with thinking off answers", &c3, 50) {
-                    let want = (q["usage"]["prompt"].as_i64().unwrap_or(0) + q["usage"]["completion"].as_i64().unwrap_or(0)) - 2;
-                    self.r.check("with thinking off the second turn starts from the held head", num(&q2["usage"]["kept"]) >= want, (&q2["usage"], &q["usage"]));
+                    self.r.check("with thinking off the second turn starts from the held head", num(&q2["usage"]["kept"]) >= head_tokens(&q), (&q2["usage"], &q["head"], &q["snapshots"]));
                 }
             } else {
                 self.r.skip("with thinking off the second turn starts from the held head", "the server held no head, or still wrote thinking");
@@ -135,3 +134,8 @@ pub(crate) fn filler_text(n: usize, seed: &str) -> String {
     out
 }
 
+/// The token count of the head a generation reported, from its `snapshots`; how many tokens the
+/// reply renders to is the server's, so it is read, not computed from `usage`.
+fn head_tokens(g: &Value) -> i64 {
+    g["snapshots"].as_array().and_then(|s| s.iter().find(|x| x["id"] == g["head"])).map_or(i64::MAX, |x| num(&x["tokens"]))
+}
