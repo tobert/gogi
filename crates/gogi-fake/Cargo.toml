@@ -1,0 +1,14 @@
+[package]
+name = "gogi-fake"
+description = "A fake council v2 server over a toy deterministic model, for client tests and for testing the conformance suite."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gogi-proto = { path = "../gogi-proto" }
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+sha2.workspace = true
