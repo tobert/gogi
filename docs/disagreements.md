@@ -21,6 +21,7 @@ here. Each item is an observation from the code unless it says "inferred".
 | 12 | A snapshot's `tokens` | Left out when the server cannot count them (`if let Some(n)`). | Required. | Required in `SnapshotState`. |
 | 13 | A pin set's `GET` | `snapshots` is a list of ids. | Accepts ids or objects with an `id`. | Accepts both. The draft now says ids. |
 | 14 | An unknown `role` | `400` with a message naming the role. | Decode error. | Decode error; still a `400` on a server built on this crate, but the text differs from mkviolet's. |
+| 15 | The `template` a decision, a held spec, and `identity` report | A decision and a held spec reported the letters template alone; `identity` added the chat template. | n/a | One value, `identity`'s. `gogi-conformance` checks both; mkviolet now reports it. |
 
-mkviolet has no verifier of the relations; `gogi-proto::math::verify` is kaijutsu's, ported, and
+mkviolet runs `gogi-proto::math::verify` on each decision before it replies; that function is kaijutsu's, ported, and
 checked against mkviolet's algorithm in `crates/gogi-proto/tests/relations.rs`.
