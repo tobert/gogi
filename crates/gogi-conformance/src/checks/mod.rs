@@ -35,13 +35,13 @@ impl Suite {
         }
     }
 
-    /// Sends a request that must answer `want`. A different status is recorded as a failure.
+    /// Sends a request that must return the status `want`. A different status is recorded as a failure.
     pub(crate) fn expect(&mut self, what: &str, method: &str, path: &str, body: Option<Value>, want: u16) -> Option<Value> {
         let (status, v) = self.send(what, method, path, body)?;
         if status == want {
             Some(v)
         } else {
-            self.r.fail(what, format!("{} {} answered {}, not {}: {}", method, path, status, want, v));
+            self.r.fail(what, format!("{} {} returned {}, not {}: {}", method, path, status, want, v));
             None
         }
     }
@@ -50,7 +50,7 @@ impl Suite {
     pub(crate) fn refused(&mut self, what: &str, method: &str, path: &str, body: Option<Value>, want: u16) -> Option<Value> {
         let (status, v) = self.send(what, method, path, body)?;
         let shaped = v["error"]["type"].is_string() && v["error"]["message"].is_string();
-        self.r.check(what, status == want && shaped, format!("answered {} with {}", status, v));
+        self.r.check(what, status == want && shaped, format!("returned {}: {}", status, v));
         Some(v)
     }
 
@@ -71,7 +71,7 @@ impl Suite {
         json!({"thinking": true, "tools": shell_tools(), "messages": messages})
     }
 
-    /// The opening of a conversation, unique to this run.
+    /// The first messages of a context, unique to this run.
     pub(crate) fn opening(&self, label: &str) -> Vec<Value> {
         vec![
             json!({"role": "system", "content": format!("You are a coding agent ({} {}). Use the shell tool.", label, self.nonce)}),
@@ -92,9 +92,9 @@ impl Suite {
         self.expect(what, "POST", "/council/v2/generations", Some(body), 200)
     }
 
-    /// The messages that continue a conversation after generation `g`: the reply as the server
-    /// named it, then an answer to each of its calls (or a user message when it made none),
-    /// ending with a boundary.
+    /// The messages that continue a context after generation `g`: the reply with the call ids
+    /// the server gave, then a tool message with the result of each call (or a user message when
+    /// it made none), ending with a boundary.
     pub(crate) fn continue_after(&self, g: &Value, next_user: &str) -> Vec<Value> {
         let mut reply = json!({"role": "assistant"});
         for k in ["content", "reasoning"] {
@@ -127,7 +127,7 @@ impl Suite {
     // ---- identity
 
     pub(crate) fn identity(&mut self) -> bool {
-        let Some(v) = self.expect("identity answers", "GET", "/council/v2/identity", None, 200) else { return false };
+        let Some(v) = self.expect("identity succeeds", "GET", "/council/v2/identity", None, 200) else { return false };
         let Some(id) = self.decode::<ServerIdentity>("identity has the contract's fields", &v) else { return false };
         let l = &id.limits;
         self.r.check("identity limits are positive", l.context_tokens > 0 && l.state_bytes > 0 && l.contexts_per_decision >= 1 && l.contexts_per_decision <= 8 && l.choice_options >= 2 && l.default_timeout_ms > 0, &id.limits);
@@ -154,7 +154,7 @@ impl Suite {
             ("reasoning on a user message", json!({"messages": [{"role": "user", "content": "x", "reasoning": "r"}]})),
             ("tool_calls on a user message", json!({"messages": [{"role": "user", "content": "x", "tool_calls": [call("a")]}]})),
             ("a tool message without tool_call_id", json!({"messages": [user.clone(), asst("a"), {"role": "tool", "content": "r"}]})),
-            ("a tool message answering no call", json!({"messages": [user.clone(), asst("a"), {"role": "tool", "tool_call_id": "nope", "content": "r"}]})),
+            ("a tool message naming no call", json!({"messages": [user.clone(), asst("a"), {"role": "tool", "tool_call_id": "nope", "content": "r"}]})),
             ("a tool message after a user message", json!({"messages": [asst("a"), user.clone(), {"role": "tool", "tool_call_id": "a", "content": "r"}]})),
             ("tool_call_id on a user message", json!({"messages": [{"role": "user", "content": "x", "tool_call_id": "a"}]})),
             ("a call with an empty id", json!({"messages": [user.clone(), asst("")]})),
@@ -173,10 +173,10 @@ impl Suite {
         self.refused("a build refuses a body that is not JSON", "POST", "/council/v2/contexts", Some(json!("x")), 400);
         let later = self.ctx(vec![json!({"role": "system", "content": format!("s {}", self.nonce)}), user.clone(), json!({"role": "assistant", "content": "ok"}), json!({"role": "system", "content": "You replied without a tool call."})]);
         if let Some(b) = self.build("a system message may come after the first", &later, false) {
-            self.r.check("a later system message ends the context", b["snapshots"].as_array().and_then(|s| s.last()).is_some_and(|s| s["message"] == 3), &b);
+            self.r.check("a context that ends in a later system message has its head there", b["snapshots"].as_array().and_then(|s| s.last()).is_some_and(|s| s["message"] == 3), &b);
         }
         if let Some((status, v)) = self.send("the v1 context route is gone", "PUT", "/council/v2/contexts/old", Some(json!({"messages": [user]}))) {
-            self.r.check("the v1 context route is gone", status == 404 || status == 405, format!("answered {}: {}", status, v));
+            self.r.check("the v1 context route is gone", status == 404 || status == 405, format!("returned {}: {}", status, v));
         }
     }
 
@@ -185,8 +185,8 @@ impl Suite {
     pub(crate) fn builds(&mut self) {
         let msgs = self.opening("build");
         let ctx = self.ctx(msgs.clone());
-        let Some(b) = self.build("build answers", &ctx, false) else { return };
-        let Some(built) = self.decode::<ContextBuilt>("build reply has the contract's fields", &b) else { return };
+        let Some(b) = self.build("build succeeds", &ctx, false) else { return };
+        let Some(built) = self.decode::<ContextBuilt>("build response has the contract's fields", &b) else { return };
         self.r.check("build: kept and fed make tokens", built.kept + built.fed == built.tokens && built.tokens > 0, &b);
         self.r.check("build: the last snapshot is the head", b["snapshots"].as_array().and_then(|s| s.last()).is_some_and(|s| s["id"] == b["head"] && s["tokens"] == b["tokens"]), &b);
         self.r.check("build: a marked user message has a snapshot", b["snapshots"].as_array().is_some_and(|s| s.iter().any(|x| x["message"] == 1)), &b);
@@ -198,33 +198,33 @@ impl Suite {
         tokens.dedup();
         self.r.check("build: snapshots run in order with distinct sizes", tokens == before && ids.len() == before.len(), &b["snapshots"]);
 
-        if let Some(b2) = self.build("same context again answers", &ctx, false) {
+        if let Some(b2) = self.build("same context again succeeds", &ctx, false) {
             self.r.check("same context again feeds nothing", num(&b2["fed"]) == 0 && b2["head"] == b["head"] && num(&b2["kept"]) == num(&b["tokens"]), &b2);
         }
-        if let Some(d) = self.build("dry run answers", &ctx, true) {
-            self.r.check("dry run of a held context feeds nothing", d["dry_run"] == json!(true) && num(&d["fed"]) == 0 && d["head"] == b["head"], &d);
+        if let Some(d) = self.build("dry run succeeds", &ctx, true) {
+            self.r.check("a dry run of a built context feeds nothing", d["dry_run"] == json!(true) && num(&d["fed"]) == 0 && d["head"] == b["head"], &d);
         }
 
-        // A longer context shares the held prefix: its first boundary is the held one.
+        // A longer context starts from the snapshot held at the shorter context's boundary.
         let mut longer = msgs.clone();
         longer.push(json!({"role": "assistant", "content": "I will look first."}));
         longer.push(json!({"role": "user", "content": "Go ahead.", "snap": true}));
         let lctx = self.ctx(longer);
-        if let Some(l) = self.build("longer context answers", &lctx, false) {
+        if let Some(l) = self.build("longer context succeeds", &lctx, false) {
             self.r.check("a longer context starts from the held boundary", num(&l["kept"]) > 0 && num(&l["fed"]) < num(&l["tokens"]), &l);
             self.r.check("a longer context keeps the shared boundary's id", l["snapshots"][0]["id"] == b["snapshots"][0]["id"], (&l["snapshots"], &b["snapshots"]));
         }
 
         // An edited earlier message shares only what precedes it.
         let edited = self.ctx(vec![msgs[0].clone(), json!({"role": "user", "content": "Only delete the build directory.", "snap": true})]);
-        if let Some(e) = self.build("dry run of an edit answers", &edited, true) {
+        if let Some(e) = self.build("dry run of an edit succeeds", &edited, true) {
             self.r.check("dry run of an edit reports a fresh build", e["dry_run"] == json!(true) && num(&e["fed"]) > 0 && e["snapshots"] == json!([]), &e);
         }
 
         // Thinking off is a different context.
         let mut off = ctx.clone();
         off["thinking"] = json!(false);
-        if let Some(o) = self.build("a context with thinking off answers", &off, false) {
+        if let Some(o) = self.build("a context with thinking off succeeds", &off, false) {
             self.r.check("thinking is part of the context", o["head"] != b["head"], &o);
         }
     }
@@ -235,12 +235,12 @@ impl Suite {
         let mut answer = opening.clone();
         answer.push(json!({"role": "assistant", "reasoning": "The user wants a short note.", "content": "Noted.", "snap": true}));
         let c1 = self.ctx(answer.clone());
-        let Some(b1) = self.build("a text answer with thinking builds", &c1, false) else { return };
+        let Some(b1) = self.build("an assistant message with reasoning and no tool calls builds", &c1, false) else { return };
         let snap_of = |b: &Value, message: i64| b["snapshots"].as_array().and_then(|s| s.iter().find(|x| num(&x["message"]) == message).cloned());
         self.r.check("the end of the context has a snapshot", snap_of(&b1, 2).is_some_and(|s| s["id"] == b1["head"]), &b1);
         answer.push(json!({"role": "user", "content": "Thanks. Now list the files.", "snap": true}));
         let c2 = self.ctx(answer);
-        let Some(b2) = self.build("the same answer followed by a user message builds", &c2, false) else { return };
+        let Some(b2) = self.build("the same message followed by a user message builds", &c2, false) else { return };
         self.r.check("the end of a user message is a boundary", snap_of(&b2, 1).is_some_and(|s| Some(&s["id"]) == snap_of(&b1, 1).as_ref().map(|x| &x["id"])) && snap_of(&b2, 3).is_some_and(|s| s["id"] == b2["head"]), &b2["snapshots"]);
         match snap_of(&b2, 2) {
             Some(s) => {

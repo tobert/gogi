@@ -19,12 +19,12 @@ pub const BYTES_PER_TOKEN: u64 = 64;
 pub struct Config {
     pub addr: String,
     pub state_dir: Option<PathBuf>,
-    /// The longest context, or a generation's prompt and reply.
+    /// The most tokens a prompt may have, counting a generation's prompt and reply together.
     pub context_tokens: usize,
     /// The longest context a decision reads.
     pub decision_context_tokens: usize,
     pub pin_bytes: u64,
-    /// Held snapshots past this count drop the oldest unpinned first.
+    /// Past this many held snapshots, the oldest unpinned snapshots are evicted first.
     pub max_snapshots: usize,
 }
 
@@ -51,7 +51,7 @@ pub struct Store {
     pub snaps: HashMap<String, Snap>,
     pub pins: BTreeMap<String, Pins>,
     pub specs: indexmap::IndexMap<String, Value>,
-    /// Seconds added to the clock, so a test can pass a pin's time.
+    /// Seconds added to the clock, so a test can make a pin expire without waiting.
     pub skew: u64,
     next_born: u64,
 }
@@ -87,7 +87,7 @@ impl Store {
         expires.saturating_sub(self.now())
     }
 
-    /// Drops pins whose time has passed.
+    /// Drops pins whose `ttl_s` has run out.
     pub fn expire_pins(&mut self) {
         let now = self.now();
         let before = self.pins.len();
@@ -187,7 +187,7 @@ impl Store {
         for (id, spec) in v["specs"].as_object().into_iter().flatten() {
             self.specs.insert(id.clone(), spec.clone());
         }
-        // Parents first: a snapshot's chain is shorter than its own.
+        // Parents first: a parent has fewer tokens than the snapshots built on it.
         let mut snaps: Vec<(&String, &Value)> = v["snapshots"].as_object().into_iter().flatten().collect();
         snaps.sort_by_key(|(_, s)| s["tokens"].as_array().map_or(0, |t| t.len()));
         for (id, s) in snaps {

@@ -165,7 +165,7 @@ fn a_loglinear_pool_lets_one_read_veto() {
     assert_eq!(argmax(&log.probs), 1);
 }
 
-// ---- mkviolet's algorithm, copied from src/council.rs as it stands: the second implementation
+// ---- mkviolet's algorithm, copied from its src/council.rs: the second implementation
 // the math must agree with.
 
 mod mkviolet {

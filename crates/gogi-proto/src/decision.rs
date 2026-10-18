@@ -1,4 +1,4 @@
-//! `POST /council/v2/decisions`: typed questions from a spec, pooled over contexts.
+//! `POST /council/v2/decisions`: one case read after each context, with the reads pooled.
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -47,7 +47,8 @@ pub struct Pool {
     pub values: Option<Vec<f64>>,
 }
 
-/// The thought before a decision's answer. `tokens: 0` closes it; above 0 needs `think`.
+/// The thinking before a decision's answers. `tokens: 0` turns it off; above 0 needs the `think`
+/// capability.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Think {
@@ -71,7 +72,7 @@ pub struct DecisionRequest {
     /// Question id to the options to narrow it to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<Map<String, Value>>,
-    /// Inline Decisions questions; see `spec::parse_inline`.
+    /// Inline questions, sent in place of `spec_id`; see `spec::parse_inline`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub questions: Option<Map<String, Value>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -95,7 +96,7 @@ pub struct DecisionRequest {
 impl DecisionRequest {
     /// Checks the rules a client can check without the server: exactly one of `spec_id` and
     /// `questions`; `ask` and `options` only with a spec; a string, object, or array `state`;
-    /// at most 8 valid contexts that all end with a call to their queue tool or none do; a
+    /// at most 8 valid contexts, all of them queue contexts or none of them; a
     /// positive `timeout_ms`; and pool `values` that go with `given` weights, one per read,
     /// finite, at least 0, summing above 0.
     pub fn validate(&self) -> Result<(), Invalid> {
@@ -148,8 +149,8 @@ impl DecisionRequest {
     }
 }
 
-/// The last call of a context's last message when it is the context's queue tool: the call a
-/// decision answers with the case.
+/// The last call of a context's last message when it calls the queue tool: the call whose
+/// result a decision gives as the case.
 pub fn queue_call(c: &Context) -> Option<&crate::message::ToolCall> {
     let q = c.queue.as_ref()?;
     let last = c.messages.last().filter(|m| m.role == crate::message::Role::Assistant)?;
@@ -267,8 +268,8 @@ pub enum PooledAnswer {
     Noul(PooledNoul),
 }
 
-/// A read's required `context`: `null`, an id, or a council v2 index. An index reads as its
-/// decimal text.
+/// A read's required `context`: `null`, a v1 context id, or a council v2 index. An index is
+/// parsed as its decimal text.
 fn context_name<'de, D: Deserializer<'de>>(de: D) -> Result<Option<String>, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
@@ -285,8 +286,8 @@ fn context_name<'de, D: Deserializer<'de>>(de: D) -> Result<Option<String>, D::E
 /// One context's read of the case.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Read {
-    /// The context read, or null for the spec alone. A council v2 answer names it by its index in
-    /// the request's `contexts`, read here as that index's decimal text.
+    /// The context read, or null when the decision sends no contexts. A council v2 response names
+    /// it by its index in the request's `contexts`, parsed here as that index's decimal text.
     #[serde(deserialize_with = "context_name")]
     pub context: Option<String>,
     #[serde(deserialize_with = "required_nullable")]
@@ -337,7 +338,8 @@ pub struct Usage {
     pub fed_tokens: Option<u64>,
 }
 
-/// The fields a fitted threshold depends on.
+/// The identity fields a decision's numbers depend on, so a client fits its thresholds per
+/// identity.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecisionIdentity {
     pub model: String,
@@ -349,7 +351,7 @@ pub struct DecisionIdentity {
     pub spec_id: Option<SpecId>,
 }
 
-/// The reply to `POST /council/v2/decisions`.
+/// The response to `POST /council/v2/decisions`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DecisionResponse {
     pub model: String,
@@ -377,11 +379,11 @@ mod tests {
         format!("sha256:{}", "a".repeat(64))
     }
 
-    fn plain() -> Context {
+    fn chat() -> Context {
         Context { messages: vec![Message::user("u")], ..Default::default() }
     }
 
-    fn queued() -> Context {
+    fn queue_context() -> Context {
         let call = ToolCall { id: "c".into(), name: "next".into(), arguments: Default::default() };
         Context {
             tools: vec![json!({"type": "function", "function": {"name": "next", "parameters": {"type": "object", "properties": {"answers": {"type": "object", "properties": {
@@ -393,7 +395,7 @@ mod tests {
     }
 
     fn req() -> DecisionRequest {
-        DecisionRequest { state: json!("git push"), spec_id: Some(spec_id()), contexts: vec![plain()], ..Default::default() }
+        DecisionRequest { state: json!("git push"), spec_id: Some(spec_id()), contexts: vec![chat()], ..Default::default() }
     }
 
     fn param(r: DecisionRequest) -> String {
@@ -410,22 +412,22 @@ mod tests {
         assert_eq!(param(DecisionRequest { spec_id: None, questions: Some(Map::new()), ask: Some(vec![]), ..req() }), "ask and options apply to a spec, not inline questions");
         assert_eq!(param(DecisionRequest { state: json!(3), ..req() }), "state");
         assert_eq!(param(DecisionRequest { timeout_ms: Some(0), ..req() }), "timeout_ms");
-        assert_eq!(param(DecisionRequest { contexts: vec![plain(); 9], ..req() }), "contexts");
+        assert_eq!(param(DecisionRequest { contexts: vec![chat(); 9], ..req() }), "contexts");
         assert_eq!(param(DecisionRequest { contexts: vec![Context::default()], ..req() }), "contexts");
-        DecisionRequest { contexts: vec![plain(); 8], ..req() }.validate().unwrap();
+        DecisionRequest { contexts: vec![chat(); 8], ..req() }.validate().unwrap();
     }
 
     #[test]
     fn queue_contexts_all_end_with_their_call_or_none_do() {
-        DecisionRequest { contexts: vec![queued(), queued()], ..req() }.validate().unwrap();
-        assert_eq!(param(DecisionRequest { contexts: vec![queued(), plain()], ..req() }), "contexts");
-        assert!(queue_call(&queued()).is_some() && queue_call(&plain()).is_none());
+        DecisionRequest { contexts: vec![queue_context(), queue_context()], ..req() }.validate().unwrap();
+        assert_eq!(param(DecisionRequest { contexts: vec![queue_context(), chat()], ..req() }), "contexts");
+        assert!(queue_call(&queue_context()).is_some() && queue_call(&chat()).is_none());
     }
 
     #[test]
     fn given_weights_need_one_good_value_per_read() {
         let given = |values: Option<Vec<f64>>, n: usize| DecisionRequest {
-            contexts: vec![plain(); n],
+            contexts: vec![chat(); n],
             pool: Some(Pool { weights: Some(PoolWeights::Given), values, ..Default::default() }),
             ..req()
         };
@@ -453,7 +455,7 @@ mod tests {
 
     #[test]
     fn the_queue_schema_names_each_asked_questions_letters() {
-        let c = queued();
+        let c = queue_context();
         check_queue_schema(&c, &[("verdict", 2)]).unwrap();
         let e = check_queue_schema(&c, &[("verdict", 3)]).unwrap_err();
         assert_eq!(e.message, "the queue tool's answers.verdict is not an enum of A, B, C");

@@ -1,4 +1,4 @@
-//! `POST /council/v2/reads`: raw next-token letters after a suffix.
+//! `POST /council/v2/reads`: raw reads, letter log probabilities after a suffix.
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ pub const MAX_CONTEXTS: usize = 8;
 #[serde(deny_unknown_fields)]
 pub struct ReadsRequest {
     pub contexts: Vec<Context>,
-    /// The client's own structure: special-token text tokenizes as single ids.
+    /// Text the client formats itself; special-token text in it becomes one token id each.
     pub suffixes: Vec<String>,
     pub letters: Vec<String>,
     /// How many of the most likely tokens each read reports.
@@ -72,7 +72,7 @@ pub struct RawRead {
     pub top: Vec<TopToken>,
 }
 
-/// The reply to `POST /council/v2/reads`: one read per context and suffix, context-major.
+/// The response to `POST /council/v2/reads`: one read per context and suffix, context-major.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReadsResponse {
     pub reads: Vec<RawRead>,
@@ -115,7 +115,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reply_keeps_letter_order_and_the_token_ids() {
+    fn a_response_keeps_letter_order_and_the_token_ids() {
         let r: ReadsResponse = serde_json::from_value(json!({"reads": [{"context": 0, "snapshot": format!("snap:{}", "0".repeat(64)), "suffix": 1,
             "logprobs": {"B": -1.0, "A": -2.0}, "mass": -0.7, "top": [{"token": "A", "id": 65, "logprob": -2.0}]}], "signals": {"control_text": []}})).unwrap();
         assert_eq!(r.reads[0].logprobs.keys().collect::<Vec<_>>(), ["B", "A"]);

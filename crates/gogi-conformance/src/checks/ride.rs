@@ -8,18 +8,18 @@ use crate::Suite;
 impl Suite {
     pub(crate) fn ride(&mut self) {
         if !self.has(Capability::Ride) {
-            self.r.skip("riding decisions", "the server does not list ride");
+            self.r.skip("riding decisions", "the server does not declare the ride capability");
             return;
         }
         let Some(spec_id) = self.hold_gate("ride") else { return };
         let ctx = self.ctx(self.opening("ride"));
-        let plain = json!({"context": ctx, "max_tokens": 200, "sample": {"temperature": 0}});
-        let mut rode = plain.clone();
+        let bare = json!({"context": ctx, "max_tokens": 200, "sample": {"temperature": 0}});
+        let mut rode = bare.clone();
         rode["decisions"] = json!([{"spec_id": spec_id, "when": "before"}, {"spec_id": spec_id, "when": "after", "ask": ["verdict"]}]);
-        let Some(p) = self.expect("a plain generation answers", "POST", "/council/v2/generations", Some(plain.clone()), 200) else { return };
-        let Some(g) = self.expect("a generation with riding decisions answers", "POST", "/council/v2/generations", Some(rode), 200) else { return };
+        let Some(p) = self.expect("a generation without decisions succeeds", "POST", "/council/v2/generations", Some(bare.clone()), 200) else { return };
+        let Some(g) = self.expect("a generation with riding decisions succeeds", "POST", "/council/v2/generations", Some(rode), 200) else { return };
         let reply = |v: &Value| (v["content"].clone(), v["reasoning"].clone(), calls(&v["tool_calls"]));
-        self.r.check("riding decisions leave the reply as it was", reply(&p) == reply(&g), (reply(&p), reply(&g)));
+        self.r.check("riding decisions do not change the reply", reply(&p) == reply(&g), (reply(&p), reply(&g)));
         let d = g["decisions"].as_array().cloned().unwrap_or_default();
         self.r.check("each riding decision answers, in request order", d.len() == 2 && d[0]["when"] == json!("before") && d[1]["when"] == json!("after") && d.iter().all(|x| x["spec_id"] == json!(spec_id)), &g["decisions"]);
         if d.len() == 2 {
@@ -30,12 +30,12 @@ impl Suite {
             self.r.check("riding answers are distributions with mass at most 0", answers.iter().all(|a| well_formed(a)), &answers);
             self.r.check("a riding choice names an option", ["allow", "ask", "report"].contains(&d[0]["answers"]["verdict"]["choice"].as_str().unwrap_or("")), &d[0]["answers"]["verdict"]);
         }
-        let mut bad = plain.clone();
+        let mut bad = bare.clone();
         bad["decisions"] = json!([{"spec_id": spec_id, "when": "never"}]);
         self.refused("a riding decision with an unknown when is refused", "POST", "/council/v2/generations", Some(bad), 400);
-        let mut gone = plain;
+        let mut gone = bare;
         gone["decisions"] = json!([{"spec_id": format!("sha256:{}", "0".repeat(64)), "when": "after"}]);
-        self.refused("a riding decision on a spec the server lacks is a 404", "POST", "/council/v2/generations", Some(gone), 404);
+        self.refused("a riding decision on a spec the server does not hold is a 404", "POST", "/council/v2/generations", Some(gone), 404);
     }
 }
 

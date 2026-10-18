@@ -53,7 +53,8 @@ pub struct GenerationRequest {
     pub decisions: Vec<RidingDecision>,
 }
 
-/// When a riding decision is asked: after the prompt, before the reply, or after the reply.
+/// When a riding decision is asked: `before`, after the context and before the reply, or `after`,
+/// after the reply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RideWhen {
@@ -61,7 +62,8 @@ pub enum RideWhen {
     After,
 }
 
-/// A held spec's questions, asked of the context in a late system turn during a generation.
+/// A held spec's questions, asked in a system message after the context or the reply during a
+/// generation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RidingDecision {
@@ -94,17 +96,17 @@ impl GenerationRequest {
 }
 
 /// A tool call the reply made. One that did not parse is kept as written, never repaired and
-/// never dropped. The server names each call with the `id` a later `tool` message answers.
+/// never dropped. The server names each call with the `id` a later `tool` message names.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ReplyToolCall {
     Parsed { id: String, name: String, arguments: Map<String, Value>, stats: Option<TokenStats> },
     Unparsed { id: String, name: Option<String>, raw: String, error: String, stats: Option<TokenStats> },
 }
 
-/// How the sampled tokens of one part of a reply looked to the model: their untempered log
-/// probabilities and the entropy, in nats, of each distribution they came from. Diagnostics:
-/// a server may compute them from logits whose last bits depend on how the prompt was fed, so
-/// they agree across replays within a small tolerance, not bit for bit.
+/// The model's untempered log probabilities for the sampled tokens of one part of a reply, and
+/// the entropy, in nats, of each distribution they came from. Diagnostics: a server may compute
+/// them from logits whose last bits depend on how the prompt was fed, so they agree across
+/// replays within 1e-6, not bit for bit.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TokenStats {
@@ -183,8 +185,8 @@ pub enum Finish {
     Cancelled,
 }
 
-/// A generation's token counts: `kept` came from held state, `fed` was prefilled now, and the
-/// two make `prompt`.
+/// A generation's token counts: `kept` came from held snapshots, `fed` is the prompt tokens this
+/// request ran, and the two make `prompt`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GenerationUsage {
     pub prompt: u64,
@@ -193,7 +195,8 @@ pub struct GenerationUsage {
     pub completion: u64,
 }
 
-/// The finished reply. The client appends it to its own messages for the next request.
+/// The response to a generation: the reply, its token counts, and the head after it. The client
+/// appends the reply to its context's messages for the next request.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GenerationDone {
     pub content: String,
@@ -207,7 +210,7 @@ pub struct GenerationDone {
     /// The snapshot after the reply when the server holds it, else `null`.
     #[serde(deserialize_with = "required_nullable")]
     pub head: Option<SnapshotId>,
-    /// The context's snapshots.
+    /// The snapshots of the context with the reply appended.
     pub snapshots: Vec<SnapshotInfo>,
     /// Absent when the server does not report them.
     #[serde(default)]

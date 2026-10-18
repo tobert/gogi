@@ -7,7 +7,7 @@ use crate::error::Invalid;
 use crate::ids::SnapshotId;
 use crate::required_nullable;
 
-/// The longest a pin lasts without a renewing `PUT`: a day.
+/// The longest a pin lasts without a renewing `PUT`: 86400 seconds.
 pub const PIN_TTL_MAX_S: u64 = 86_400;
 
 /// An owner is 1 to 128 printable characters without a slash.
@@ -23,7 +23,7 @@ pub fn validate_owner(owner: &str) -> Result<(), Invalid> {
     }
 }
 
-/// The body of `PUT /council/v2/pins/{owner}`: the owner's whole set, held for `ttl_s` seconds.
+/// The body of `PUT /council/v2/pins/{owner}`: the owner's whole set, kept for `ttl_s` seconds.
 /// Ids stay text: a pin on an id the server does not hold reports `held: false`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,22 +45,22 @@ impl PinsPut {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PinHeld {
     pub id: String,
-    /// `false`: the server does not hold the snapshot and the pin holds nothing.
+    /// `false`: the server does not hold the snapshot, so the pin keeps nothing.
     pub held: bool,
 }
 
-/// The reply to `PUT /council/v2/pins/{owner}`.
+/// The response to `PUT /council/v2/pins/{owner}`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PinsPutResult {
     pub owner: String,
     pub snapshots: Vec<PinHeld>,
-    /// `null` for an empty set, which holds nothing.
+    /// `null` for an empty set, which pins nothing.
     #[serde(deserialize_with = "required_nullable")]
     pub expires_in_s: Option<u64>,
 }
 
-/// The reply to `GET /council/v2/pins/{owner}`. The draft gives `snapshots` no shape: each
-/// entry is read as an id or as an object with an `id`.
+/// The response to `GET /council/v2/pins/{owner}`. `snapshots` lists ids; an object with an
+/// `id` is also accepted, as kaijutsu accepts it.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct PinSet {
     pub owner: String,
@@ -81,21 +81,21 @@ fn pinned_ids<'de, D: Deserializer<'de>>(de: D) -> Result<Vec<String>, D::Error>
 
 /// An owner that pins a snapshot, and the seconds its pins have left.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PinHolder {
+pub struct PinOwner {
     pub owner: String,
     pub expires_in_s: u64,
 }
 
-/// The reply to `GET /council/v2/snapshots/{id}`. `pins` names the owners that pin this
-/// snapshot, not the ones whose pins keep it as part of a chain.
+/// The response to `GET /council/v2/snapshots/{id}`. `pins` names the owners that pin this
+/// snapshot, not the owners whose pinned snapshots are built on it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SnapshotState {
+pub struct SnapshotDetail {
     pub id: SnapshotId,
     pub tokens: u64,
     pub tier: Tier,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes: Option<u64>,
-    pub pins: Vec<PinHolder>,
+    pub pins: Vec<PinOwner>,
 }
 
 #[cfg(test)]
@@ -131,13 +131,13 @@ mod tests {
     }
 
     #[test]
-    fn a_put_reply_decodes_with_held_flags_and_a_null_expiry() {
+    fn a_put_response_decodes_with_held_flags_and_a_null_expiry() {
         let r: PinsPutResult = serde_json::from_value(json!({"owner": "k", "snapshots": [{"id": "snap:x", "held": false}], "expires_in_s": null})).unwrap();
         assert_eq!((r.snapshots[0].held, r.expires_in_s), (false, None));
     }
 
     #[test]
-    fn a_get_reply_reads_ids_or_objects() {
+    fn a_get_response_accepts_ids_or_objects() {
         for snapshots in [json!(["snap:a"]), json!([{"id": "snap:a", "held": true}])] {
             let s: PinSet = serde_json::from_value(json!({"owner": "k", "snapshots": snapshots, "expires_in_s": 9})).unwrap();
             assert_eq!(s.snapshots, ["snap:a"]);

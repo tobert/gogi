@@ -48,7 +48,7 @@ pub struct Limits {
     pub decision_context_tokens: Option<u64>,
 }
 
-/// The reply to `GET /council/v2/identity`.
+/// The response to `GET /council/v2/identity`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerIdentity {
     pub model: String,

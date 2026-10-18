@@ -101,7 +101,7 @@ fn a_generation_replays_bit_for_bit_and_its_reply_extends_into_the_held_head() {
 fn a_stream_sends_token_events_then_done_with_the_same_reply() {
     let s = Server::start(Config::default()).unwrap();
     let mut body = json!({"context": ctx(json!([{"role": "user", "content": "hi"}])), "max_tokens": 12, "sample": {"temperature": 0}});
-    let (_, plain) = post(&s, "/council/v2/generations", body.clone());
+    let (_, unstreamed) = post(&s, "/council/v2/generations", body.clone());
     body["stream"] = json!(true);
     let addr = s.url().trim_start_matches("http://").to_string();
     let mut c = TcpStream::connect(addr).unwrap();
@@ -111,9 +111,9 @@ fn a_stream_sends_token_events_then_done_with_the_same_reply() {
     c.read_to_string(&mut raw).unwrap();
     let events: Vec<&str> = raw.lines().filter_map(|l| l.strip_prefix("event: ")).collect();
     assert_eq!(*events.last().unwrap(), "done");
-    assert_eq!(events.iter().filter(|e| **e == "token").count() as u64, plain["usage"]["completion"].as_u64().unwrap());
+    assert_eq!(events.iter().filter(|e| **e == "token").count() as u64, unstreamed["usage"]["completion"].as_u64().unwrap());
     let done: Value = serde_json::from_str(raw.lines().rev().find_map(|l| l.strip_prefix("data: ")).unwrap()).unwrap();
-    assert_eq!(done["content"], plain["content"]);
+    assert_eq!(done["content"], unstreamed["content"]);
 }
 
 #[test]

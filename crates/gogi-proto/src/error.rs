@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::SnapshotId;
 
-/// Why a request breaks the contract. A server answers it with a `400`.
+/// Why a request breaks the contract. A server responds with a `400`.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
 pub struct Invalid {
@@ -49,13 +49,13 @@ pub struct ErrorDetail {
     /// The request field or limit at fault.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub param: Option<String>,
-    /// For `snapshot_gone` and `head_mismatch`, the context's current head.
+    /// For `snapshot_gone` and `head_mismatch`, v1's errors: the context record's current head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<SnapshotId>,
     /// For `context_full`: the prompt's tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_tokens: Option<u64>,
-    /// For `context_full`: the most tokens a context holds.
+    /// For `context_full`: `limits.context_tokens`, the most tokens a prompt may have.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_tokens: Option<u64>,
 }

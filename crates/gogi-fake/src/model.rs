@@ -20,10 +20,10 @@
 //! is never rendered.
 //!
 //! The thinking rule: an assistant message without tool calls loses its reasoning once a later
-//! user message follows. A message with tool calls keeps it. So a marked boundary on a text
-//! answer with reasoning stops being a boundary when a user message is added after it.
+//! user message follows. A message with tool calls keeps it. So a marked assistant message with
+//! reasoning and no tool calls stops being a boundary when a user message is added after it.
 //!
-//! The model: its state after a token prefix is a hash folded over the tokens, and the logits
+//! The model: its model state after a token prefix is a hash folded over the tokens, and the logits
 //! are a deterministic function of that hash. The same prefix gives the same bits.
 
 use gogi_proto::message::{Message, Role};
@@ -207,7 +207,7 @@ fn mix(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// The model's state after a token prefix.
+/// The model state after a token prefix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct State(u64);
 
@@ -269,12 +269,12 @@ mod tests {
     }
 
     #[test]
-    fn a_text_answers_reasoning_drops_once_a_user_message_follows() {
+    fn reasoning_without_tool_calls_drops_once_a_user_message_follows() {
         let m = [Message::user("u"), with_reasoning(Message::assistant("a")), Message::user("v")];
         let before = render(&[], true, &m[..2], false);
         let after = render(&[], true, &m, false);
-        assert_ne!(after.tokens[..before.end], before.tokens[..], "the rendering of the answer changed");
-        assert!(after.cuts.iter().all(|c| c.message != 1), "the marked answer is no longer a boundary: {:?}", after.cuts);
+        assert_ne!(after.tokens[..before.end], before.tokens[..], "the rendering of the assistant message changed");
+        assert!(after.cuts.iter().all(|c| c.message != 1), "the marked assistant message is no longer a boundary: {:?}", after.cuts);
         assert!(before.cuts.iter().any(|c| c.message == 1));
     }
 

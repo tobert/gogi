@@ -18,8 +18,8 @@ impl Suite {
 
     pub(crate) fn specs(&mut self) {
         let spec = self.gate_spec("specs");
-        let Some(a) = self.expect("spec post answers", "POST", "/council/v2/specs", Some(spec.clone()), 200) else { return };
-        let Some(held) = self.decode::<HeldSpec>("spec reply has the contract's fields", &a) else { return };
+        let Some(a) = self.expect("spec post succeeds", "POST", "/council/v2/specs", Some(spec.clone()), 200) else { return };
+        let Some(held) = self.decode::<HeldSpec>("spec response has the contract's fields", &a) else { return };
         let id = held.spec_id.to_string();
         self.r.check("a spec's id is the hash of its canonical JSON", spec_id_of(&spec).ok().as_deref() == Some(id.as_str()), (&id, spec_id_of(&spec)));
         self.r.check("a spec is returned as sent", a["spec"] == spec, &a["spec"]);
@@ -28,23 +28,23 @@ impl Suite {
         let mut members: Vec<(String, Value)> = spec.as_object().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         members.reverse();
         let reversed: Value = Value::Object(members.into_iter().collect());
-        if let Some(b) = self.expect("spec post in another member order answers", "POST", "/council/v2/specs", Some(reversed), 200) {
+        if let Some(b) = self.expect("spec post in another member order succeeds", "POST", "/council/v2/specs", Some(reversed), 200) {
             self.r.check("a spec is held by content, whatever the member order", b["spec_id"] == a["spec_id"], (&a["spec_id"], &b["spec_id"]));
         }
         let mut other = spec.clone();
         other["instructions"] = json!("Judge it differently.");
-        if let Some(c) = self.expect("a different spec answers", "POST", "/council/v2/specs", Some(other.clone()), 200) {
+        if let Some(c) = self.expect("a different spec succeeds", "POST", "/council/v2/specs", Some(other.clone()), 200) {
             self.r.check("different content is a different spec", c["spec_id"] != a["spec_id"] && c["spec_id"] == json!(spec_id_of(&other).unwrap_or_default()), &c["spec_id"]);
             if let Some(id) = c["spec_id"].as_str() {
                 self.expect("a spec deletes", "DELETE", &format!("/council/v2/specs/{}", id), None, 204);
                 self.refused("a deleted spec is a 404", "GET", &format!("/council/v2/specs/{}", id), None, 404);
             }
         }
-        if let Some(g) = self.expect("spec get answers", "GET", &format!("/council/v2/specs/{}", id), None, 200) {
-            self.r.check("a held spec reads back", g["spec_id"] == a["spec_id"] && g["spec"] == spec, &g);
+        if let Some(g) = self.expect("spec get succeeds", "GET", &format!("/council/v2/specs/{}", id), None, 200) {
+            self.r.check("GET returns a held spec as posted", g["spec_id"] == a["spec_id"] && g["spec"] == spec, &g);
         }
-        if let Some(l) = self.expect("spec list answers", "GET", "/council/v2/specs", None, 200) {
-            self.r.check("the list holds the spec", l["specs"].as_array().is_some_and(|s| s.iter().any(|x| x["spec_id"] == a["spec_id"])), "not listed");
+        if let Some(l) = self.expect("spec list succeeds", "GET", "/council/v2/specs", None, 200) {
+            self.r.check("the spec list includes the spec", l["specs"].as_array().is_some_and(|s| s.iter().any(|x| x["spec_id"] == a["spec_id"])), "not listed");
         }
         for (name, edit) in [
             ("a spec with an unknown member", json!({"extra": 1})),
@@ -62,10 +62,10 @@ impl Suite {
         self.expect("spec cleanup", "DELETE", &format!("/council/v2/specs/{}", id), None, 204);
     }
 
-    /// Posts the gate spec and returns its id.
+    /// Posts the suite's spec (`verdict`, `undo`, `risky`) and returns its id.
     pub(crate) fn hold_gate(&mut self, label: &str) -> Option<String> {
         let spec = self.gate_spec(label);
-        let a = self.expect("spec post answers", "POST", "/council/v2/specs", Some(spec), 200)?;
+        let a = self.expect("spec post succeeds", "POST", "/council/v2/specs", Some(spec), 200)?;
         a["spec_id"].as_str().map(String::from)
     }
 
@@ -75,8 +75,8 @@ impl Suite {
         let other = vec![json!({"role": "system", "content": format!("You are a careful reviewer ({}).", self.nonce)}), json!({"role": "user", "content": "Never push to a shared remote.", "snap": true})];
         let (c0, c1) = (self.ctx(msgs), self.ctx(other));
         let req = json!({"spec_id": spec_id, "state": "git push origin main", "contexts": [c0, c1], "pool": {"method": "loglinear", "weights": "mass"}});
-        let Some(d) = self.expect("decision answers", "POST", "/council/v2/decisions", Some(req.clone()), 200) else { return };
-        let Some(resp) = self.decode::<DecisionResponse>("decision reply has the contract's fields", &d) else { return };
+        let Some(d) = self.expect("decision succeeds", "POST", "/council/v2/decisions", Some(req.clone()), 200) else { return };
+        let Some(resp) = self.decode::<DecisionResponse>("decision response has the contract's fields", &d) else { return };
         let Ok(parsed) = serde_json::from_value::<DecisionRequest>(req.clone()) else { return };
         let verified = math::verify(&resp, &parsed.expect());
         self.r.check("decision numbers obey the exact relations", verified.is_ok(), verified.as_ref().err().map(|m| m.to_string()));
@@ -94,20 +94,20 @@ impl Suite {
         // Replay is bit for bit, whatever ran between.
         let g = self.ctx(vec![json!({"role": "system", "content": format!("Unrelated {}.", self.nonce)}), json!({"role": "user", "content": "Say hi.", "snap": true})]);
         if self.has(gogi_proto::identity::Capability::Generate) {
-            self.generate("an unrelated generation answers", &g, 8);
+            self.generate("an unrelated generation succeeds", &g, 8);
         }
-        if let Some(d2) = self.expect("decision again answers", "POST", "/council/v2/decisions", Some(req.clone()), 200) {
+        if let Some(d2) = self.expect("decision again succeeds", "POST", "/council/v2/decisions", Some(req.clone()), 200) {
             let same = (0..2).all(|i| d["reads"][i]["answers"] == d2["reads"][i]["answers"] && d["reads"][i]["snapshot"] == d2["reads"][i]["snapshot"]);
             self.r.check("a decision replays bit for bit", same && d["answers"] == d2["answers"], "the reads or pooled answers changed");
         }
 
         // Without a context, one read with no context.
-        let plain = json!({"spec_id": spec_id, "state": {"command": "ls", "cwd": "/tmp"}});
-        if let Some(p) = self.expect("a decision with no context answers", "POST", "/council/v2/decisions", Some(plain.clone()), 200) {
+        let none = json!({"spec_id": spec_id, "state": {"command": "ls", "cwd": "/tmp"}});
+        if let Some(p) = self.expect("a decision with no context succeeds", "POST", "/council/v2/decisions", Some(none.clone()), 200) {
             self.r.check("a decision with no context has one read with context null", p["reads"].as_array().is_some_and(|r| r.len() == 1 && r[0]["context"].is_null()), &p["reads"]);
-            if let (Some(resp), Ok(req)) = (self.decode::<DecisionResponse>("a plain decision decodes", &p), serde_json::from_value::<DecisionRequest>(plain)) {
+            if let (Some(resp), Ok(req)) = (self.decode::<DecisionResponse>("a decision with no context decodes", &p), serde_json::from_value::<DecisionRequest>(none)) {
                 let v = math::verify(&resp, &req.expect());
-                self.r.check("a plain decision obeys the exact relations", v.is_ok(), v.err().map(|m| m.to_string()));
+                self.r.check("a decision with no context obeys the exact relations", v.is_ok(), v.err().map(|m| m.to_string()));
             }
             self.r.check("one read has no leave_one_out", p["answers"]["verdict"].get("leave_one_out").is_none(), &p["answers"]["verdict"]);
         }
@@ -115,9 +115,9 @@ impl Suite {
         // ask and options narrow.
         let ctx0 = self.ctx(self.opening("decision"));
         let narrow = json!({"spec_id": spec_id, "state": "ls", "contexts": [ctx0], "ask": ["verdict"], "options": {"verdict": ["ask", "allow"]}});
-        if let Some(n) = self.expect("a narrowed decision answers", "POST", "/council/v2/decisions", Some(narrow.clone()), 200) {
+        if let Some(n) = self.expect("a narrowed decision succeeds", "POST", "/council/v2/decisions", Some(narrow.clone()), 200) {
             let keys: Vec<&str> = n["answers"]["verdict"]["probabilities"].as_object().map(|m| m.keys().map(String::as_str).collect()).unwrap_or_default();
-            self.r.check("ask limits the questions and options the choices", n["answers"].as_object().is_some_and(|a| a.len() == 1) && keys.len() == 2 && keys.contains(&"ask") && keys.contains(&"allow"), &n["answers"]);
+            self.r.check("ask limits the questions, and options limits a choice's options", n["answers"].as_object().is_some_and(|a| a.len() == 1) && keys.len() == 2 && keys.contains(&"ask") && keys.contains(&"allow"), &n["answers"]);
             if let (Some(resp), Ok(req)) = (self.decode::<DecisionResponse>("a narrowed decision decodes", &n), serde_json::from_value::<DecisionRequest>(narrow)) {
                 let v = math::verify(&resp, &req.expect());
                 self.r.check("a narrowed decision obeys the exact relations", v.is_ok(), v.err().map(|m| m.to_string()));
@@ -126,7 +126,7 @@ impl Suite {
 
         // Inline questions.
         let inline = json!({"questions": {"verdict": {"type": "choice", "instructions": "Fine to run?", "criteria": {"yes": "routine", "no": "not routine"}}}, "state": "ls"});
-        if let Some(i) = self.expect("an inline-question decision answers", "POST", "/council/v2/decisions", Some(inline), 200) {
+        if let Some(i) = self.expect("an inline-question decision succeeds", "POST", "/council/v2/decisions", Some(inline), 200) {
             self.r.check("inline questions answer in the order listed", i["answers"]["verdict"]["probabilities"].as_object().is_some_and(|m| m.keys().collect::<Vec<_>>() == ["yes", "no"]), &i["answers"]);
         }
 
@@ -156,14 +156,14 @@ impl Suite {
         if !self.has(gogi_proto::identity::Capability::Think) {
             self.refused("think above 0 tokens needs the think capability", "POST", "/council/v2/decisions", Some(json!({"spec_id": spec_id, "state": "x", "think": {"tokens": 8}})), 400);
         }
-        if let Some(t) = self.send("think 0 answers", "POST", "/council/v2/decisions", Some(json!({"spec_id": spec_id, "state": "x", "think": {"tokens": 0}}))) {
-            self.r.check("think with 0 tokens closes the thought", t.0 == 200, t);
+        if let Some(t) = self.send("think 0 succeeds", "POST", "/council/v2/decisions", Some(json!({"spec_id": spec_id, "state": "x", "think": {"tokens": 0}}))) {
+            self.r.check("think with 0 tokens needs no think capability", t.0 == 200, t);
         }
 
         // given weights.
         let (c0, c1) = (self.ctx(self.opening("decision")), self.ctx(vec![json!({"role": "user", "content": "Be brief.", "snap": true})]));
         let given = json!({"spec_id": spec_id, "state": "ls", "contexts": [c0, c1], "pool": {"method": "linear", "weights": "given", "values": [3.0, 1.0]}});
-        if let Some(gv) = self.expect("a decision with given weights answers", "POST", "/council/v2/decisions", Some(given.clone()), 200) {
+        if let Some(gv) = self.expect("a decision with given weights succeeds", "POST", "/council/v2/decisions", Some(given.clone()), 200) {
             if let (Some(resp), Ok(req)) = (self.decode::<DecisionResponse>("a given-weight decision decodes", &gv), serde_json::from_value::<DecisionRequest>(given)) {
                 let v = math::verify(&resp, &req.expect());
                 self.r.check("given weights are normalized and pooled in request order", v.is_ok() && gv["pool"]["normalized"]["verdict"] == json!([0.75, 0.25]), v.err().map(|m| m.to_string()));
@@ -189,12 +189,12 @@ impl Suite {
         };
         let good = queue_ctx(self, &["A", "B", "C"]);
         let req = json!({"spec_id": spec_id, "state": "rm -rf build", "contexts": [good.clone()]});
-        let Some((status, d)) = self.send("a queue decision answers", "POST", "/council/v2/decisions", Some(req.clone())) else { return };
+        let Some((status, d)) = self.send("a queue decision succeeds", "POST", "/council/v2/decisions", Some(req.clone())) else { return };
         if status == 400 && d["error"]["param"] == json!("queue") {
             self.r.skip("queue decisions", format!("the server does not deliver a case through a queue tool: {}", d["error"]["message"]));
             return;
         }
-        self.r.check("a queue decision answers", status == 200, (status, &d));
+        self.r.check("a queue decision succeeds", status == 200, (status, &d));
         if status != 200 {
             return;
         }
@@ -202,13 +202,13 @@ impl Suite {
             let v = math::verify(&resp, &parsed.expect());
             self.r.check("a queue decision obeys the exact relations", v.is_ok(), v.err().map(|m| m.to_string()));
         }
-        let (_, again) = self.send("a queue decision again answers", "POST", "/council/v2/decisions", Some(req)).unwrap_or((0, Value::Null));
+        let (_, again) = self.send("a queue decision again succeeds", "POST", "/council/v2/decisions", Some(req)).unwrap_or((0, Value::Null));
         self.r.check("a queue decision replays bit for bit", again["reads"][0]["answers"] == d["reads"][0]["answers"], &again["reads"]);
         let wrong = queue_ctx(self, &["A", "B"]);
         if let Some(e) = self.refused("a queue tool whose answers schema is wrong is refused", "POST", "/council/v2/decisions", Some(json!({"spec_id": spec_id, "state": "x", "contexts": [wrong]})), 400) {
-            self.r.check("the queue error names queue", e["error"]["param"] == json!("queue"), &e);
+            self.r.check("the error's param is queue", e["error"]["param"] == json!("queue"), &e);
         }
-        let plain = self.ctx(self.opening("decision"));
-        self.refused("contexts that mix queue and plain are refused", "POST", "/council/v2/decisions", Some(json!({"spec_id": spec_id, "state": "x", "contexts": [good, plain]})), 400);
+        let other = self.ctx(self.opening("decision"));
+        self.refused("a decision that mixes queue contexts and other contexts is refused", "POST", "/council/v2/decisions", Some(json!({"spec_id": spec_id, "state": "x", "contexts": [good, other]})), 400);
     }
 }

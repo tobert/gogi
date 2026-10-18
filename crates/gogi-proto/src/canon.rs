@@ -1,6 +1,6 @@
 //! RFC 8785 canonical JSON and spec ids.
 //!
-//! A spec holds integers only: a number must be an integer below 2^53 in magnitude, because
+//! A spec contains only integers: a number must be an integer below 2^53 in magnitude, because
 //! writing any other number canonically needs ES6 number formatting.
 
 use serde_json::Value;
@@ -86,7 +86,7 @@ mod tests {
     use serde_json::json;
 
     const FIXTURE: &str = include_str!("../tests/fixtures/spec.json");
-    /// The id kaijutsu's client holds for the same file (`DOC_SPEC_ID`).
+    /// kaijutsu's id for the same file (`DOC_SPEC_ID`).
     const FIXTURE_ID: &str = "sha256:5114ff063b887c710333afd4fe35238c55946ac2a63fb76d6c9004b56a1503ea";
 
     fn canon(v: &Value) -> String {

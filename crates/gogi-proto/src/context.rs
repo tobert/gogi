@@ -1,4 +1,4 @@
-//! A context as a request carries it, and the reply to building one.
+//! A context as a request carries it, and the response to building one.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,7 +13,7 @@ use crate::required_nullable;
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Context {
-    /// Absent: the server's default.
+    /// Absent: the server's default. mkviolet's is `true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -38,7 +38,7 @@ impl Context {
         Ok(())
     }
 
-    /// Whether the model thinks: on unless the context says otherwise.
+    /// Whether the model thinks, taking an absent `thinking` as `true`, mkviolet's default.
     pub fn thinks(&self) -> bool {
         self.thinking.unwrap_or(true)
     }
@@ -58,7 +58,7 @@ pub struct ContextBuild {
     pub dry_run: Option<bool>,
 }
 
-/// Where a snapshot's state lives.
+/// Where a snapshot's model state is stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Tier {
@@ -74,7 +74,7 @@ pub enum Tier {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotInfo {
     pub id: SnapshotId,
-    /// The index of the message whose end it holds, the system message counted.
+    /// The index of the message the boundary ends, counting from the first message as 0.
     pub message: u64,
     pub tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,7 +83,7 @@ pub struct SnapshotInfo {
     pub bytes: Option<u64>,
 }
 
-/// The reply to `POST /council/v2/contexts`.
+/// The response to `POST /council/v2/contexts`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextBuilt {
     /// The snapshot at the context's end.
@@ -91,7 +91,7 @@ pub struct ContextBuilt {
     pub tokens: u64,
     /// Tokens not fed.
     pub kept: u64,
-    /// Tokens fed now, or that would be under `dry_run`.
+    /// Tokens this request feeds, or would feed under `dry_run`.
     pub fed: u64,
     /// The snapshot the build started from, or `null`.
     #[serde(deserialize_with = "required_nullable")]
@@ -153,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn a_build_reply_round_trips_and_needs_from() {
+    fn a_build_response_round_trips_and_needs_from() {
         let v = json!({"head": snap("51d0"), "tokens": 1840, "kept": 0, "fed": 1840, "from": null, "dry_run": false,
             "snapshots": [{"id": snap("9a1e"), "message": 1, "tokens": 412, "tier": "host"}, {"id": snap("51d0"), "message": 4, "tokens": 1840, "tier": "host"}]});
         let r: ContextBuilt = serde_json::from_value(v.clone()).unwrap();

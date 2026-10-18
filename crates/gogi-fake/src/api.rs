@@ -57,7 +57,7 @@ fn invalid(e: gogi_proto::Invalid) -> Resp {
 fn context_full(prompt: usize, limit: usize) -> Resp {
     Resp::Json(
         413,
-        json!({"error": {"type": "context_full", "message": format!("the prompt takes {} of the {} tokens a context holds", prompt, limit),
+        json!({"error": {"type": "context_full", "message": format!("the prompt is {} tokens; context_tokens is {}", prompt, limit),
                          "prompt_tokens": prompt, "context_tokens": limit}}),
     )
 }
@@ -185,8 +185,8 @@ impl Built {
     }
 }
 
-/// Renders a context and builds it: starts from the longest boundary held, and holds each
-/// boundary and the end unless `dry_run`.
+/// Renders a context and builds it: starts from the longest held snapshot whose tokens begin it,
+/// and holds a snapshot at each boundary and at the end unless `dry_run`.
 fn build(store: &mut Store, c: &Context, dry_run: bool) -> Built {
     let r = model::render(&c.tools, c.thinks(), &c.messages, false);
     let mut counts = Vec::new();
@@ -255,7 +255,7 @@ fn pins_put(store: &mut Store, owner: &str, body: &[u8]) -> Resp {
     let held: Vec<bool> = req.snapshots.iter().map(|id| store.has(id)).collect();
     let ids: Vec<String> = req.snapshots.iter().zip(&held).filter(|(_, h)| **h).map(|(i, _)| i.clone()).collect();
     if store.bytes_of_closure(&ids) > store.cfg.pin_bytes {
-        return err(413, "too_large", "these pins hold more than pin_bytes", Some("pin_bytes"));
+        return err(413, "too_large", "the snapshots these pins keep are over pin_bytes", Some("pin_bytes"));
     }
     let snapshots: Vec<Value> = req.snapshots.iter().zip(&held).map(|(id, h)| json!({"id": id, "held": h})).collect();
     let expires_in = if ids.is_empty() {
@@ -575,19 +575,19 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
         idx.sort();
         chosen[qi] = idx;
     }
-    let state_text = match &req.state {
+    let case_text = match &req.state {
         Value::String(s) => s.clone(),
         other => other.to_string(),
     };
-    if state_text.len() > 65536 {
-        return err(413, "too_large", "state is past the limit", Some("state_bytes"));
+    if case_text.len() > 65536 {
+        return err(413, "too_large", "the case (state) is over state_bytes, 65536 bytes", Some("state_bytes"));
     }
     let pool = req.pool.clone().unwrap_or_default();
     let method = pool.method.unwrap_or(PoolMethod::Linear);
     let weights_kind = pool.weights.unwrap_or(PoolWeights::Uniform);
     let ask = Asked { questions: &questions, asked, chosen };
     let mut control: Vec<Value> = Vec::new();
-    for (where_, text) in [("state", state_text.as_str()), ("spec", instructions.as_str())] {
+    for (where_, text) in [("state", case_text.as_str()), ("spec", instructions.as_str())] {
         control.extend(model::control_hits(text).into_iter().map(|t| json!({"where": where_, "token": t})));
     }
 
@@ -622,10 +622,10 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
                 return invalid(e);
             }
             let mut messages = c.messages.clone();
-            messages.push(Message::tool(call_id, state_text.clone()));
-            let case = model::render(&c.tools, c.thinks(), &messages, true).tokens;
-            input_tokens = case.len().saturating_sub(base_tokens.len());
-            let mut toks = case;
+            messages.push(Message::tool(call_id, case_text.clone()));
+            let prompt = model::render(&c.tools, c.thinks(), &messages, true).tokens;
+            input_tokens = prompt.len().saturating_sub(base_tokens.len());
+            let mut toks = prompt;
             model::push_text(&mut toks, &format!("call:{}{{answers:{{", c.queue.as_deref().unwrap_or("")));
             for &qi in &sorted {
                 let q = &ask.questions[qi];
@@ -639,12 +639,12 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
             rendered = sha256_hex(toks.iter().flat_map(|t| t.to_le_bytes()).collect::<Vec<u8>>().as_slice());
             fed += toks.len() - base_tokens.len();
         } else {
-            let mut case = Vec::new();
-            model::push_text(&mut case, &format!("{}\n{}: {}", instructions, label, state_text));
-            input_tokens = case.len();
+            let mut spec_and_case = Vec::new();
+            model::push_text(&mut spec_and_case, &format!("{}\n{}: {}", instructions, label, case_text));
+            input_tokens = spec_and_case.len();
             let mut text_all = base_tokens.clone();
             text_all.push(model::USER);
-            text_all.extend(&case);
+            text_all.extend(&spec_and_case);
             text_all.extend([model::END, model::ASST]);
             for &qi in &ask.asked {
                 let q = &ask.questions[qi];

@@ -49,7 +49,7 @@ pub struct Message {
     pub reasoning: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
-    /// A `tool` message names the call it answers.
+    /// A `tool` message names the call whose result it gives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -73,7 +73,7 @@ impl Message {
         Self::text(Role::Assistant, content)
     }
 
-    /// A tool result answering the call `call_id`.
+    /// The result of the call `call_id`.
     pub fn tool(call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Message { tool_call_id: Some(call_id.into()), ..Self::text(Role::Tool, content) }
     }
@@ -90,10 +90,10 @@ pub fn is_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control)
 }
 
-/// Checks the rules for messages, and that each tool message answers a call of the assistant
-/// message before its run of tool messages. `messages` follow `before`, the context's own when a
-/// generation appends them. A system message after the first is system text at that point in
-/// the conversation.
+/// Checks the rules for messages, and that each tool message names a call of the assistant
+/// message before its run of tool messages. `before` is the messages that precede `messages`,
+/// such as a context's messages when checking a generation's reply. A system message after the
+/// first is system text at that point in the context.
 pub fn validate(before: &[Message], messages: &[Message]) -> Result<(), Invalid> {
     let mut calls: Vec<&str> =
         before.iter().rev().find(|m| m.role == Role::Assistant).map(|m| m.tool_calls.iter().map(|c| c.id.as_str()).collect()).unwrap_or_default();
@@ -111,10 +111,10 @@ pub fn validate(before: &[Message], messages: &[Message]) -> Result<(), Invalid>
         match (m.role, &m.tool_call_id) {
             (Role::Tool, Some(id)) => {
                 if !matches!(prev_role, "assistant" | "tool") || !calls.contains(&id.as_str()) {
-                    return bad(&format!("tool_call_id {} answers no call of the assistant message before it", id));
+                    return bad(&format!("tool_call_id {} names no call of the assistant message before it", id));
                 }
             }
-            (Role::Tool, None) => return bad("a tool message names the tool_call_id it answers"),
+            (Role::Tool, None) => return bad("a tool message needs a tool_call_id"),
             (_, Some(_)) => return bad("only a tool message carries tool_call_id"),
             _ => {}
         }
@@ -148,13 +148,13 @@ mod tests {
         let ok = [Message::system("s"), Message::user("u"), asks(&["a", "b"]), Message::tool("a", "r"), Message::tool("b", "r")];
         validate(&[], &ok).unwrap();
         let wrong = [Message::user("u"), asks(&["a"]), Message::tool("z", "r")];
-        assert_eq!(refused(&[], &wrong), "messages[2]: tool_call_id z answers no call of the assistant message before it");
+        assert_eq!(refused(&[], &wrong), "messages[2]: tool_call_id z names no call of the assistant message before it");
     }
 
     #[test]
     fn a_tool_result_after_a_user_message_answers_nothing() {
         let m = [asks(&["a"]), Message::user("u"), Message::tool("a", "r")];
-        assert!(refused(&[], &m).starts_with("messages[2]: tool_call_id a answers no call"));
+        assert!(refused(&[], &m).starts_with("messages[2]: tool_call_id a names no call"));
     }
 
     #[test]
@@ -183,7 +183,7 @@ mod tests {
         let m = Message { tool_call_id: Some("a".into()), ..Message::user("u") };
         assert_eq!(refused(&[], &[m]), "messages[0]: only a tool message carries tool_call_id");
         let t = Message { tool_call_id: None, ..Message::tool("a", "r") };
-        assert_eq!(refused(&[], &[t]), "messages[0]: a tool message names the tool_call_id it answers");
+        assert_eq!(refused(&[], &[t]), "messages[0]: a tool message needs a tool_call_id");
     }
 
     #[test]

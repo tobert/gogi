@@ -13,11 +13,11 @@ impl Suite {
         let msgs = self.opening("generation");
         let ctx = self.ctx(msgs.clone());
         let Some(b) = self.build("build before a generation", &ctx, false) else { return };
-        let Some(g) = self.generate("generation answers", &ctx, 300) else { return };
-        let Some(done) = self.decode::<GenerationDone>("generation reply has the contract's fields", &g) else { return };
+        let Some(g) = self.generate("generation succeeds", &ctx, 300) else { return };
+        let Some(done) = self.decode::<GenerationDone>("generation response has the contract's fields", &g) else { return };
         let u = done.usage;
         self.r.check("generation: kept and fed make prompt", u.kept + u.fed == u.prompt && u.prompt > 0, &g["usage"]);
-        self.r.check("generation: completion is at most max_tokens, and equals it when the reply was cut", u.completion <= 300 && (g["finish"] != json!("length") || u.completion == 300), &g);
+        self.r.check("generation: completion is at most max_tokens, and equals it when finish is length", u.completion <= 300 && (g["finish"] != json!("length") || u.completion == 300), &g);
         self.r.check("generation reuses the build", u.kept >= num(&b["tokens"]) as u64, (&g["usage"], &b["tokens"]));
         let parts: Vec<&Value> = [&g["stats"]["reasoning"], &g["stats"]["content"]].into_iter().chain(g["tool_calls"].as_array().into_iter().flatten().map(|c| &c["stats"])).collect();
         if g.get("stats").is_some() {
@@ -33,7 +33,7 @@ impl Suite {
         self.r.check("every reply call has its own id", unique.len() == ids.len() && ids.iter().all(|i| !i.is_empty()), &ids);
         self.r.check("generation lists the context's snapshots", g["snapshots"].as_array().is_some_and(|s| !s.is_empty()), &g["snapshots"]);
 
-        // The reply, sent back, is the head the generation reported.
+        // The context with the reply appended builds to the head the generation reported.
         if g["head"].is_string() {
             let mut with_reply = msgs.clone();
             let cont = self.continue_after(&g, "unused");
@@ -44,41 +44,41 @@ impl Suite {
             }
         }
 
-        // The second turn starts from the held head.
+        // A reply and a new user message start from the held head.
         let mut m2 = msgs.clone();
         m2.extend(self.continue_after(&g, "Now list what is left."));
         let c2 = self.ctx(m2);
-        if let Some(g2) = self.generate("second turn answers", &c2, 200) {
+        if let Some(g2) = self.generate("a reply and a new user message succeed", &c2, 200) {
             let held = g["head"].is_string();
-            // A text answer's thinking may be dropped once a user message follows; then the
-            // held head is not a prefix of the next request.
+            // The reasoning of a reply without tool calls may be dropped once a user message
+            // follows; then the held head is not a prefix of the next request.
             let prefix = done.tool_calls.iter().any(|c| matches!(c, gogi_proto::generation::ReplyToolCall::Parsed { .. })) || g["reasoning"].as_str().is_none_or(str::is_empty);
             if prefix {
-                self.r.check("second turn starts from the held head", !held || num(&g2["usage"]["kept"]) >= head_tokens(&g), (&g2["usage"], &g["head"], &g["snapshots"]));
+                self.r.check("a reply and a new user message start from the held head", !held || num(&g2["usage"]["kept"]) >= head_tokens(&g), (&g2["usage"], &g["head"], &g["snapshots"]));
             } else {
-                self.r.skip("second turn starts from the held head", "the reply is a text answer with thinking, which the template may drop once a user message follows");
+                self.r.skip("a reply and a new user message start from the held head", "the reply has reasoning and no tool calls, and the template may drop that reasoning once a user message follows");
             }
         }
 
         // With thinking off a reply has no thinking to drop, so its head is a prefix of the next request.
         let mut quiet = ctx.clone();
         quiet["thinking"] = json!(false);
-        if let Some(q) = self.generate("generation with thinking off answers", &quiet, 100) {
+        if let Some(q) = self.generate("generation with thinking off succeeds", &quiet, 100) {
             if q["head"].is_string() && q["reasoning"].as_str().is_none_or(str::is_empty) {
                 let mut m3 = msgs.clone();
                 m3.extend(self.continue_after(&q, "Now list what is left."));
                 let mut c3 = self.ctx(m3);
                 c3["thinking"] = json!(false);
-                if let Some(q2) = self.generate("second turn with thinking off answers", &c3, 50) {
-                    self.r.check("with thinking off the second turn starts from the held head", num(&q2["usage"]["kept"]) >= head_tokens(&q), (&q2["usage"], &q["head"], &q["snapshots"]));
+                if let Some(q2) = self.generate("with thinking off, a reply and a new user message succeed", &c3, 50) {
+                    self.r.check("with thinking off, a reply and a new user message start from the held head", num(&q2["usage"]["kept"]) >= head_tokens(&q), (&q2["usage"], &q["head"], &q["snapshots"]));
                 }
             } else {
-                self.r.skip("with thinking off the second turn starts from the held head", "the server held no head, or still wrote thinking");
+                self.r.skip("with thinking off, a reply and a new user message start from the held head", "the server held no head, or still wrote thinking");
             }
         }
 
         // Greedy decoding replays.
-        if let Some(g3) = self.generate("greedy generation again answers", &ctx, 300) {
+        if let Some(g3) = self.generate("greedy generation again succeeds", &ctx, 300) {
             let same = ["content", "reasoning", "tool_calls", "finish"].iter().all(|k| g3[*k] == g[*k]);
             self.r.check("temperature 0 replays the reply", same, (&g3, &g));
         }
@@ -86,24 +86,24 @@ impl Suite {
         // A stream sends token events and ends with done.
         let body = json!({"context": ctx, "max_tokens": 300, "sample": {"temperature": 0}, "stream": true});
         match self.http.raw("POST", "/council/v2/generations", Some(&body)) {
-            Err(e) => self.r.fail("stream answers", e),
-            Ok(reply) => {
-                self.r.check("stream answers with an event stream", reply.status == 200 && reply.content_type.starts_with("text/event-stream"), (reply.status, &reply.content_type));
-                let events = sse_events(&reply.text);
+            Err(e) => self.r.fail("stream succeeds", e),
+            Ok(response) => {
+                self.r.check("stream returns an event stream", response.status == 200 && response.content_type.starts_with("text/event-stream"), (response.status, &response.content_type));
+                let events = sse_events(&response.text);
                 let last = events.last();
                 let tokens = events.iter().filter(|(n, _)| n == "token").count();
                 self.r.check("stream ends with done after only token events", last.is_some_and(|(n, _)| n == "done") && events.iter().all(|(n, _)| n == "token" || n == "done"), events.iter().map(|(n, _)| n.as_str()).take(5).collect::<Vec<_>>());
                 self.r.check("stream sends a token event for each token", tokens as u64 >= u.completion.min(1), (tokens, u.completion));
                 if let Some((_, d)) = last {
                     if self.decode::<GenerationDone>("stream done has the contract's fields", d).is_some() {
-                        self.r.check("stream done is the reply the plain call gave", ["content", "reasoning"].iter().all(|k| d[*k] == g[*k]) && without_stats(&d["tool_calls"]) == without_stats(&g["tool_calls"]), (d, &g));
-                        self.r.check("stream stats are the plain call's within 1e-6", stats_close(d, &g, 1e-6), (&d["stats"], &g["stats"]));
+                        self.r.check("the stream's done event equals the response without stream", ["content", "reasoning"].iter().all(|k| d[*k] == g[*k]) && without_stats(&d["tool_calls"]) == without_stats(&g["tool_calls"]), (d, &g));
+                        self.r.check("stream stats match the call without stream within 1e-6", stats_close(d, &g, 1e-6), (&d["stats"], &g["stats"]));
                     }
                 }
             }
         }
 
-        // A prompt with no room is a 413 before anything runs.
+        // A prompt over context_tokens is a 413 context_full, returned before anything runs.
         let limit = self.identity.as_ref().map_or(0, |i| i.limits.context_tokens) as usize;
         let filler = filler_text(limit * 6, &self.nonce);
         let big = self.ctx(vec![json!({"role": "user", "content": filler})]);
@@ -142,7 +142,7 @@ pub(crate) fn filler_text(n: usize, seed: &str) -> String {
 }
 
 /// The token count of the head a generation reported, from its `snapshots`; how many tokens the
-/// reply renders to is the server's, so it is read, not computed from `usage`.
+/// reply renders to is the server's, so it is taken from `snapshots`, not computed from `usage`.
 fn head_tokens(g: &Value) -> i64 {
     g["snapshots"].as_array().and_then(|s| s.iter().find(|x| x["id"] == g["head"])).map_or(i64::MAX, |x| num(&x["tokens"]))
 }

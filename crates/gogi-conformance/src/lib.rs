@@ -1,9 +1,9 @@
 //! A conformance suite for council v2 servers.
 //!
-//! The suite builds every context from the server's own replies and treats model-specific
-//! numbers as relations: it never assumes a template, a tokenizer, or a token count. It uses
-//! unique text on each run, so a server that already holds earlier runs' state is checked the
-//! same way as a fresh one.
+//! The suite extends contexts only with the server's own responses, such as a generation's reply
+//! with its call ids, and treats model-specific numbers as relations: it never assumes a
+//! template, a tokenizer, or a token count. It uses unique text on each run, so a server that
+//! already holds earlier runs' snapshots is checked the same way as a fresh one.
 
 mod checks;
 mod http;

@@ -36,8 +36,8 @@ fn a_restart_that_loses_state_fails_the_restart_checks() {
     let hook = server.clone();
     let r = run(Opts { url, restart: Some(Restart::Hook(Box::new(move || hook.lock().unwrap().restart()))) }, false);
     let failed = failures(&r);
-    assert!(failed.iter().any(|f| f.starts_with("restart: spec get answers")), "{failed:#?}");
-    assert!(failed.iter().any(|f| f.starts_with("restart: pins list answers")), "{failed:#?}");
+    assert!(failed.iter().any(|f| f.starts_with("restart: spec get succeeds")), "{failed:#?}");
+    assert!(failed.iter().any(|f| f.starts_with("restart: pins list succeeds")), "{failed:#?}");
 }
 
 #[test]

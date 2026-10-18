@@ -2,9 +2,9 @@
 //!
 //! It exists so a client has something to talk to in tests and so the conformance suite can be
 //! tested against a server whose behavior is known. It keeps the contract's semantics: snapshots
-//! at the boundaries the rendering keeps, longest-held-prefix starts, owned pins with a time,
-//! specs held by content, decisions, reads, and generations, with replay bit for bit. It is not
-//! a framework: nothing plugs into it.
+//! at the boundaries the rendering keeps, builds from the longest held snapshot, pins with an
+//! owner and a `ttl_s`, specs held by content, decisions, raw reads, and generations, with replay
+//! bit for bit. It is not a framework: nothing plugs into it.
 //!
 //! `docs/gogi-fake.md` documents the toy template.
 
@@ -51,13 +51,14 @@ impl Server {
         format!("http://{}", self.addr)
     }
 
-    /// Passes `secs` of pin time without waiting.
+    /// Advances the clock by `secs` seconds, so pins expire without waiting.
     pub fn advance_clock(&self, secs: u64) {
         self.store.lock().unwrap().skew += secs;
     }
 
-    /// Stops the server and starts a new one on the same address. Memory is lost; specs, pins,
-    /// and the snapshots pins keep come back from the state directory, when there is one.
+    /// Stops the server and starts a new one on the same address. Everything in memory is lost;
+    /// specs, pins, and the snapshots pins keep come back from the state directory, when there is
+    /// one.
     pub fn restart(&mut self) -> Result<(), String> {
         self.shutdown();
         let cfg = Config { addr: self.addr.to_string(), ..self.cfg.clone() };

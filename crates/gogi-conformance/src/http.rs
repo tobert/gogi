@@ -10,13 +10,13 @@ pub struct Http {
     agent: ureq::Agent,
 }
 
-pub struct Reply {
+pub struct Response {
     pub status: u16,
     pub content_type: String,
     pub text: String,
 }
 
-impl Reply {
+impl Response {
     pub fn json(&self) -> Value {
         serde_json::from_str(&self.text).unwrap_or(Value::Null)
     }
@@ -28,7 +28,7 @@ impl Http {
         Http { base: base.trim_end_matches('/').to_string(), agent }
     }
 
-    pub fn raw(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Reply, String> {
+    pub fn raw(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Response, String> {
         let req = self.agent.request(method, &format!("{}{}", self.base, path));
         let sent = match body {
             Some(b) => req.set("Content-Type", "application/json").send_string(&b.to_string()),
@@ -42,8 +42,8 @@ impl Http {
         let status = resp.status();
         let content_type = resp.header("content-type").unwrap_or("").to_string();
         let mut text = String::new();
-        resp.into_reader().read_to_string(&mut text).map_err(|e| format!("{} {}: reading the reply: {}", method, path, e))?;
-        Ok(Reply { status, content_type, text })
+        resp.into_reader().read_to_string(&mut text).map_err(|e| format!("{} {}: reading the response: {}", method, path, e))?;
+        Ok(Response { status, content_type, text })
     }
 
     pub fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value), String> {

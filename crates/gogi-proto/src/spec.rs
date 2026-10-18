@@ -1,4 +1,4 @@
-//! Specs: held question sets, content-addressed by their canonical JSON.
+//! Specs: held sets of questions, content-addressed by their canonical JSON.
 //!
 //! `parse_spec` accepts exactly what mkviolet accepts: unknown fields are refused, and a
 //! `text` question needs the `describe` capability.
@@ -78,12 +78,12 @@ impl Spec {
     }
 }
 
-/// The reply to `POST /council/v2/specs` and `GET /council/v2/specs/{id}`.
+/// The response to `POST /council/v2/specs` and `GET /council/v2/specs/{id}`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HeldSpec {
     pub spec_id: SpecId,
     pub spec: Value,
-    /// How the server compiles the spec; part of its identity.
+    /// The template the server renders the spec with; part of its identity.
     pub template: String,
 }
 
@@ -210,8 +210,9 @@ pub fn parse_spec(v: &Value, rules: &SpecRules) -> Result<Spec, Invalid> {
     Ok(Spec { value: v.clone(), name, instructions, input_label, questions })
 }
 
-/// Parses inline Decisions questions: `{id: {type, instructions, criteria}}`, a choice's
-/// criteria an object from option to meaning, read in the order listed. There is no `text`.
+/// Parses inline questions, sent in place of `spec_id`: `{id: {type, instructions, criteria}}`,
+/// a choice's criteria an object from option to meaning, in the order listed. There is no
+/// `text`.
 pub fn parse_inline(map: &Map<String, Value>, rules: &SpecRules) -> Result<Vec<Question>, Invalid> {
     let mut questions = Vec::new();
     for (id, v) in map {

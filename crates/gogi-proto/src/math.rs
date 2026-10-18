@@ -69,7 +69,7 @@ pub fn confidence(mass: f64, p: &[f64]) -> f64 {
     mass.exp() * p[argmax(p)]
 }
 
-/// One read's numbers for one question, in option order.
+/// One read's numbers for one question, in option order: a row of the matrix a pool combines.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
     /// `logprobs[o] - mass`.
@@ -529,7 +529,7 @@ mod tests {
 
     const REQUEST: &str = include_str!("../tests/fixtures/decision_request.json");
     const RESPONSE: &str = include_str!("../tests/fixtures/decision_response.json");
-    // Vectors below come from the megakernel's service/council.py answer() and
+    // Vectors below come from the HIP megakernel's service/council.py answer() and
     // pooled() on the same float32 letter logits.
     const R1: [f64; 3] = [-4.0, -0.25, -3.5];
     const R2: [f64; 3] = [-2.0, -1.5, -6.0];
