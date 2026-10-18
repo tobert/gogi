@@ -1,7 +1,8 @@
 # gogi-fake: the toy model
 
 `gogi-fake` serves council v2 over a model small enough to read in one sitting. Run it
-with `cargo run -p gogi-fake -- --listen 127.0.0.1:8091 [--state-dir DIR]`.
+with `cargo run -p gogi-fake -- --listen 127.0.0.1:8091 [--state-dir DIR]`, or from Python
+with `with gogi.FakeServer(state_dir=DIR) as fake:`, which serves at `fake.url`.
 
 ## Tokens
 
@@ -29,16 +30,16 @@ generation prompt   <asst> [<think>]
 - The thinking rule: an assistant message without tool calls loses its `reasoning` once a later
   user message follows. A message with tool calls keeps it.
 - A marked message is a boundary only when its own rendering is a prefix of the whole
-  context's. The context's end is always one. So a text answer with reasoning, marked `snap`,
-  stops being a boundary when a user message is added after it.
+  context's. The context's end is always one. So an assistant message with reasoning and no tool
+  calls, marked `snap`, stops being a boundary when a user message is added after it.
 
 ## Model
 
 The model's state after a token prefix is a hash folded over the tokens. The logits are a
 function of that hash, between -6 and 6, so the same prefix gives the same bits.
 
-- Reads and decisions read the logits of the letters `A`, `B`, ... after the context and the
-  suffix or question.
+- Raw reads and decisions read the logits of the letters `A`, `B`, ... after the context and
+  the suffix or the question.
 - A generation samples among the letters `a` to `z`, the space, and the end token. With
   thinking on it first writes its thought, ending at `<endthink>`. At temperature 0 it takes the
   largest logit. Without `sample.seed` the seed comes from the prompt, so a reply replays.
@@ -51,7 +52,7 @@ function of that hash, between -6 and 6, so the same prefix gives the same bits.
 - A build starts from the longest held snapshot whose tokens begin the context, and reports
   `kept`, `fed`, and `from`. A generation holds the head after its reply, so the next request
   starts there even though the reply is not marked `snap`.
-- Pins keep a snapshot and its parents. `pin_bytes` caps the rows they hold together.
+- Pins keep a snapshot and its parents. `pin_bytes` caps the bytes they keep together.
   `max_snapshots` drops the oldest unpinned snapshots first.
 - With `--state-dir`, specs, pins, and the snapshots pins keep survive a restart. Other
   snapshots do not.

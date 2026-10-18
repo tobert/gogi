@@ -1,11 +1,15 @@
 # Council API
 
-**Status: proposed.** Kaijutsu drafts this contract so that two decision
-servers, the megakernel (`/mk/v1`) and lfm2d (`/v1/opinion`), can converge on
-it. lfm2d is expected to own it once both implement it. The machine-readable
-contract is `docs/council-api.openapi.yaml` (OpenAPI 3.1); where this document
-and that file disagree, the file is wrong and gets fixed. Source material is
-in `docs/council-dossier.md`. Kaijutsu's own use is `docs/council.md`.
+**Status: replaced by `council-api-v2.md`.** v2 builds on this document and
+says where it differs, so this one stays as the reference for the parts v2
+keeps. It was written in kaijutsu so that two decision servers, the HIP
+megakernel (`/mk/v1`) and lfm2d (`/v1/opinion`), could converge on it. The
+machine-readable form is kaijutsu's `docs/council-api.openapi.yaml` (OpenAPI
+3.1), and kaijutsu's own use is its `docs/council.md`.
+
+The words here are v1's. A context is a record the server holds under an id
+the client chose, and a decision names contexts by id. In v2 the client sends
+each context whole and the server holds only snapshots and specs.
 
 A council reads one case after several held contexts and reports, for each
 context and pooled across them, a probability distribution over typed
@@ -19,7 +23,7 @@ Hold two contexts under ids the client chose:
 
 ```json
 PUT /council/v1/contexts/0199b3c4-6c1e-7a2b-9f00-3e5d1c2a7b11
-{"system": "You review actions a coding agent proposes. This context is Amy's own guidance.",
+{"system": "You review actions a coding agent proposes. This context is the user's own guidance.",
  "turns": [{"role": "user", "content": "Reading, searching, building and running tests are fine without asking."},
            {"role": "user", "content": "Ask me before posting anything to a repository we don't own.", "snap": true}]}
 -> {"id": "0199b3c4-…7b11", "head": "snap:51d0…", "tokens": 96, "kept": 0, "fed": 96, "dry_run": false,

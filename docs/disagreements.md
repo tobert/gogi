@@ -1,7 +1,7 @@
 # Where the implementations disagree
 
-Found by reading mkviolet (`src/held.rs`, `src/council.rs`, `src/council_server.rs`,
-`src/council_v2.rs`) and kaijutsu's `kaijutsu-mk` on the `council-v2` branch against the
+Found by reading mkviolet's `src/held.rs`, `src/council.rs`, `src/council_server.rs`, and
+`src/council_v2.rs`, and kaijutsu's `kaijutsu-mk` crate on its `council-v2` branch, against the
 drafts in this directory. `gogi-proto` follows mkviolet where the two differ and says so
 here. Each item is an observation from the code unless it says "inferred".
 
@@ -19,7 +19,7 @@ here. Each item is an observation from the code unless it says "inferred".
 | 10 | A decision with no `contexts` in v2 | Its one read names `context: 0` (inferred from `numbered: v2` in `respond`). | The verifier expects `context: null`, as v1 and the draft's "Unchanged from v1" say. | `null`. `gogi-conformance` fails mkviolet here if the inference holds. |
 | 11 | `context_full`'s `context_tokens` | The longest slot, one more than `limits.context_tokens` (inferred from `identity_v2` using `longest - 1`). | n/a | The suite allows a difference of 1 and names it in the check. |
 | 12 | A snapshot's `tokens` | Left out when the server cannot count them (`if let Some(n)`). | Required. | Required in `SnapshotState`. |
-| 13 | A pin set's `GET` | `snapshots` is a list of ids. | Accepts ids or objects with an `id`. | Accepts both. The draft gives no shape. |
+| 13 | A pin set's `GET` | `snapshots` is a list of ids. | Accepts ids or objects with an `id`. | Accepts both. The draft now says ids. |
 | 14 | An unknown `role` | `400` with a message naming the role. | Decode error. | Decode error; still a `400` on a server built on this crate, but the text differs from mkviolet's. |
 
 mkviolet has no verifier of the relations; `gogi-proto::math::verify` is kaijutsu's, ported, and
