@@ -18,12 +18,12 @@
    "agree": true,
    "spread": 0.3528092578379926,
    "leave_one_out": {
-    "0199b3c4-6c1e-7a2b-9f00-3e5d1c2a7b11": {
+    "0": {
      "0": 0.37494794181688146,
      "1": 0.6181846470787264,
      "2": 0.006867411104392114
     },
-    "0199b3c4-6c1e-7a2b-9f00-3e5d1c2a7b12": {
+    "1": {
      "0": 0.022138683978888848,
      "1": 0.941360796839809,
      "2": 0.03650051918130219
@@ -42,12 +42,12 @@
    "agree": false,
    "spread": 0.6085754162330479,
    "leave_one_out": {
-    "0199b3c4-6c1e-7a2b-9f00-3e5d1c2a7b11": {
+    "0": {
      "allow": 0.37494794181688146,
      "ask": 0.6181846470787264,
      "report": 0.006867411104392114
     },
-    "0199b3c4-6c1e-7a2b-9f00-3e5d1c2a7b12": {
+    "1": {
      "allow": 0.01127222858217413,
      "ask": 0.3732849440803858,
      "report": 0.61544282733744
@@ -57,7 +57,7 @@
  },
  "reads": [
   {
-   "context": "0199b3c4-6c1e-7a2b-9f00-3e5d1c2a7b11",
+   "context": 0,
    "snapshot": "snap:ad8eec527db476432584478044f7a9819dbd02801f434f12d2282bdc2b3e4fbe",
    "described": {
     "effect": "Publishes local commits to the remote."
@@ -106,7 +106,7 @@
    "ms": 12.5
   },
   {
-   "context": "0199b3c4-6c1e-7a2b-9f00-3e5d1c2a7b12",
+   "context": 1,
    "snapshot": "snap:979d15ceb6faa54648bb078c9ca91debdcedf90bded148566399638f2005260b",
    "described": {
     "effect": "Publishes local commits to the remote."

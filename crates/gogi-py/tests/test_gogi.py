@@ -82,22 +82,17 @@ def test_pool_matches_the_weighted_mean_and_the_veto():
 
 def test_verify_decision_accepts_the_fixture_and_names_a_changed_number():
     resp = json.loads((FIXTURES / "decision_response.json").read_text())
-    # The fixture names contexts by id; a v2 request sends them whole, so build one that
-    # names the same reads by index.
-    ids = [r["context"] for r in resp["reads"]]
-    renamed = json.loads(json.dumps(resp).replace(ids[0], "0").replace(ids[1], "1"))
-    ctx = {"messages": [{"role": "user", "content": "u"}]}
-    req = {"model": "m", "spec_id": "sha256:" + "a" * 64, "case": "git push origin main", "contexts": [ctx, ctx], "pool": {"method": "loglinear", "weights": "mass"}}
-    gogi.verify_decision(req, renamed)
-    with pytest.raises(ValueError, match="state"):
-        gogi.verify_decision({**{k: v for k, v in req.items() if k != "case"}, "state": "git push origin main"}, renamed)
-    bad_usage = json.loads(json.dumps(renamed))
+    req = json.loads((FIXTURES / "decision_request.json").read_text())
+    gogi.verify_decision(req, resp)
+    with pytest.raises(ValueError, match="case"):
+        gogi.verify_decision({k: v for k, v in req.items() if k != "case"}, resp)
+    bad_usage = json.loads(json.dumps(resp))
     bad_usage["usage"]["fed"] += 1
     with pytest.raises(ValueError, match=r"usage\.prompt"):
         gogi.verify_decision(req, bad_usage)
-    renamed["answers"]["verdict"]["probabilities"]["ask"] += 1e-6
+    resp["answers"]["verdict"]["probabilities"]["ask"] += 1e-6
     with pytest.raises(ValueError, match=r"answers\.verdict\.probabilities\.ask"):
-        gogi.verify_decision(req, renamed)
+        gogi.verify_decision(req, resp)
 
 
 GATE = {"name": "gate", "instructions": "Judge the statement.", "input_label": "Statement",

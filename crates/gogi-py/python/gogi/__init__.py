@@ -58,7 +58,7 @@ def _served_model(m, i):
 
 
 class FakeServer:
-    """A fake council v2 server over a toy deterministic model, for client tests.
+    """A fake council API server over a toy deterministic model, for client tests.
 
     ``with gogi.FakeServer() as fake:`` serves on a free local port at ``fake.url``. With
     ``state_dir``, specs, pins, and the snapshots pins keep survive ``restart()``.

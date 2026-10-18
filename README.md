@@ -20,22 +20,23 @@ marks, and starts each request from the longest snapshot it holds, so a
 request runs only the tokens after it. The same snapshots serve
 **generations**, so one server can run a client's chats and its council.
 
-`docs/council-api-v2.md`, "Terms", defines each word in bold.
+`docs/council-api.md`, "Terms", defines each word in bold.
 
 These projects speak the contract:
 
 - **[kaijutsu](https://github.com/tobert/kaijutsu)** is the client. It is an
   agent environment whose gate and chats call a council server.
-- **mkviolet** is a server. It runs Gemma 4 and serves council v2. It is
-  private, so its source paths cited in `docs/` cannot be followed from here.
-- **lfm2d** is a server with its own decision routes (`/v1/opinion`). An
-  update will bring it to council v2 and make it the public server
+- **mkviolet** is a server. It runs Gemma 4 and serves the council API. It
+  is private, so its source paths cited in `docs/` cannot be followed from
+  here.
+- **lfm2d** will serve the council API as the public server
   implementation.
 
 gogi holds the contract itself: the documents, code that checks requests and
 responses against them without doing I/O, and a test suite to run against any
 server.
-Where kaijutsu and mkviolet disagree, `docs/disagreements.md` records it.
+Where kaijutsu or mkviolet differs from the contract, `docs/disagreements.md`
+records it.
 
 ## Examples
 
@@ -60,7 +61,7 @@ python examples/council_tour.py
 
 ## Layout
 
-- `docs/` holds the contract. Start with `docs/council-api-v2.md`.
+- `docs/` holds the contract. Start with `docs/council-api.md`.
 - `crates/gogi-proto` is the contract with no I/O.
 - `crates/gogi-fake` is a fake server over a toy model.
 - `crates/gogi-py` binds the validation, the math, and the fake server to

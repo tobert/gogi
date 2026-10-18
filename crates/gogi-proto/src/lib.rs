@@ -1,8 +1,8 @@
 //! The council API contract as code, with no I/O.
 //!
-//! `docs/council-api-v2.md` and `docs/council-api.md` are the contract; this crate
-//! is what a client or a server needs to speak it:
-//! - wire types for every council v2 request and response (`context`, `pins`, `reads`,
+//! `docs/council-api.md` is the contract; this crate is what a client or a server needs to
+//! speak it:
+//! - wire types for every council API request and response (`context`, `pins`, `reads`,
 //!   `generation`, `decision`, `identity`, `error`);
 //! - the rules a request must meet, checked the way mkviolet checks them
 //!   (`message::validate`, `Context::check`, `spec::parse_spec`);

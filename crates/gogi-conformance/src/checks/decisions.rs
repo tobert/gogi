@@ -95,7 +95,7 @@ impl Suite {
         self.r.check("decision numbers obey the exact relations", verified.is_ok(), verified.as_ref().err().map(|m| m.to_string()));
         let u = resp.usage;
         self.r.check("decision usage: kept and fed make prompt, and reasoning is part of completion", u.check().is_ok() && u.prompt > 0, &d["usage"]);
-        self.r.check("each read names its context by index", resp.reads.iter().map(|r| r.context.clone()).collect::<Vec<_>>() == [Some("0".to_string()), Some("1".to_string())], d["reads"].as_array().map(|r| r.iter().map(|x| x["context"].clone()).collect::<Vec<_>>()));
+        self.r.check("each read names its context by index", resp.reads.iter().map(|r| r.context).collect::<Vec<_>>() == [Some(0), Some(1)], d["reads"].as_array().map(|r| r.iter().map(|x| x["context"].clone()).collect::<Vec<_>>()));
         self.r.check("each read names the snapshot it read after", resp.reads.iter().all(|r| r.snapshot.is_some()), &d["reads"]);
         let loo_keys = |q: &str| d["answers"][q]["leave_one_out"].as_object().map(|m| m.keys().cloned().collect::<Vec<_>>());
         if self.has(gogi_proto::identity::Capability::LeaveOneOut) {
@@ -147,13 +147,11 @@ impl Suite {
 
         let c = self.ctx(self.opening("decision"));
         let bad: Vec<(&str, Value, u16)> = vec![
-            ("a decision with a v1 context reference", json!({"spec_id": spec_id, "case": "x", "contexts": [{"id": "old-style"}]}), 400),
+            ("a decision with a context named by an id", json!({"spec_id": spec_id, "case": "x", "contexts": [{"id": "c1"}]}), 400),
             ("a decision with an unknown member", json!({"spec_id": spec_id, "case": "x", "contxts": []}), 400),
-            ("a decision with inline questions", json!({"case": "x", "questions": {"q": {"type": "noul", "instructions": "x"}}}), 400),
+            ("a decision with questions in place of spec_id", json!({"case": "x", "questions": {"q": {"type": "noul", "instructions": "x"}}}), 400),
             ("a decision without spec_id", json!({"case": "x"}), 400),
-            ("a decision with state in place of case", json!({"spec_id": spec_id, "state": "x"}), 400),
-            ("a decision with a gateway member, provider", json!({"spec_id": spec_id, "case": "x", "provider": {"order": ["x"]}}), 400),
-            ("a decision with a gateway member, session_id", json!({"spec_id": spec_id, "case": "x", "session_id": "s"}), 400),
+            ("a decision without case", json!({"spec_id": spec_id}), 400),
             ("a decision with a number for case", json!({"spec_id": spec_id, "case": 3}), 400),
             ("a decision with timeout_ms 0", json!({"spec_id": spec_id, "case": "x", "timeout_ms": 0}), 400),
             ("a decision for another model", json!({"spec_id": spec_id, "case": "x", "model": "no-such-model-gogi"}), 400),
@@ -168,6 +166,12 @@ impl Suite {
         ];
         for (name, body, want) in bad {
             self.refused(&format!("{} is refused", name), "POST", "/council/v2/decisions", Some(body), want);
+        }
+        for (name, ask) in [("an empty ask", json!([])), ("an ask that names a question twice", json!(["verdict", "verdict"]))] {
+            let what = format!("a decision with {} is refused", name);
+            if let Some(v) = self.refused(&what, "POST", "/council/v2/decisions", Some(json!({"spec_id": spec_id, "case": "x", "ask": ask})), 400) {
+                self.r.check(&format!("a decision with {} is a 400 naming ask", name), v["error"]["param"] == "ask", &v);
+            }
         }
         if !self.has(gogi_proto::identity::Capability::Think) {
             self.refused("think above 0 tokens needs the think capability", "POST", "/council/v2/decisions", Some(json!({"spec_id": spec_id, "case": "x", "think": {"tokens": 8}})), 400);

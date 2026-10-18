@@ -354,7 +354,7 @@ fn response(lps: &[Vec<f64>], method: PoolMethod, weights: PoolWeights, given: O
     let v = json!({"model": "m", "answers": {"q": pooled}, "reads": reads, "pool": echo,
         "identity": {"model": "m", "weight_hash": "w", "tokenizer_hash": "t", "template": "t", "engine": "e"},
         "usage": {"prompt": 30, "kept": 20, "fed": 10, "completion": 0, "reasoning": 0}});
-    (v, Expect { pool: Pool { method: Some(method), weights: Some(weights), values: given }, contexts: ids })
+    (v, Expect { pool: Pool { method: Some(method), weights: Some(weights), values: given }, contexts: ids.len() })
 }
 
 #[test]

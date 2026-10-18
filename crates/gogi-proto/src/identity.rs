@@ -145,12 +145,8 @@ impl ServerIdentity {
 mod tests {
     use super::*;
 
-    /// mkviolet's identity before it served more than one model, in the old shape.
-    const MKVIOLET_ONE_MODEL: &str = r#"{"model":"google/gemma-4-26B-A4B-it","aliases":[],"weight_hash":"0x1EBEA246FC63EB7F","tokenizer_hash":"sha256:4d777ef5bdc1aa36","engine":"mkviolet:a93ed27853c9835c+numbers:15c10b5ac08a8126","device":"2x Intel(R) Arc(TM) Pro B70 Graphics","template":"mkv-letters-1:a57f304ef64f619e+gemma4-chat:ae53464bf3be2580","limits":{"context_tokens":65535,"state_bytes":65536,"contexts_per_decision":8,"questions_per_spec":16,"choice_options":26,"default_timeout_ms":30000,"pin_bytes":17179869184,"snapshot_bytes":450560,"decision_context_tokens":3072},"capabilities":["reads","generate","pins","dry_run","leave_one_out"],"extensions":["/mk/v1"]}"#;
-
-    /// The same identity with its fields moved to where they belong now, and `case_bytes` for
-    /// `state_bytes`.
-    const MKVIOLET: &str = r#"{"models":[{"model":"google/gemma-4-26B-A4B-it","aliases":[],"status":"ready","weight_hash":"0x1EBEA246FC63EB7F","tokenizer_hash":"sha256:4d777ef5bdc1aa36","template":"mkv-letters-1:a57f304ef64f619e+gemma4-chat:ae53464bf3be2580","engine":"mkviolet:a93ed27853c9835c+numbers:15c10b5ac08a8126","device":"2x Intel(R) Arc(TM) Pro B70 Graphics","limits":{"context_tokens":65535,"decision_context_tokens":3072,"snapshot_bytes":450560,"contexts_per_decision":8,"default_timeout_ms":30000},"capabilities":["reads","generate","dry_run","leave_one_out"]}],"limits":{"case_bytes":65536,"choice_options":26,"questions_per_spec":16,"pin_bytes":17179869184},"capabilities":["pins"],"extensions":["/mk/v1"]}"#;
+    /// mkviolet's identity, as `GET /council/v2/identity` returned it on 2026-10-18.
+    const MKVIOLET: &str = r#"{"models":[{"model":"gemma-4-26b-a4b","weight_hash":"0x1EBEA246FC63EB7F","tokenizer_hash":"sha256:4d777ef5bdc1aa36","engine":"mkviolet:a93ed27853c9835c+numbers:e0cf8f63c78acb7a","device":"2x Intel(R) Arc(TM) Pro B70 Graphics","template":"mkv-letters-1:d71541e05da41620+gemma4-chat:344a60f6d8cc3423","aliases":[],"status":"ready","limits":{"context_tokens":65535,"decision_context_tokens":3072,"snapshot_bytes":450560,"contexts_per_decision":8,"default_timeout_ms":30000},"capabilities":["reads","generate","ride","dry_run","leave_one_out"]}],"limits":{"case_bytes":65536,"choice_options":26,"questions_per_spec":16,"pin_bytes":17179869184},"capabilities":["pins"],"extensions":["/mk/v1"]}"#;
 
     fn two_models() -> ServerIdentity {
         let mut id: ServerIdentity = serde_json::from_str(MKVIOLET).unwrap();
@@ -173,14 +169,9 @@ mod tests {
     }
 
     #[test]
-    fn the_one_model_shape_is_refused() {
-        assert!(serde_json::from_str::<ServerIdentity>(MKVIOLET_ONE_MODEL).is_err());
-    }
-
-    #[test]
     fn a_request_routes_by_name_or_alias() {
         let two = two_models();
-        assert_eq!(two.route("google/gemma-4-26B-A4B-it").unwrap().model, "google/gemma-4-26B-A4B-it");
+        assert_eq!(two.route("gemma-4-26b-a4b").unwrap().model, "gemma-4-26b-a4b");
         assert_eq!(two.route("mutant").unwrap().model, "qwen-3.8-mutant-636");
         assert_eq!(two.route("qwen-3.8-mutant-636").unwrap().status, ModelStatus::Unloaded);
         for bad in ["gpt-2", ""] {

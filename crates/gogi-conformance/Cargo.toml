@@ -1,6 +1,6 @@
 [package]
 name = "gogi-conformance"
-description = "Checks a live council v2 server against the contract."
+description = "Checks a live council API server against the contract."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

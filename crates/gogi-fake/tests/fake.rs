@@ -177,9 +177,9 @@ fn every_response_carries_a_request_id_and_an_error_repeats_it() {
     let (_, b, _) = exchange(&s, "GET", "/council/v2/identity", None);
     assert_eq!(code, 200);
     assert!(is_request_id(&a) && is_request_id(&b) && a != b, "{a} {b}");
-    let (code, id, body) = exchange(&s, "POST", "/council/v2/decisions", Some(json!({"model": "toy", "spec_id": format!("sha256:{}", "a".repeat(64)), "state": "x"})));
+    let (code, id, body) = exchange(&s, "POST", "/council/v2/decisions", Some(json!({"model": "toy", "spec_id": format!("sha256:{}", "a".repeat(64)), "case": "x", "verdict": "A"})));
     let e: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!((code, &e["error"]["param"], &e["request_id"]), (400, &json!("state"), &json!(id)), "{e}");
+    assert_eq!((code, &e["error"]["param"], &e["request_id"]), (400, &json!("verdict"), &json!(id)), "{e}");
     let (code, id, _) = exchange(&s, "DELETE", "/council/v2/pins/never", None);
     assert_eq!((code, is_request_id(&id)), (404, true));
 }

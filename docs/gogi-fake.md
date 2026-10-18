@@ -1,6 +1,6 @@
 # gogi-fake: the toy model
 
-`gogi-fake` serves council v2 over a model small enough to read in one sitting. Run it
+`gogi-fake` serves the council API over a model small enough to read in one sitting. Run it
 with `cargo run -p gogi-fake -- --listen 127.0.0.1:8091 [--state-dir DIR] [--model NAME]...`,
 or from Python with `with gogi.FakeServer(state_dir=DIR) as fake:`, which serves at `fake.url`.
 

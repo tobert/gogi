@@ -33,6 +33,13 @@ impl Suite {
         let mut bad = bare.clone();
         bad["decisions"] = json!([{"spec_id": spec_id, "when": "never"}]);
         self.refused("a riding decision with an unknown when is refused", "POST", "/council/v2/generations", Some(bad), 400);
+        for (name, ask) in [("an empty ask", json!([])), ("an ask that names a question twice", json!(["verdict", "verdict"]))] {
+            let mut b = bare.clone();
+            b["decisions"] = json!([{"spec_id": spec_id, "when": "after", "ask": ask}]);
+            if let Some(v) = self.refused(&format!("a riding decision with {} is refused", name), "POST", "/council/v2/generations", Some(b), 400) {
+                self.r.check(&format!("a riding decision with {} is a 400 naming decisions", name), v["error"]["param"] == "decisions", &v);
+            }
+        }
         let mut gone = bare;
         gone["decisions"] = json!([{"spec_id": format!("sha256:{}", "0".repeat(64)), "when": "after"}]);
         self.refused("a riding decision on a spec the server does not hold is a 404", "POST", "/council/v2/generations", Some(gone), 404);

@@ -92,7 +92,7 @@ pub struct RideAnswers {
 }
 
 impl GenerationRequest {
-    /// Checks the context, a positive `max_tokens`, and the sample.
+    /// Checks the context, a positive `max_tokens`, the sample, and each riding decision's `ask`.
     pub fn validate(&self) -> Result<(), Invalid> {
         self.context.check()?;
         if self.max_tokens == 0 {
@@ -100,6 +100,11 @@ impl GenerationRequest {
         }
         if let Some(s) = &self.sample {
             s.validate()?;
+        }
+        for (i, d) in self.decisions.iter().enumerate() {
+            if let Some(ask) = &d.ask {
+                crate::decision::check_ask(ask).map_err(|m| Invalid::param("decisions", format!("decisions[{}]: {}", i, m)))?;
+            }
         }
         Ok(())
     }
@@ -425,6 +430,13 @@ mod tests {
         let v = json!({"model": "m", "context": {"messages": [{"role": "user", "content": "u"}]}});
         assert!(serde_json::from_value::<GenerationRequest>(v).is_err(), "a generation sends max_tokens");
         assert!(GenerationRequest { context: Context::default(), ..r.clone() }.validate().is_err());
+        let ride = |ask: Option<Vec<String>>| GenerationRequest {
+            decisions: vec![RidingDecision { spec_id: format!("sha256:{}", "a".repeat(64)), ask, when: RideWhen::After }],
+            ..r.clone()
+        };
+        ride(Some(vec!["q".into()])).validate().unwrap();
+        assert_eq!(ride(Some(vec![])).validate().unwrap_err().param.as_deref(), Some("decisions"));
+        assert_eq!(ride(Some(vec!["q".into(), "q".into()])).validate().unwrap_err().param.as_deref(), Some("decisions"));
         for s in [Sample { temperature: Some(-1.0), ..Default::default() }, Sample { top_p: Some(0.0), ..Default::default() }, Sample { min_p: Some(1.0), ..Default::default() }] {
             assert!(GenerationRequest { sample: Some(s), ..r.clone() }.validate().is_err());
         }

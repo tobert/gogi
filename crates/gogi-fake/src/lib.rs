@@ -1,4 +1,4 @@
-//! A fake council v2 server over a toy deterministic model.
+//! A fake council API server over a toy deterministic model.
 //!
 //! It exists so a client has something to talk to in tests and so the conformance suite can be
 //! tested against a server whose behavior is known. It keeps the contract's semantics: snapshots

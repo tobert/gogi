@@ -1,6 +1,6 @@
 [package]
 name = "gogi-fake"
-description = "A fake council v2 server over a toy deterministic model, for client tests and for testing the conformance suite."
+description = "A fake council API server over a toy deterministic model, for client tests and for testing the conformance suite."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

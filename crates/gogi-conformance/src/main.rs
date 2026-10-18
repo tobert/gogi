@@ -33,6 +33,6 @@ fn usage(msg: &str) -> ! {
     if !msg.is_empty() {
         eprintln!("gogi-conformance: {}", msg);
     }
-    eprintln!("usage: gogi-conformance <url> [--model <name>] [--allow-restart <cmd>]\n\n  <url>                  base URL of a council v2 server, such as http://127.0.0.1:8091\n  --model <name>         check this served model; it must be ready. Default: the first ready one in identity\n  --allow-restart <cmd>  run <cmd> (through sh -c) to restart the server, then check that specs and pins survive");
+    eprintln!("usage: gogi-conformance <url> [--model <name>] [--allow-restart <cmd>]\n\n  <url>                  base URL of a council API server, such as http://127.0.0.1:8091\n  --model <name>         check this served model; it must be ready. Default: the first ready one in identity\n  --allow-restart <cmd>  run <cmd> (through sh -c) to restart the server, then check that specs and pins survive");
     std::process::exit(2)
 }

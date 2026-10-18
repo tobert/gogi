@@ -351,7 +351,7 @@ fn check_read(path: &str, a: &ReadAnswer, row: &Row, keys: &[String]) -> Check {
 
 fn check_loo(
     field: &str,
-    ids: &[Option<&str>],
+    ids: &[Option<u64>],
     expected: &Option<Vec<Option<Vec<f64>>>>,
     keys: &[String],
     actual: Option<LooActual<'_>>,
@@ -360,8 +360,8 @@ fn check_loo(
     let Some(expected) = expected else {
         return Err(Mismatch::new(field, "absent with fewer than two reads", "present"));
     };
-    let ids: Vec<&str> = match ids.iter().copied().collect::<Option<Vec<_>>>() {
-        Some(v) => v,
+    let ids: Vec<String> = match ids.iter().copied().collect::<Option<Vec<_>>>() {
+        Some(v) => v.iter().map(u64::to_string).collect(),
         None => return Err(Mismatch::new(field, "reads naming their contexts", "a read with context null")),
     };
     let got_keys: Vec<&str> = match &actual {
@@ -435,8 +435,8 @@ pub fn verify(response: &DecisionResponse, expect: &Expect) -> Result<(), Mismat
         PoolWeights::Given => WeightSpec::Given(settings.values.clone().unwrap_or_default()),
     };
 
-    let wanted: Vec<&str> = expect.contexts.iter().map(String::as_str).collect();
-    let ids: Vec<Option<&str>> = response.reads.iter().map(|r| r.context.as_deref()).collect();
+    let wanted: Vec<u64> = (0..expect.contexts as u64).collect();
+    let ids: Vec<Option<u64>> = response.reads.iter().map(|r| r.context).collect();
     if wanted.is_empty() {
         if ids != [None] {
             return Err(Mismatch::new("reads", "one read with context null", format!("{} reads", ids.len())));
@@ -536,8 +536,8 @@ mod tests {
 
     const REQUEST: &str = include_str!("../tests/fixtures/decision_request.json");
     const RESPONSE: &str = include_str!("../tests/fixtures/decision_response.json");
-    // Vectors below come from the HIP megakernel's service/council.py answer() and
-    // pooled() on the same float32 letter logits.
+    // Vectors below come from an independent implementation of the same answers and pools, on
+    // the same float32 letter logits.
     const R1: [f64; 3] = [-4.0, -0.25, -3.5];
     const R2: [f64; 3] = [-2.0, -1.5, -6.0];
     const R3: [f64; 3] = [-4.75, -1.25, -0.75];
@@ -585,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn loglinear_mass_pool_matches_the_megakernel() {
+    fn loglinear_mass_pool_matches_the_reference() {
         let rs = rows(&[&R1, &R2, &R3]);
         let p = pool(&rs, PoolMethod::Loglinear, &WeightSpec::Mass).unwrap();
         near_all(&p.probs, &[0.04000403396307743, 0.8464704434588431, 0.11352552257807932]);
@@ -610,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn linear_given_pool_matches_the_megakernel_and_a_zero_weight_read_is_skipped() {
+    fn linear_given_pool_matches_the_reference_and_a_zero_weight_read_is_skipped() {
         let rs = rows(&[&R1, &R2, &R3]);
         let p = pool(&rs, PoolMethod::Linear, &WeightSpec::Given(vec![1.0, 0.0, 3.0])).unwrap();
         near_all(&p.probs, &[0.013988842431352812, 0.5153039072702417, 0.47070725029840554]);
@@ -635,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn linear_uniform_score_pool_matches_the_megakernel() {
+    fn linear_uniform_score_pool_matches_the_reference() {
         let rs = rows(&[&R1, &R2, &R3]);
         let p = pool(&rs, PoolMethod::Linear, &WeightSpec::Uniform).unwrap();
         near_all(&p.probs, &[0.13611961812598147, 0.6442767959996405, 0.21960358587437812]);
@@ -696,14 +696,8 @@ mod tests {
 
     // ---- verify
 
-    /// kaijutsu's v1 request fixture names its contexts by id; `Expect` is what a v2 request
-    /// gives `verify`.
     fn expect_of(request: &str) -> Expect {
-        let v: serde_json::Value = serde_json::from_str(request).unwrap();
-        Expect {
-            pool: serde_json::from_value(v["pool"].clone()).unwrap_or_default(),
-            contexts: v["contexts"].as_array().map(|a| a.iter().map(|c| c["id"].as_str().unwrap().to_string()).collect()).unwrap_or_default(),
-        }
+        serde_json::from_str::<crate::decision::DecisionRequest>(request).unwrap().expect()
     }
 
     fn fixture() -> (DecisionResponse, Expect) {
@@ -711,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_accepts_the_megakernel_fixture() {
+    fn verify_accepts_the_fixture() {
         let (resp, req) = fixture();
         verify(&resp, &req).unwrap();
     }
@@ -754,7 +748,7 @@ mod tests {
             ("/answers/undo/score", json!(0.0), "answers.undo.score"),
             ("/answers/undo/spread", json!(0.0), "answers.undo.spread"),
             ("/answers/verdict/agree", json!(true), "answers.verdict.agree"),
-            ("/answers/verdict/leave_one_out/0199b3c4-6c1e-7a2b-9f00-3e5d1c2a7b11/ask", json!(0.0), "answers.verdict.leave_one_out.0199b3c4-6c1e-7a2b-9f00-3e5d1c2a7b11.ask"),
+            ("/answers/verdict/leave_one_out/0/ask", json!(0.0), "answers.verdict.leave_one_out.0.ask"),
             ("/pool/normalized/verdict/0", json!(0.5), "pool.normalized.verdict[0]"),
             ("/pool/method", json!("linear"), "pool.method"),
             ("/pool/weights", json!("uniform"), "pool.weights"),
@@ -777,8 +771,8 @@ mod tests {
 
     #[test]
     fn verify_rejects_reads_that_do_not_match_the_request() {
-        let (resp, mut req) = fixture();
-        req.contexts.reverse();
+        let (mut resp, req) = fixture();
+        resp.reads.swap(0, 1);
         assert_eq!(verify(&resp, &req).unwrap_err().field, "reads");
         let (mut resp, req) = fixture();
         resp.reads.pop();
@@ -818,7 +812,7 @@ mod tests {
             }),
         );
         let mut req = expect_of(REQUEST);
-        req.contexts.truncate(1);
+        req.contexts = 1;
         verify(&one, &req).unwrap();
         let PooledAnswer::Choice(p) = one.answers.get_mut("verdict").unwrap() else { panic!() };
         p.leave_one_out = Some(Default::default());
@@ -842,7 +836,7 @@ mod tests {
             }));
         }
         let loo = p.leave_one_out.clone().unwrap();
-        let ids: Vec<String> = resp.reads.iter().map(|r| r.context.clone().unwrap()).collect();
+        let ids: Vec<String> = resp.reads.iter().map(|r| r.context.unwrap().to_string()).collect();
         resp.answers.insert("risky".into(), PooledAnswer::Noul(PooledNoul {
             noul: p.probs[0],
             agree: p.agree,

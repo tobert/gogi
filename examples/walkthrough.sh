@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# A council v2 session in curl, one request at a time.
+# A council API session in curl, one request at a time.
 #
 #   cargo run -p gogi-fake -- --listen 127.0.0.1:8091 &
 #   examples/walkthrough.sh [BASE_URL]

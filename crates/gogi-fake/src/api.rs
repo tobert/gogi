@@ -1,4 +1,4 @@
-//! The council v2 routes over the toy model.
+//! The council API routes over the toy model.
 
 use std::collections::{HashSet, VecDeque};
 

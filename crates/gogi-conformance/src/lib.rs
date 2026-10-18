@@ -1,4 +1,4 @@
-//! A conformance suite for council v2 servers.
+//! A conformance suite for council API servers.
 //!
 //! The suite extends contexts only with the server's own responses, such as a generation's reply
 //! with its call ids, and treats model-specific numbers as relations: it never assumes a

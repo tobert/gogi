@@ -37,7 +37,7 @@ pub struct ToolCall {
     pub input: Map<String, Value>,
 }
 
-/// A council v2 message. `snap` marks a boundary at its end.
+/// A message of a context. `snap` marks a boundary at its end.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Message {

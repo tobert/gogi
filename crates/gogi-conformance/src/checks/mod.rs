@@ -245,7 +245,6 @@ impl Suite {
             ("an unknown role", json!({"messages": [{"role": "wizard", "content": "x"}]})),
             ("an unknown member of a context", json!({"messages": [user.clone()], "system": "x"})),
             ("an unknown member of a message", json!({"messages": [{"role": "user", "content": "x", "extra": 1}]})),
-            ("a v1 context body", json!({"system": "s", "turns": [{"role": "user", "content": "x"}]})),
         ];
         for (name, ctx) in bad {
             self.refused(&format!("a build refuses {}", name), "POST", "/council/v2/contexts", Some(json!({"context": ctx})), 400);
@@ -262,9 +261,6 @@ impl Suite {
         let later = self.ctx(vec![json!({"role": "system", "content": format!("s {}", self.nonce)}), user.clone(), json!({"role": "assistant", "content": "ok"}), json!({"role": "system", "content": "You replied without a tool call."})]);
         if let Some(b) = self.build("a system message may come after the first", &later, false) {
             self.r.check("a context that ends in a later system message has its head there", b["snapshots"].as_array().and_then(|s| s.last()).is_some_and(|s| s["message"] == 3), &b);
-        }
-        if let Some((status, v)) = self.send("the v1 context route is gone", "PUT", "/council/v2/contexts/old", Some(json!({"messages": [user]}))) {
-            self.r.check("the v1 context route is gone", status == 404 || status == 405, format!("returned {}: {}", status, v));
         }
     }
 

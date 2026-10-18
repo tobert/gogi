@@ -1,4 +1,4 @@
-"""A tour of council v2 from Python: a chat, decisions, a queue context, pins, and a restart.
+"""A tour of the council API from Python: a chat, decisions, a queue context, pins, and a restart.
 
     cd crates/gogi-py && maturin develop && cd ../..
     python examples/council_tour.py            # starts gogi.FakeServer in this process
@@ -21,7 +21,7 @@ import gogi
 
 
 class Council:
-    """A council v2 client in a dozen lines: JSON in, JSON out.
+    """A council API client in a dozen lines: JSON in, JSON out.
 
     Every request carries one W3C ``traceparent`` header, so a server that traces joins its spans
     to this tour's trace. The server names each request in its ``request-id`` header; ``last_id``

@@ -20,7 +20,7 @@ fn json_of(text: &str) -> PyResult<Value> {
 mod _gogi {
     use super::*;
 
-    /// Checks a council v2 context (`{thinking, tools, queue, messages}`) the way mkviolet does.
+    /// Checks a context (`{thinking, tools, queue, messages}`) the way mkviolet does.
     /// Raises `ValueError` naming the first rule it breaks.
     #[pyfunction]
     fn check_context(context_json: &str) -> PyResult<()> {

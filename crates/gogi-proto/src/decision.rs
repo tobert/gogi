@@ -1,7 +1,7 @@
 //! `POST /council/v2/decisions`: one case read after each context, with the reads pooled.
 
 use indexmap::IndexMap;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::context::{Context, Tool, Usage};
@@ -89,12 +89,15 @@ pub struct DecisionRequest {
 
 impl DecisionRequest {
     /// Checks the rules a client can check without the server: a string, object, or array
-    /// `case`; at most 8 valid contexts, all of them queue contexts or none of them; a
+    /// `case`; an `ask` that names at least one question, each once; at most 8 valid contexts, all of them queue contexts or none of them; a
     /// positive `timeout_ms`; and pool `values` that go with `given` weights, one per read,
     /// finite, at least 0, summing above 0.
     pub fn validate(&self) -> Result<(), Invalid> {
         if !matches!(self.case, Value::String(_) | Value::Object(_) | Value::Array(_)) {
             return Err(Invalid::param("case", "case is a string, object, or array"));
+        }
+        if let Some(ask) = &self.ask {
+            check_ask(ask).map_err(|m| Invalid::param("ask", m))?;
         }
         if self.timeout_ms == Some(0) {
             return Err(Invalid::param("timeout_ms", "timeout_ms is at least 1"));
@@ -128,11 +131,22 @@ impl DecisionRequest {
         Ok(())
     }
 
-    /// What `math::verify` needs of this request: its pool settings and the names the reads
-    /// carry, which are the indexes of `contexts`.
+    /// What `math::verify` needs of this request: its pool settings and how many contexts it
+    /// sends.
     pub fn expect(&self) -> Expect {
-        Expect { pool: self.pool.clone().unwrap_or_default(), contexts: (0..self.contexts.len()).map(|i| i.to_string()).collect() }
+        Expect { pool: self.pool.clone().unwrap_or_default(), contexts: self.contexts.len() }
     }
+}
+
+/// Checks that an `ask` names at least one question, each once.
+pub fn check_ask(ask: &[QuestionId]) -> Result<(), String> {
+    if ask.is_empty() {
+        return Err("ask is empty; name at least one question, or leave ask out to ask them all".into());
+    }
+    if let Some((i, q)) = ask.iter().enumerate().find(|(i, q)| ask[..*i].contains(q)) {
+        return Err(format!("ask[{}] repeats question {}; name each question once", i, q));
+    }
+    Ok(())
 }
 
 /// The last call of a context's last message when it calls the queue tool: the call whose
@@ -165,12 +179,12 @@ pub fn check_queue_schema(c: &Context, asked: &[(&str, usize)]) -> Result<(), In
     Ok(())
 }
 
-/// What a decision's numbers are checked against: the request's pool settings and the names its
-/// reads carry, in order. Empty `contexts` means one read with no context.
+/// What a decision's numbers are checked against: the request's pool settings and how many
+/// contexts it sends. Read `i` names context `i`; 0 contexts means one read with no context.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Expect {
     pub pool: Pool,
-    pub contexts: Vec<String>,
+    pub contexts: usize,
 }
 
 // ---- answers
@@ -259,39 +273,13 @@ pub enum PooledAnswer {
     Noul(PooledNoul),
 }
 
-/// A read's required `context`: `null`, a v1 context id, or a council v2 index. An index is
-/// parsed as its decimal text.
-fn context_name<'de, D: Deserializer<'de>>(de: D) -> Result<Option<String>, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Name {
-        Id(String),
-        Index(u64),
-    }
-    Ok(Option::<Name>::deserialize(de)?.map(|n| match n {
-        Name::Id(id) => id,
-        Name::Index(i) => i.to_string(),
-    }))
-}
-
-/// Writes a read's `context` as an index when its text is one, else as text, else `null`.
-fn write_context_name<S: serde::Serializer>(name: &Option<String>, ser: S) -> Result<S::Ok, S::Error> {
-    match name {
-        None => ser.serialize_none(),
-        Some(n) => match n.parse::<u64>() {
-            Ok(i) if i.to_string() == *n => ser.serialize_u64(i),
-            _ => ser.serialize_str(n),
-        },
-    }
-}
-
 /// One context's read of the case.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Read {
-    /// The context read, or null when the decision sends no contexts. A council v2 response names
-    /// it by its index in the request's `contexts`, parsed here as that index's decimal text.
-    #[serde(deserialize_with = "context_name", serialize_with = "write_context_name")]
-    pub context: Option<String>,
+    /// The index of the context read in the request's `contexts`, or null when the decision
+    /// sends no contexts.
+    #[serde(deserialize_with = "required_nullable")]
+    pub context: Option<u64>,
     #[serde(deserialize_with = "required_nullable")]
     pub snapshot: Option<SnapshotId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -405,6 +393,9 @@ mod tests {
         assert_eq!(param(DecisionRequest { contexts: vec![chat(); 9], ..req() }), "contexts");
         assert_eq!(param(DecisionRequest { contexts: vec![Context::default()], ..req() }), "contexts");
         DecisionRequest { contexts: vec![chat(); 8], ..req() }.validate().unwrap();
+        assert_eq!(param(DecisionRequest { ask: Some(vec![]), ..req() }), "ask");
+        assert_eq!(param(DecisionRequest { ask: Some(vec!["q".into(), "q".into()]), ..req() }), "ask");
+        DecisionRequest { ask: Some(vec!["q".into()]), ..req() }.validate().unwrap();
     }
 
     #[test]
@@ -437,13 +428,13 @@ mod tests {
         let r: DecisionRequest = serde_json::from_value(v.clone()).unwrap();
         assert_eq!(serde_json::to_value(&r).unwrap(), v);
         assert_eq!(serde_json::to_string(&r.case).unwrap(), r#"{"b":1,"a":2}"#);
-        assert_eq!(r.expect().contexts, ["0"]);
-        let v1 = json!({"model": "m", "spec_id": spec_id(), "case": "s", "contexts": [{"id": "old-style"}]});
-        assert!(serde_json::from_value::<DecisionRequest>(v1).is_err(), "a v1 context reference is not a v2 context");
+        assert_eq!(r.expect().contexts, 1);
+        let by_id = json!({"model": "m", "spec_id": spec_id(), "case": "s", "contexts": [{"id": "c1"}]});
+        assert!(serde_json::from_value::<DecisionRequest>(by_id).is_err(), "a context is sent whole, never named by an id");
         assert!(serde_json::from_value::<DecisionRequest>(json!({"model": "m", "spec_id": spec_id(), "case": "s", "contxts": []})).is_err());
-        for gone in [json!({"state": "s"}), json!({"case": "s", "questions": {}}), json!({"case": "s", "provider": {}}), json!({"case": "s", "session_id": "x"})] {
+        for stray in [json!({}), json!({"case": "s", "questions": {}}), json!({"case": "s", "verdict": "A"})] {
             let mut v = json!({"model": "m", "spec_id": spec_id()});
-            v.as_object_mut().unwrap().extend(gone.as_object().unwrap().clone());
+            v.as_object_mut().unwrap().extend(stray.as_object().unwrap().clone());
             assert!(serde_json::from_value::<DecisionRequest>(v.clone()).is_err(), "{v}");
         }
         assert!(serde_json::from_value::<DecisionRequest>(json!({"spec_id": spec_id(), "case": "s"})).is_err(), "a decision names its model");
@@ -459,13 +450,13 @@ mod tests {
     }
 
     #[test]
-    fn a_read_names_its_context_by_text_or_index() {
+    fn a_read_names_its_context_by_index_or_null() {
         let r = |c: Value| json!({"context": c, "snapshot": null, "answers": {}, "rendered_sha256": "x"});
-        assert_eq!(serde_json::from_value::<Read>(r(json!(3))).unwrap().context.as_deref(), Some("3"));
-        assert_eq!(serde_json::from_value::<Read>(r(json!("abc"))).unwrap().context.as_deref(), Some("abc"));
+        assert_eq!(serde_json::from_value::<Read>(r(json!(3))).unwrap().context, Some(3));
         assert_eq!(serde_json::from_value::<Read>(r(json!(null))).unwrap().context, None);
+        assert!(serde_json::from_value::<Read>(r(json!("abc"))).is_err());
         let named = |c: Value| serde_json::to_value(serde_json::from_value::<Read>(r(c)).unwrap()).unwrap()["context"].clone();
-        assert_eq!((named(json!(3)), named(json!("abc")), named(json!(null))), (json!(3), json!("abc"), json!(null)));
+        assert_eq!((named(json!(3)), named(json!(null))), (json!(3), json!(null)));
         let mut missing = r(json!(0));
         missing.as_object_mut().unwrap().remove("snapshot");
         assert!(serde_json::from_value::<Read>(missing).is_err());
