@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::identity::{ModelStatus, ServedModel};
 use crate::ids::SnapshotId;
 
 /// Why a request breaks the contract. A server responds with a `400`.
@@ -39,6 +40,8 @@ pub enum ErrorType {
     Internal,
     /// A generation's prompt leaves no room for a reply.
     ContextFull,
+    /// The served model a request names is not `ready`. A server responds with a `503`.
+    ModelUnavailable,
 }
 
 /// The inside of an error body.
@@ -58,6 +61,12 @@ pub struct ErrorDetail {
     /// For `context_full`: `limits.context_tokens`, the most tokens a prompt may have.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_tokens: Option<u64>,
+    /// For `model_unavailable`: the served model's `model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// For `model_unavailable`: the served model's status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ModelStatus>,
 }
 
 /// An error body: `{"error": {...}}`.
@@ -69,13 +78,31 @@ pub struct ErrorBody {
 impl ErrorBody {
     pub fn new(r#type: ErrorType, message: impl Into<String>) -> Self {
         ErrorBody {
-            error: ErrorDetail { r#type, message: message.into(), param: None, head: None, prompt_tokens: None, context_tokens: None },
+            error: ErrorDetail { r#type, message: message.into(), param: None, head: None, prompt_tokens: None, context_tokens: None, model: None, status: None },
         }
+    }
+
+    /// The `503` body for a request whose served model is not `ready`.
+    pub fn unavailable(m: &ServedModel) -> Self {
+        let mut e = ErrorBody::new(ErrorType::ModelUnavailable, format!("nothing ran: model {} is {}, not ready; retry when identity reports it ready", m.model, status_word(m.status)));
+        e.error.model = Some(m.model.clone());
+        e.error.status = Some(m.status);
+        e
     }
 
     pub fn with_param(mut self, param: impl Into<String>) -> Self {
         self.error.param = Some(param.into());
         self
+    }
+}
+
+fn status_word(s: ModelStatus) -> &'static str {
+    match s {
+        ModelStatus::Ready => "ready",
+        ModelStatus::Loading => "loading",
+        ModelStatus::Draining => "draining",
+        ModelStatus::Unloaded => "unloaded",
+        ModelStatus::Unknown => "in an unknown status",
     }
 }
 
@@ -96,6 +123,14 @@ mod tests {
         let e: ErrorBody = serde_json::from_value(v.clone()).unwrap();
         assert_eq!(e.error.r#type, ErrorType::ContextFull);
         assert_eq!((e.error.prompt_tokens, e.error.context_tokens), (Some(70000), Some(65535)));
+        assert_eq!(serde_json::to_value(&e).unwrap(), v);
+    }
+
+    #[test]
+    fn model_unavailable_names_the_model_and_its_status() {
+        let v = json!({"error": {"type": "model_unavailable", "message": "m", "model": "qwen-3.8-mutant-636", "status": "loading"}});
+        let e: ErrorBody = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!((e.error.model.as_deref(), e.error.status), (Some("qwen-3.8-mutant-636"), Some(ModelStatus::Loading)));
         assert_eq!(serde_json::to_value(&e).unwrap(), v);
     }
 

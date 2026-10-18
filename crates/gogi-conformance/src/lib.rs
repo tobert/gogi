@@ -4,12 +4,16 @@
 //! with its call ids, and treats model-specific numbers as relations: it never assumes a
 //! template, a tokenizer, or a token count. It uses unique text on each run, so a server that
 //! already holds earlier runs' snapshots is checked the same way as a fresh one.
+//!
+//! It checks one served model, named by `Opts::model` or else the first `ready` one in identity,
+//! and names it in every request that reads a context. It checks routing against the other served
+//! models identity lists without assuming which of them are loaded.
 
 mod checks;
 mod http;
 mod report;
 
-use gogi_proto::identity::ServerIdentity;
+use gogi_proto::identity::{ServedModel, ServerIdentity};
 use serde_json::Value;
 
 pub use report::{Check, Report, Status};
@@ -25,12 +29,16 @@ pub enum Restart {
 pub struct Opts {
     pub url: String,
     pub restart: Option<Restart>,
+    /// The served model to check, by its `model` or an alias. `None`: the first `ready` one.
+    pub model: Option<String>,
 }
 
 pub(crate) struct Suite {
     pub http: http::Http,
     pub r: Report,
     pub identity: Option<ServerIdentity>,
+    /// The served model the checks read.
+    pub model: Option<ServedModel>,
     pub nonce: String,
 }
 
@@ -41,9 +49,10 @@ pub fn run(mut opts: Opts, print: bool) -> Report {
         let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
         format!("{:x}{:x}", t & 0xffff_ffff_ffff, std::process::id())
     };
-    let mut s = Suite { http: http::Http::new(&opts.url), r: Report::new(print), identity: None, nonce };
-    if s.identity() {
+    let mut s = Suite { http: http::Http::new(&opts.url), r: Report::new(print), identity: None, model: None, nonce };
+    if s.identity(opts.model.as_deref()) {
         s.validation();
+        s.models();
         s.builds();
         s.generations();
         s.boundaries();

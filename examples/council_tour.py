@@ -72,13 +72,15 @@ GATE = {
 
 
 def tour(council, fake):
-    step("Identity: who answers, and within what limits")
+    step("Identity: the served models, who answers, and within what limits")
     ident = council.ok("GET", "/identity")
-    limits = ident["limits"]
-    print(f"  {ident['model']} on {ident['engine']}, template {ident['template']}")
-    print(f"  capabilities {', '.join(ident['capabilities'])}")
-    print(f"  {limits['context_tokens']} tokens a context, {limits['decision_context_tokens']} for a decision, "
-          f"{limits['contexts_per_decision']} contexts a decision")
+    for m in ident["models"]:
+        limits = m["limits"]
+        print(f"  {m['model']} ({m['status']}) on {m['engine']}, template {m['template']}")
+        print(f"    capabilities {', '.join(m['capabilities'])}")
+        print(f"    {limits['context_tokens']} tokens a context, {limits['decision_context_tokens']} for a decision, "
+              f"{limits['contexts_per_decision']} contexts a decision")
+    print(f"  server capabilities {', '.join(ident['capabilities'])}")
 
     step("A chat: every request sends the whole context, and held snapshots make that cheap")
     chat = {"thinking": False, "messages": [{"role": "system", "content": "You are a terse assistant.", "snap": True},

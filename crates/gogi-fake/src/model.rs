@@ -23,8 +23,9 @@
 //! user message follows. A message with tool calls keeps it. So a marked assistant message with
 //! reasoning and no tool calls stops being a boundary when a user message is added after it.
 //!
-//! The model: its model state after a token prefix is a hash folded over the tokens, and the logits
-//! are a deterministic function of that hash. The same prefix gives the same bits.
+//! The model: its model state after a token prefix is a hash folded over a served model's seed and
+//! the tokens, and the logits are a deterministic function of that hash. The same served model and
+//! prefix give the same bits; two seeds are two models.
 
 use gogi_proto::message::{Message, Role};
 use serde_json::Value;
@@ -212,12 +213,12 @@ fn mix(mut z: u64) -> u64 {
 pub struct State(u64);
 
 impl State {
-    pub fn start() -> Self {
-        State(0x676F6769)
+    pub fn start(seed: u64) -> Self {
+        State(0x676F6769 ^ seed)
     }
 
-    pub fn after(prefix: &[u32]) -> Self {
-        prefix.iter().fold(Self::start(), |s, &t| s.step(t))
+    pub fn after(seed: u64, prefix: &[u32]) -> Self {
+        prefix.iter().fold(Self::start(seed), |s, &t| s.step(t))
     }
 
     pub fn step(self, token: u32) -> Self {
@@ -295,10 +296,11 @@ mod tests {
 
     #[test]
     fn the_same_prefix_gives_the_same_logits_and_a_different_one_does_not() {
-        let a = State::after(&[1, 2, 3]).logits();
-        assert_eq!(a, State::after(&[1, 2, 3]).logits());
-        assert_eq!(State::after(&[1, 2, 3]), State::after(&[1, 2]).step(3));
-        assert_ne!(a, State::after(&[1, 2, 4]).logits());
+        let a = State::after(0, &[1, 2, 3]).logits();
+        assert_eq!(a, State::after(0, &[1, 2, 3]).logits());
+        assert_eq!(State::after(0, &[1, 2, 3]), State::after(0, &[1, 2]).step(3));
+        assert_ne!(a, State::after(0, &[1, 2, 4]).logits());
+        assert_ne!(a, State::after(1, &[1, 2, 3]).logits());
         let lp = log_softmax(&a);
         assert!((lp.iter().map(|x| x.exp()).sum::<f64>() - 1.0).abs() < 1e-12);
     }

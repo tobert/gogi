@@ -100,6 +100,32 @@ mod _gogi {
         math::verify(&resp, &req.expect()).map_err(value_err)
     }
 
+    fn model_status(s: &str) -> PyResult<gogi_fake::ModelStatus> {
+        match serde_json::from_value(json!(s)) {
+            Ok(gogi_fake::ModelStatus::Unknown) | Err(_) => Err(value_err(format!("status {:?} is not one of ready, loading, draining, unloaded", s))),
+            Ok(st) => Ok(st),
+        }
+    }
+
+    /// The served models from `[{name, aliases, seed, status}]`, every member required.
+    fn fake_models(v: &Value) -> PyResult<Vec<gogi_fake::FakeModel>> {
+        let list = v.as_array().filter(|l| !l.is_empty()).ok_or_else(|| value_err("models is a non-empty list"))?;
+        let mut out: Vec<gogi_fake::FakeModel> = Vec::new();
+        for (i, m) in list.iter().enumerate() {
+            let bad = |what: &str| value_err(format!("models[{}]: {}", i, what));
+            let name = m["name"].as_str().filter(|n| !n.is_empty()).ok_or_else(|| bad("name is a non-empty string"))?;
+            let aliases: Vec<String> = m["aliases"].as_array().ok_or_else(|| bad("aliases is a list"))?.iter().map(|a| a.as_str().map(String::from)).collect::<Option<_>>().ok_or_else(|| bad("aliases are strings"))?;
+            let seed = m["seed"].as_u64().ok_or_else(|| bad("seed is a non-negative integer"))?;
+            let status = model_status(m["status"].as_str().ok_or_else(|| bad("status is a string"))?)?;
+            let names = std::iter::once(name).chain(aliases.iter().map(String::as_str));
+            if let Some(dup) = names.clone().find(|n| out.iter().any(|o| o.name == *n || o.aliases.iter().any(|a| a == n))) {
+                return Err(bad(&format!("{} already names another served model", dup)));
+            }
+            out.push(gogi_fake::FakeModel { name: name.into(), aliases, seed, status });
+        }
+        Ok(out)
+    }
+
     /// gogi-fake's server, serving on its own thread until `close` or until it is dropped.
     #[pyclass(name = "_FakeServer")]
     struct FakeServer {
@@ -114,12 +140,39 @@ mod _gogi {
 
     #[pymethods]
     impl FakeServer {
+        /// `models_json` is a list of `{name, aliases, seed, status}`; `None` serves the default
+        /// model. Other `None` arguments take `gogi_fake::Config`'s defaults.
         #[new]
-        #[pyo3(signature = (addr="127.0.0.1:0", state_dir=None, context_tokens=None))]
-        fn new(addr: &str, state_dir: Option<std::path::PathBuf>, context_tokens: Option<usize>) -> PyResult<Self> {
+        #[pyo3(signature = (addr="127.0.0.1:0", state_dir=None, context_tokens=None, decision_context_tokens=None, pin_bytes=None, max_snapshots=None, models_json=None))]
+        fn new(
+            addr: &str,
+            state_dir: Option<std::path::PathBuf>,
+            context_tokens: Option<usize>,
+            decision_context_tokens: Option<usize>,
+            pin_bytes: Option<u64>,
+            max_snapshots: Option<usize>,
+            models_json: Option<&str>,
+        ) -> PyResult<Self> {
             let d = gogi_fake::Config::default();
-            let cfg = gogi_fake::Config { addr: addr.into(), state_dir, context_tokens: context_tokens.unwrap_or(d.context_tokens), ..d };
+            let models = match models_json {
+                Some(text) => fake_models(&json_of(text)?)?,
+                None => d.models.clone(),
+            };
+            let cfg = gogi_fake::Config {
+                addr: addr.into(),
+                models,
+                state_dir,
+                context_tokens: context_tokens.unwrap_or(d.context_tokens),
+                decision_context_tokens: decision_context_tokens.unwrap_or(d.decision_context_tokens),
+                pin_bytes: pin_bytes.unwrap_or(d.pin_bytes),
+                max_snapshots: max_snapshots.unwrap_or(d.max_snapshots),
+            };
             Ok(FakeServer { server: Some(gogi_fake::Server::start(cfg).map_err(value_err)?) })
+        }
+
+        /// Sets a served model's status: `ready`, `loading`, `draining`, or `unloaded`.
+        fn set_status(&self, model: &str, status: &str) -> PyResult<()> {
+            self.running()?.set_status(model, model_status(status)?).map_err(value_err)
         }
 
         /// The base URL, such as `http://127.0.0.1:41234`.

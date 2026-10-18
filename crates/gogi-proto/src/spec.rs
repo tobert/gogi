@@ -83,8 +83,10 @@ impl Spec {
 pub struct HeldSpec {
     pub spec_id: SpecId,
     pub spec: Value,
-    /// The template the server renders the spec with; part of its identity.
-    pub template: String,
+    /// v1's template for the spec. A v2 server leaves it out: each served model renders a spec
+    /// with its own template, which a decision's `identity` names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
 }
 
 /// A question id: 1 to 64 letters, digits, and underscores, not starting with a digit.

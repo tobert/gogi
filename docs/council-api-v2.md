@@ -6,7 +6,8 @@ server holds a snapshot at each boundary the client marks and starts each
 request from the longest snapshot it holds. Three requests start from
 snapshots: decisions, raw reads, and generations. A server that implements
 the contract serves kaijutsu's chats and its council from one store, so the
-two share one KV cache and one eviction policy.
+two share one KV cache and one eviction policy. One server serves one or
+more models, and each request names the model it reads.
 
 This draft replaces `docs/council-api.md` (v1) and the three servers' own
 context routes: the HIP megakernel's `/mk/v1`, lfm2d's `/v1/opinion`, and
@@ -39,6 +40,10 @@ server against it.
   queue tool again.
 - **Pins have owners.** A client pins the snapshots it needs under its own
   name, for a time it renews.
+- **A server serves several models.** Identity lists each served model with
+  its own identity, limits, and capabilities, and a status that changes when
+  the server loads or unloads it. A request names its served model with
+  `model`. v1's server had one model.
 
 ## Terms
 
@@ -55,7 +60,7 @@ thing, and each thing has one term.
 | queue context | A context whose last message is an assistant call to its queue tool. A decision gives it the case as that call's result. |
 | marked message | A message with `snap: true`. It ends at a boundary unless the rendering drops part of it. |
 | boundary | The end of a marked message, when the rendering up to it is a prefix of the whole context's rendering. The end of a context is always a boundary. |
-| snapshot | Model state, the KV cache, that the server holds at one boundary. Its id is derived from the tokens, the boundaries along them, and the identity, so a snapshot never changes. |
+| snapshot | Model state, the KV cache, that the server holds at one boundary for one served model. Its id names that model state and no other, so a snapshot never changes. |
 | head | The snapshot at the end of a context. |
 | built on | A snapshot is built on the snapshots at earlier boundaries of the same tokens; the nearest one is its parent. |
 | build | To render a context, start from the longest held snapshot whose tokens begin it, feed the remaining tokens, and hold a snapshot at each boundary. `kept` counts the tokens reused and `fed` the tokens run. |
@@ -78,22 +83,82 @@ thing, and each thing has one term.
 | riding decision | A spec's questions asked during a generation, `before` or `after` the reply. Capability `ride`. |
 | reply | The assistant message a generation writes. |
 | response | The HTTP body a server returns for any request. |
-| identity | The model, weights, tokenizer, template, and engine that produced a number. |
+| identity | The model, weights, tokenizer, template, and engine that produced a number. Each served model has one. |
+| served model | One identity a server serves, with its own limits, capabilities, and status. A request names it with `model`. |
+| status | Whether a served model takes requests now: `ready`, `loading`, `draining`, or `unloaded`. |
 | template | How a server renders messages, specs, and cases into tokens. It is part of identity. |
-| capability | An optional part of the contract a server declares in identity, such as `reads` or `pins`. A client ignores a capability it does not know. |
+| capability | An optional part of the contract a server declares in identity, such as `reads` or `pins`: for the server, or for one served model. A client ignores a capability it does not know. |
+| class | How a request is scheduled: `interactive` or `batch`. It never changes a number. |
 
 ## Endpoints
 
 | Method and path | Does |
 |---|---|
-| `GET /council/v2/identity` | Identity, limits, and capabilities. |
+| `GET /council/v2/identity` | The served models, each with its identity, limits, capabilities, and status, and the server's own limits and capabilities. |
 | `POST /council/v2/contexts` | Builds a context. |
-| `GET /council/v2/snapshots/{id}` | A snapshot's tokens, tier, size, and pins. |
+| `GET /council/v2/snapshots/{id}` | A snapshot's served model, tokens, tier, size, and pins. |
 | `PUT /council/v2/pins/{owner}`, `GET`, `DELETE` | An owner's pins. |
-| `POST /council/v2/specs`, `GET`, `GET /{spec_id}`, `DELETE /{spec_id}` | As v1. Specs survive a restart. |
+| `POST /council/v2/specs`, `GET`, `GET /{spec_id}`, `DELETE /{spec_id}` | As v1, without `template`, which a decision's `identity` names. Specs survive a restart. |
 | `POST /council/v2/decisions` | Reads a case after each context and pools the reads. |
 | `POST /council/v2/reads` | Raw reads: letter log probabilities after a suffix. Capability `reads`. |
 | `POST /council/v2/generations` | A sampled reply after a context. Capability `generate`. |
+
+## Served models
+
+```json
+GET /council/v2/identity
+-> {"models": [
+      {"model": "google/gemma-4-26B-A4B-it", "aliases": ["gemma4"], "status": "ready",
+       "weight_hash": "0x1EBEA246FC63EB7F", "tokenizer_hash": "sha256:4d777ef5bdc1aa36",
+       "template": "mkv-letters-1:a57f…+gemma4-chat:ae53…", "engine": "mkviolet:a93e…",
+       "device": "2x Intel(R) Arc(TM) Pro B70 Graphics",
+       "limits": {"context_tokens": 65535, "decision_context_tokens": 3072, "snapshot_bytes": 450560,
+                  "contexts_per_decision": 8, "default_timeout_ms": 30000},
+       "capabilities": ["reads", "generate", "dry_run", "leave_one_out"]},
+      {"model": "qwen-3.8-mutant-636", "aliases": [], "status": "unloaded", …}],
+    "limits": {"pin_bytes": 17179869184, "state_bytes": 65536, "questions_per_spec": 16, "choice_options": 26},
+    "capabilities": ["pins"],
+    "extensions": ["/mk/v1"]}
+```
+
+- **`models` lists every model the server serves, loaded or not,** so a
+  client can tell a name the server never serves from a name it serves
+  later. A served model reports the same identity in every status.
+- **A request names its served model with `model`.** `POST /contexts`,
+  `/decisions`, `/reads`, and `/generations` take it. It is a served model's
+  `model` or one of its `aliases`; any other name is a `400` naming `model`.
+  Each response names the served model by its `model`, never by an alias.
+- **`model` may be left out only when `models` has exactly one entry.**
+  Otherwise a request without `model` is a `400` naming `model`. The server
+  never chooses a served model for a client, because the loaded one can
+  change during a day.
+- **A served model that is not `ready` gets a `503`** with `error.type`
+  `model_unavailable`, `model`, and `status`, before anything runs. A server
+  that knows when the model will be `ready` sends `Retry-After` in seconds.
+  A `loading` or `unloaded` model takes no requests. A `draining` model
+  takes no new requests and finishes the ones it has, open generation streams
+  included.
+- **Snapshots, pins, and specs belong to the server, not to a served
+  model.** `GET /snapshots/{id}`, `/pins`, and `/specs` take no `model`; a
+  snapshot names the served model it belongs to. A pin keeps a snapshot
+  while its served model is `unloaded`, as it does on any tier; a request
+  that reads the snapshot then gets the `503`.
+- **A snapshot outlives an unload when the identity comes back unchanged.**
+  A server that loads a served model again with every identity field the
+  same reads its held snapshots as before. A changed field, such as a new
+  `engine` after a rebuild, is a new identity: the server reads none of the
+  old identity's snapshots for it.
+- **An approximation is a served model of its own.** A server that reads
+  with quantized model state, or with snapshots fed in another way, serves
+  that under its own `model` and identity, such as `qwen-3.8-mutant-636`. A
+  request never asks for an approximation of the model it names, so rule 1
+  holds for every served model.
+- **`class` and `priority` schedule a request and never change a number.**
+  The same request returns the same numbers in either class and at any
+  priority. `class` is `interactive`, the default, or `batch`; any other
+  value is a `400`. `priority` is a 32-bit signed integer, default 0, and a
+  higher priority runs first within its class. All four requests accept
+  both; a server without capability `classes` ignores them.
 
 ## Contexts
 
@@ -119,8 +184,9 @@ a queue context a client builds at startup:
 
 ```json
 POST /council/v2/contexts
-{"context": {"thinking": true, "tools": […], "queue": "next_command", "messages": […]}}
--> {"head": "snap:51d0…", "tokens": 1840, "kept": 0, "fed": 1840, "from": null, "dry_run": false,
+{"model": "google/gemma-4-26B-A4B-it",
+ "context": {"thinking": true, "tools": […], "queue": "next_command", "messages": […]}}
+-> {"model": "google/gemma-4-26B-A4B-it", "head": "snap:51d0…", "tokens": 1840, "kept": 0, "fed": 1840, "from": null, "dry_run": false,
     "snapshots": [{"id": "snap:9a1e…", "message": 1, "tokens": 412, "tier": "host"},
                   {"id": "snap:51d0…", "message": 4, "tokens": 1840, "tier": "host"}]}
 ```
@@ -179,8 +245,8 @@ POST /council/v2/contexts
 
 ```json
 GET /council/v2/snapshots/snap:51d0…
--> {"id": "snap:51d0…", "tokens": 1840, "tier": "host", "bytes": 829030400,
-    "pins": [{"owner": "kernel-7f3a", "expires_in_s": 3412}]}
+-> {"id": "snap:51d0…", "model": "google/gemma-4-26B-A4B-it", "tokens": 1840, "tier": "host",
+    "bytes": 829030400, "pins": [{"owner": "kernel-7f3a", "expires_in_s": 3412}]}
 
 PUT /council/v2/pins/kernel-7f3a
 {"snapshots": ["snap:51d0…", "snap:c4e2…"], "ttl_s": 3600}
@@ -189,6 +255,14 @@ PUT /council/v2/pins/kernel-7f3a
     "expires_in_s": 3600}
 ```
 
+- **A snapshot id is `<scheme>:<hex>`:** a scheme of 1 to 16 lowercase
+  letters and digits, then 32 to 128 lowercase hex digits, such as `snap:`
+  and 64 digits, or `blake3:` and 64 digits. A client treats it as opaque
+  text and never derives one. A server derives it from the build's tokens,
+  boundaries, and identity (mkviolet), or from the bytes of the model state
+  (a content id); either way an id names one model state and is never
+  reused for another. When a server's feeding does not repeat bit for bit,
+  the same context built twice may get two ids.
 - **An owner is any printable name a client chooses,** up to 128
   characters and without a slash, such as a kernel id. It names pins only.
 - **`PUT` replaces the owner's whole set** and renews its time, so a client
@@ -262,9 +336,9 @@ POST /council/v2/reads
 - **A suffix is the client's own structure**, so its special-token text
   tokenizes as single ids. This is the one place content may be control;
   `signals.control_text` still reports each hit.
-- The response has one read for each context and suffix, with its
-  `context` index, `snapshot`, and `suffix` index,
-  the letters' log probabilities as `logprobs`, their `mass`, and the `top`
+- The response names `model` and has one read for each context and
+  suffix, with its `context` index, `snapshot`, and `suffix` index, the
+  letters' log probabilities as `logprobs`, their `mass`, and the `top`
   tokens as `{token, id, logprob}`, so a client sees where the rest of the
   probability went. Reads are not pooled; a client that pools follows the
   decision rules.
@@ -282,9 +356,9 @@ POST /council/v2/generations
   context as `POST /contexts` does, then samples the reply. The client
   appends the reply to its own messages for the next request.
 - **`stream: true`** sends server-sent events: `token`, as `/mk/v1`'s, then
-  `done` with the reply's `content`, `reasoning`, `tool_calls`, `finish`,
-  `usage` (`prompt`, `kept`, `fed`, `completion`), `head`, and the
-  context's `snapshots`. Closing the stream cancels the reply. Without
+  `done` with `model`, the reply's `content`, `reasoning`, `tool_calls`,
+  `finish`, `usage` (`prompt`, `kept`, `fed`, `completion`), `head`, and
+  the context's `snapshots`. Closing the stream cancels the reply. Without
   `stream`, `done` is the JSON response.
 - **The server names each call of the reply** with the `id` a later `tool`
   message answers. A call that does not parse is kept as written,
@@ -326,31 +400,46 @@ control, except a `reads` suffix; each context describes for itself; no
 winner is decided; failures are explicit; the rendering is the server's.
 One more:
 
-7. **A snapshot never changes.** Its id names its tokens and the boundaries
-   along them, so a read from it reads exactly the context that made it,
-   and a number never comes from history the request did not send.
+7. **A snapshot never changes.** Its id names one model state, made by one
+   identity from its tokens and the boundaries along them, so a read from it
+   reads exactly the context that made it, and a number never comes from
+   history the request did not send.
 
 ## Identity, limits, capabilities
 
-As v1, plus:
+`GET /council/v2/identity` returns `models`, `limits`, `capabilities`, and
+`extensions`, as "Served models" shows. Each entry of `models` has v1's
+identity fields, `model`, `aliases`, `weight_hash`, `tokenizer_hash`,
+`template`, `engine`, `device`, and, with `describe`, `text_stop`, plus
+`status`, `limits`, and `capabilities`. A limit or capability belongs to the
+served model when it depends on the model, and to the server when it depends
+on the store or on specs, which every served model shares.
 
-| Limit | Means |
-|---|---|
-| `context_tokens` | The longest context, or a generation's prompt and reply. |
-| `decision_context_tokens` | The longest context a decision reads, not counting the spec and the case rendered after it. |
-| `snapshot_bytes` | What one token of a snapshot costs. |
-| `pin_bytes` | The most snapshot bytes all pins together keep. |
+| Limit | Where | Means |
+|---|---|---|
+| `context_tokens` | served model | The longest context, or a generation's prompt and reply. |
+| `decision_context_tokens` | served model | The longest context a decision reads, not counting the spec and the case rendered after it. |
+| `snapshot_bytes` | served model | What one token of a snapshot costs. |
+| `contexts_per_decision` | served model | The most contexts one decision reads, at most 8. |
+| `default_timeout_ms` | served model | A decision's `timeout_ms` when it sends none. |
+| `text_tokens` | served model | The most tokens a `text` answer writes, with `describe`. |
+| `pin_bytes` | server | The most snapshot bytes all pins together keep, over every served model. |
+| `state_bytes` | server | The longest case, in bytes. |
+| `questions_per_spec` | server | The most questions a spec holds. |
+| `choice_options` | server | The most options a `choice` question has. |
 
 `extensions` lists the server's own route prefixes, such as `["/mk/v1"]`.
 
-| Capability | Means |
-|---|---|
-| `reads` | `POST /council/v2/reads`. |
-| `generate` | `POST /council/v2/generations`. |
-| `think` | Decisions accept `think` with `tokens` above 0. |
-| `pins` | `/council/v2/pins`. |
-| `tiers` | Snapshots report `tier`, and pinned snapshots move between tiers. |
-| `ride` | Generations accept `decisions`. |
+| Capability | Where | Means |
+|---|---|---|
+| `reads` | served model | `POST /council/v2/reads`. |
+| `generate` | served model | `POST /council/v2/generations`. |
+| `think` | served model | Decisions accept `think` with `tokens` above 0. |
+| `ride` | served model | Generations accept `decisions`. |
+| `dry_run`, `leave_one_out`, `describe` | served model | As v1. |
+| `pins` | server | `/council/v2/pins`. |
+| `tiers` | server | Snapshots report `tier`, and pinned snapshots move between tiers. |
+| `classes` | server | Requests are scheduled by `class` and `priority`. |
 
 ## Extensions
 
@@ -373,8 +462,8 @@ A server serves the model-specific rest under its own prefix and lists it in
 | council v1 | `system` and `turns` become `messages`, with the system message first, and a context travels with each request instead of living under an id. `snap` moves onto messages. Contexts gain `tools`, `thinking`, and `queue`. `pin` and `persist` become owned pins. Decisions gain `think`. Paths move to `/council/v2`. |
 | HIP megakernel `/mk/v1` | Context ids and `POST /contexts` give way to sending the context; the content-hash id becomes the snapshot id. `reads` takes `contexts` and is otherwise the same. `generate`'s `from.context` becomes `generations` with the context. |
 | lfm2d `/v1/opinion` | Held specs and describe-first carry over as `specs` and `text` questions. Contexts move from a domain-tagged token hash to messages with `snap` boundaries. |
-| mkviolet | One snapshot store for contexts, generations, and decisions; each snapshot stores the KV cache for the tokens after its parent boundary, in memory and on NVMe. `/mk/v1/choices` is gone, replaced by `reads`. v1 contexts and `/mk/v1/generate` keep their own stores. |
-| kaijutsu | The mk provider sends each chat whole, with `snap` on user messages and tool messages. The council builds one queue context per spec at startup, with a `queue` tool whose `answers` schema is the spec's, and pins it under the kernel's name. |
+| mkviolet | One snapshot store for contexts, generations, and decisions; each snapshot stores the KV cache for the tokens after its parent boundary, in memory and on NVMe. `/mk/v1/choices` is gone, replaced by `reads`. v1 contexts and `/mk/v1/generate` keep their own stores. Identity lists its one model under `models`, and a build's response names `model`. |
+| kaijutsu | The mk provider sends each chat whole, with `snap` on user messages and tool messages. The council builds one queue context per spec at startup, with a `queue` tool whose `answers` schema is the spec's, and pins it under the kernel's name. Every request names its `model`. |
 
 ## Open questions
 
@@ -382,9 +471,16 @@ A server serves the model-specific rest under its own prefix and lists it in
   its whole context. On mkviolet, a 32,480-token context renders, checks,
   and returns a `dry_run` response in 79 ms; a server could cache renderings by
   message prefix if that grows.
-- **Snapshot ids across servers.** They stay opaque and per server. A
-  client that moves to another server sends the same messages; nothing
-  else moves.
+- **Snapshots across machines.** A client that moves to another server
+  sends the same messages; nothing else moves. A server could copy a
+  snapshot from another machine when the identity is the same, and content
+  ids make that a lookup. Whether the same identity gives the same model
+  state on a different device layout, such as one card in place of two, is
+  not known; if it does not, the layout belongs in `engine`.
+- **A served model per context.** `model` names one served model for a whole
+  request. A council that pools reads from different served models would
+  name one for each context, and a pooled answer would then have no single
+  identity.
 - **The queue tool on models without tool training.** A server without a
   tool-call template responds to `queue` with a `400`; whether the server should
   instead deliver the case as a user message, without saying so, is open.

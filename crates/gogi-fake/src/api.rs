@@ -5,7 +5,9 @@ use std::collections::{HashSet, VecDeque};
 use gogi_proto::canon::{sha256_hex, spec_id_of};
 use gogi_proto::context::Context;
 use gogi_proto::decision::{DecisionRequest, PoolMethod, PoolWeights, check_queue_schema, queue_call};
+use gogi_proto::error::ErrorBody;
 use gogi_proto::generation::GenerationRequest;
+use gogi_proto::identity::{ModelStatus, ServerIdentity};
 use gogi_proto::math::{self, Row, WeightSpec};
 use gogi_proto::message::{Message, ToolCall};
 use gogi_proto::pins::{PinsPut, is_owner};
@@ -15,9 +17,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
 use crate::model::{self, State, VOCAB};
-use crate::state::{BYTES_PER_TOKEN, IDENTITY_KEY, Pins, Store, snapshot_id};
+use crate::state::{BYTES_PER_TOKEN, FakeModel, Pins, Store, snapshot_id};
 
-pub const MODEL: &str = "gogi-toy-1";
 pub const TEMPLATE: &str = "gogi-toy-chat-1";
 
 pub enum Resp {
@@ -84,18 +85,44 @@ fn unescape(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The identity fields a served model's numbers depend on.
+fn identity_of(m: &FakeModel) -> Value {
+    json!({"model": m.name, "weight_hash": format!("0x{:016X}", m.seed), "tokenizer_hash": "bytes-v1", "template": TEMPLATE,
+           "engine": format!("gogi-fake:{}", env!("CARGO_PKG_VERSION"))})
+}
+
 pub fn identity(store: &Store) -> Value {
+    let models: Vec<Value> = store
+        .cfg
+        .models
+        .iter()
+        .map(|m| {
+            let mut v = identity_of(m);
+            v["aliases"] = json!(m.aliases);
+            v["status"] = json!(m.status);
+            v["device"] = json!("cpu");
+            v["limits"] = json!({"context_tokens": store.cfg.context_tokens, "decision_context_tokens": store.cfg.decision_context_tokens,
+                                 "snapshot_bytes": BYTES_PER_TOKEN, "contexts_per_decision": 8, "default_timeout_ms": 30000});
+            v["capabilities"] = json!(["reads", "generate", "dry_run", "leave_one_out"]);
+            v
+        })
+        .collect();
     json!({
-        "model": MODEL, "aliases": [], "weight_hash": "0x0", "tokenizer_hash": "bytes-v1",
-        "engine": format!("gogi-fake:{}", env!("CARGO_PKG_VERSION")), "device": "cpu",
-        "template": TEMPLATE,
-        "limits": {"context_tokens": store.cfg.context_tokens, "state_bytes": 65536, "contexts_per_decision": 8,
-                   "questions_per_spec": 16, "choice_options": 26, "default_timeout_ms": 30000,
-                   "pin_bytes": store.cfg.pin_bytes, "snapshot_bytes": BYTES_PER_TOKEN,
-                   "decision_context_tokens": store.cfg.decision_context_tokens},
-        "capabilities": ["reads", "generate", "pins", "dry_run", "leave_one_out"],
+        "models": models,
+        "limits": {"state_bytes": 65536, "choice_options": 26, "questions_per_spec": 16, "pin_bytes": store.cfg.pin_bytes},
+        "capabilities": ["pins"],
         "extensions": [],
     })
+}
+
+/// The served model a request names, or the `400` or `503` that refuses it.
+fn route(store: &Store, model: Option<&str>) -> Result<FakeModel, Resp> {
+    let id: ServerIdentity = serde_json::from_value(identity(store)).expect("the fake's identity decodes");
+    let m = id.route(model).map_err(invalid)?;
+    if m.status != ModelStatus::Ready {
+        return Err(Resp::Json(503, serde_json::to_value(ErrorBody::unavailable(m)).unwrap()));
+    }
+    Ok(store.cfg.models.iter().find(|f| f.name == m.model).cloned().expect("identity lists the config's models"))
 }
 
 pub fn handle(store: &mut Store, method: &str, path: &str, body: &[u8]) -> Resp {
@@ -141,7 +168,7 @@ pub fn handle(store: &mut Store, method: &str, path: &str, body: &[u8]) -> Resp 
 // ---- specs
 
 fn held_spec(id: &str, spec: &Value) -> Value {
-    json!({"spec_id": id, "spec": spec, "template": TEMPLATE})
+    json!({"spec_id": id, "spec": spec})
 }
 
 fn rules() -> SpecRules {
@@ -185,26 +212,26 @@ impl Built {
     }
 }
 
-/// Renders a context and builds it: starts from the longest held snapshot whose tokens begin it,
-/// and holds a snapshot at each boundary and at the end unless `dry_run`.
-fn build(store: &mut Store, c: &Context, dry_run: bool) -> Built {
+/// Renders a context and builds it on served model `m`: starts from the longest snapshot of `m`
+/// held whose tokens begin it, and holds a snapshot at each boundary and at the end unless `dry_run`.
+fn build(store: &mut Store, m: &FakeModel, c: &Context, dry_run: bool) -> Built {
     let r = model::render(&c.tools, c.thinks(), &c.messages, false);
     let mut counts = Vec::new();
     let mut cuts = Vec::new();
     for cut in &r.cuts {
         counts.push(cut.tokens);
-        cuts.push((snapshot_id(&r.tokens[..cut.tokens], &counts), *cut));
+        cuts.push((snapshot_id(m, &r.tokens[..cut.tokens], &counts), *cut));
     }
     let head = cuts.last().unwrap().0.clone();
     // The longest held snapshot whose tokens begin the context: a boundary of this context, or
     // the head a generation held after its reply.
     let n = r.end;
-    let best = store.snaps.iter().filter(|(_, s)| s.tokens.len() <= n && r.tokens.starts_with(&s.tokens)).max_by(|a, b| a.1.tokens.len().cmp(&b.1.tokens.len()).then(b.0.cmp(a.0)));
+    let best = store.snaps.iter().filter(|(_, s)| s.model == m.name && s.tokens.len() <= n && r.tokens.starts_with(&s.tokens)).max_by(|a, b| a.1.tokens.len().cmp(&b.1.tokens.len()).then(b.0.cmp(a.0)));
     let (kept, from) = best.map_or((0, None), |(id, s)| (s.tokens.len(), Some(id.clone())));
     if !dry_run {
         let mut parent = None;
         for (id, cut) in &cuts {
-            store.hold(id.clone(), &r.tokens[..cut.tokens], parent);
+            store.hold(id.clone(), &m.name, &r.tokens[..cut.tokens], parent);
             parent = Some(id.clone());
         }
     }
@@ -216,6 +243,10 @@ fn build_route(store: &mut Store, body: &[u8]) -> Resp {
         Ok(r) => r,
         Err(r) => return r,
     };
+    let m = match route(store, req.model.as_deref()) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
     if let Err(e) = req.context.check() {
         return invalid(e);
     }
@@ -225,9 +256,9 @@ fn build_route(store: &mut Store, body: &[u8]) -> Resp {
     if n >= limit {
         return context_full(n, limit);
     }
-    let b = build(store, &req.context, dry_run);
+    let b = build(store, &m, &req.context, dry_run);
     let snapshots = if dry_run { vec![] } else { b.infos(store) };
-    Resp::Json(200, json!({"head": b.head, "tokens": n, "kept": b.kept, "fed": n - b.kept, "from": b.from, "dry_run": dry_run, "snapshots": snapshots}))
+    Resp::Json(200, json!({"model": m.name, "head": b.head, "tokens": n, "kept": b.kept, "fed": n - b.kept, "from": b.from, "dry_run": dry_run, "snapshots": snapshots}))
 }
 
 fn snapshot_route(store: &Store, id: &str) -> Resp {
@@ -238,7 +269,7 @@ fn snapshot_route(store: &Store, id: &str) -> Resp {
         .filter(|(_, p)| p.snapshots.iter().any(|x| x == id))
         .map(|(o, p)| json!({"owner": o, "expires_in_s": store.expires_in(p.expires)}))
         .collect();
-    Resp::Json(200, json!({"id": id, "tokens": s.tokens.len(), "tier": "host", "bytes": store.own_tokens(id) as u64 * BYTES_PER_TOKEN, "pins": pins}))
+    Resp::Json(200, json!({"id": id, "model": s.model, "tokens": s.tokens.len(), "tier": "host", "bytes": store.own_tokens(id) as u64 * BYTES_PER_TOKEN, "pins": pins}))
 }
 
 fn pins_put(store: &mut Store, owner: &str, body: &[u8]) -> Resp {
@@ -289,6 +320,10 @@ fn reads(store: &mut Store, body: &[u8]) -> Resp {
         Ok(r) => r,
         Err(r) => return r,
     };
+    let m = match route(store, req.model.as_deref()) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
     if let Err(e) = req.validate() {
         return invalid(e);
     }
@@ -311,8 +346,8 @@ fn reads(store: &mut Store, body: &[u8]) -> Resp {
         if n + longest >= store.cfg.context_tokens {
             return context_full(n + longest, store.cfg.context_tokens);
         }
-        let b = build(store, c, false);
-        let base = State::after(&b.tokens);
+        let b = build(store, &m, c, false);
+        let base = State::after(m.seed, &b.tokens);
         for (si, suffix) in suffixes.iter().enumerate() {
             let st = suffix.iter().fold(base, |s, &t| s.step(t));
             let lp = model::log_softmax(&st.logits());
@@ -328,7 +363,7 @@ fn reads(store: &mut Store, body: &[u8]) -> Resp {
             out.push(json!({"context": ci, "snapshot": b.head, "suffix": si, "logprobs": logprobs, "mass": math::log_sum_exp(&ls), "top": tops}));
         }
     }
-    Resp::Json(200, json!({"reads": out, "signals": {"control_text": control}}))
+    Resp::Json(200, json!({"model": m.name, "reads": out, "signals": {"control_text": control}}))
 }
 
 // ---- generations
@@ -392,6 +427,10 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
         Ok(r) => r,
         Err(r) => return r,
     };
+    let m = match route(store, req.model.as_deref()) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
     if let Err(e) = req.validate() {
         return invalid(e);
     }
@@ -406,7 +445,7 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
     if prompt.tokens.len() + 1 >= limit {
         return context_full(prompt.tokens.len(), limit);
     }
-    let b = build(store, c, false);
+    let b = build(store, &m, c, false);
     let sample = req.sample.clone().unwrap_or_default();
     let temperature = sample.temperature.unwrap_or(1.0);
     let seed = sample.seed.unwrap_or_else(|| u64::from_le_bytes(sha256_hex(&prompt.tokens.iter().flat_map(|t| t.to_le_bytes()).collect::<Vec<u8>>()).as_bytes()[..8].try_into().unwrap()));
@@ -414,7 +453,7 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
     let trigger = !c.tools.is_empty() && c.messages.last().and_then(|m| m.content.as_deref()).is_some_and(|t| t.contains("CALL"));
 
     let mut toks = prompt.tokens.clone();
-    let mut st = State::after(&toks);
+    let mut st = State::after(m.seed, &toks);
     let mut phase = if thinking { Phase::Think } else { Phase::Answer };
     let (mut reasoning, mut content): (Vec<u8>, Vec<u8>) = (vec![], vec![]);
     let mut forced: VecDeque<u32> = VecDeque::new();
@@ -480,13 +519,13 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
     let mut messages = c.messages.clone();
     messages.push(reply);
     let after = Context { messages, ..c.clone() };
-    let held = build(store, &after, false);
+    let held = build(store, &m, &after, false);
     let done = json!({
         "content": content, "reasoning": reasoning,
         "tool_calls": tool_calls.iter().map(|t| json!({"id": t.id, "name": t.name, "arguments": t.arguments})).collect::<Vec<_>>(),
         "finish": finish,
         "usage": {"prompt": prompt.tokens.len(), "kept": b.kept, "fed": prompt.tokens.len() - b.kept, "completion": n},
-        "head": held.head, "snapshots": held.infos(store), "seed": seed, "ms": {"prefill": 0.0, "decode": 0.0}, "model": MODEL,
+        "head": held.head, "snapshots": held.infos(store), "seed": seed, "ms": {"prefill": 0.0, "decode": 0.0}, "model": m.name,
     });
     if req.stream.unwrap_or(false) {
         events.push(("done", done));
@@ -511,14 +550,13 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
         Ok(r) => r,
         Err(r) => return r,
     };
+    let m = match route(store, req.model.as_deref()) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
     if let Some(t) = &req.think {
         if t.tokens > 0 {
-            return bad_param("think", "think above 0 tokens needs the think capability, which this server does not have");
-        }
-    }
-    if let Some(m) = &req.model {
-        if m != MODEL {
-            return bad_param("model", format!("model {} is not this server's", m));
+            return bad_param("think", "think above 0 tokens needs the think capability, which this model does not have");
         }
     }
     if let Err(e) = req.validate() {
@@ -604,7 +642,7 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
                 if n > store.cfg.decision_context_tokens {
                     return err(413, "too_large", format!("context is {} tokens; decisions read contexts of up to {}", n, store.cfg.decision_context_tokens), Some("decision_context_tokens"));
                 }
-                let b = build(store, c, false);
+                let b = build(store, &m, c, false);
                 fed += n - b.kept;
                 (Some(b.head), b.tokens, queue_call(c).map(|call| (c, call.id.clone())))
             }
@@ -630,7 +668,7 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
             for &qi in &sorted {
                 let q = &ask.questions[qi];
                 model::push_text(&mut toks, &format!("{}:\"", q.id));
-                let lp = model::log_softmax(&State::after(&toks).logits());
+                let lp = model::log_softmax(&State::after(m.seed, &toks).logits());
                 let read: Vec<f64> = ask.chosen[qi].iter().map(|&j| lp[usize::from(b'A') + j]).collect();
                 let best = (0..read.len()).fold(0, |b, i| if read[i] > read[b] { i } else { b });
                 model::push_text(&mut toks, &format!("{}\",", (b'A' + ask.chosen[qi][best] as u8) as char));
@@ -650,7 +688,7 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
                 let q = &ask.questions[qi];
                 let mut toks = text_all.clone();
                 model::push_text(&mut toks, &format!("{} {}:", q.id, q.instructions));
-                let lp = model::log_softmax(&State::after(&toks).logits());
+                let lp = model::log_softmax(&State::after(m.seed, &toks).logits());
                 lps[qi] = Some(ask.chosen[qi].iter().map(|&j| lp[usize::from(b'A') + j]).collect());
                 fed += toks.len() - base_tokens.len();
             }
@@ -711,14 +749,13 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
         .enumerate()
         .map(|(i, (head, _, _, rendered))| json!({"context": if named[i].is_some() { json!(i) } else { Value::Null }, "snapshot": head, "answers": read_answers[i], "rendered_sha256": rendered, "tokens": 0, "ms": 0.0}))
         .collect();
-    let mut identity = json!({"model": MODEL, "weight_hash": "0x0", "tokenizer_hash": "bytes-v1", "template": TEMPLATE, "engine": format!("gogi-fake:{}", env!("CARGO_PKG_VERSION"))});
+    let mut identity = identity_of(&m);
     if let Some(s) = spec_id {
         identity["spec_id"] = json!(s);
     }
-    let _ = IDENTITY_KEY;
     Resp::Json(
         200,
-        json!({"model": MODEL, "answers": answers, "reads": reads_json,
+        json!({"model": m.name, "answers": answers, "reads": reads_json,
                "pool": {"method": method, "weights": weights_kind, "normalized": normalized},
                "signals": {"control_text": control}, "identity": identity,
                "usage": {"input_tokens": input_tokens, "output_tokens": 0, "fed_tokens": fed},

@@ -97,7 +97,7 @@ def _call(url, method, path, body=None):
 def test_the_fake_serves_and_its_spec_ids_match_ours():
     with gogi.FakeServer() as fake:
         status, ident = _call(fake.url, "GET", "/council/v2/identity")
-        assert status == 200 and ident["engine"].startswith("gogi-fake")
+        assert status == 200 and ident["models"][0]["engine"].startswith("gogi-fake")
         status, held = _call(fake.url, "POST", "/council/v2/specs", GATE)
         assert status == 200 and held["spec_id"] == gogi.spec_id(GATE)
     with pytest.raises(ValueError, match="closed"):
@@ -116,3 +116,72 @@ def test_the_fake_keeps_specs_and_pins_across_a_restart_and_expires_pins(tmp_pat
         assert _call(fake.url, "GET", "/council/v2/pins/t")[1]["snapshots"] == [built["head"]]
         fake.advance_clock(61)
         assert _call(fake.url, "GET", "/council/v2/pins/t")[0] == 404
+
+
+CTX = {"messages": [{"role": "user", "content": "u", "snap": True}]}
+
+
+def _read(url, model):
+    return _call(url, "POST", "/council/v2/reads", {"model": model, "contexts": [CTX], "suffixes": ["x"], "letters": ["A", "B"]})
+
+
+def test_the_default_fake_serves_one_model_that_a_request_may_leave_out():
+    with gogi.FakeServer() as fake:
+        _, ident = _call(fake.url, "GET", "/council/v2/identity")
+        assert [(m["model"], m["aliases"], m["status"]) for m in ident["models"]] == [("gogi-toy-1", ["toy"], "ready")]
+        status, built = _call(fake.url, "POST", "/council/v2/contexts", {"context": CTX})
+        assert status == 200 and built["model"] == "gogi-toy-1"
+
+
+def test_served_models_route_by_name_or_alias_and_refuse_when_not_ready():
+    models = ["day", {"name": "night", "aliases": ["n"], "status": "unloaded"}, {"name": "twin", "seed": 0}]
+    with gogi.FakeServer(models=models) as fake:
+        _, ident = _call(fake.url, "GET", "/council/v2/identity")
+        assert [(m["model"], m["status"]) for m in ident["models"]] == [("day", "ready"), ("night", "unloaded"), ("twin", "ready")]
+        status, e = _call(fake.url, "POST", "/council/v2/contexts", {"context": CTX})
+        assert (status, e["error"]["param"]) == (400, "model")
+        status, e = _read(fake.url, "n")
+        assert (status, e["error"]["type"], e["error"]["model"], e["error"]["status"]) == (503, "model_unavailable", "night", "unloaded")
+        fake.set_status("night", "ready")
+        status, night = _read(fake.url, "n")
+        assert status == 200 and night["model"] == "night"
+        _, day = _read(fake.url, "day")
+        _, twin = _read(fake.url, "twin")
+        assert night["reads"][0]["logprobs"] != day["reads"][0]["logprobs"]
+        assert twin["reads"][0]["logprobs"] == day["reads"][0]["logprobs"], "the same seed gives the same numbers"
+        assert twin["reads"][0]["snapshot"] != day["reads"][0]["snapshot"], "but each served model has its own snapshots"
+        fake.set_status("night", "draining")
+        assert _read(fake.url, "night")[0] == 503
+        fake.set_status("night", "ready")
+        status, again = _call(fake.url, "POST", "/council/v2/contexts", {"model": "night", "context": CTX})
+        assert status == 200 and again["fed"] == 0, "a snapshot outlives a status change"
+        fake.restart()
+        assert _read(fake.url, "night")[0] == 503, "a restart returns a model to its configured status"
+
+
+def test_the_fake_refuses_a_bad_model_list_or_status():
+    for models, match in [([], "non-empty"), ([{"name": "a", "status": "warming"}], "warming"), (["a", {"name": "b", "aliases": ["a"]}], "a already names"),
+                          ([{"name": "a", "colour": "red"}], "unknown members")]:
+        with pytest.raises(ValueError, match=match):
+            gogi.FakeServer(models=models)
+    with gogi.FakeServer() as fake:
+        with pytest.raises(ValueError, match="no model nope"):
+            fake.set_status("nope", "ready")
+        with pytest.raises(ValueError, match="is not one of"):
+            fake.set_status("gogi-toy-1", "asleep")
+
+
+def test_the_fake_reports_and_keeps_the_limits_it_is_given():
+    with gogi.FakeServer(context_tokens=512, decision_context_tokens=256, pin_bytes=4096, max_snapshots=2) as fake:
+        _, ident = _call(fake.url, "GET", "/council/v2/identity")
+        limits = ident["models"][0]["limits"]
+        assert (limits["context_tokens"], limits["decision_context_tokens"], ident["limits"]["pin_bytes"]) == (512, 256, 4096)
+        status, e = _call(fake.url, "POST", "/council/v2/contexts", {"context": {"messages": [{"role": "user", "content": "x" * 600}]}})
+        assert (status, e["error"]["type"]) == (413, "context_full")
+        heads = [_call(fake.url, "POST", "/council/v2/contexts", {"context": {"messages": [{"role": "user", "content": f"u{i}"}]}})[1]["head"] for i in range(3)]
+        assert _call(fake.url, "GET", "/council/v2/snapshots/" + heads[0])[0] == 404, "past max_snapshots the oldest is evicted"
+        assert _call(fake.url, "GET", "/council/v2/snapshots/" + heads[2])[0] == 200
+        big = {"messages": [{"role": "user", "content": "y" * 200}]}
+        _, b = _call(fake.url, "POST", "/council/v2/contexts", {"context": big})
+        status, e = _call(fake.url, "PUT", "/council/v2/pins/t", {"snapshots": [b["head"]], "ttl_s": 60})
+        assert (status, e["error"]["param"]) == (413, "pin_bytes")

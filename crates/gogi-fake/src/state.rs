@@ -1,4 +1,4 @@
-//! What the fake holds: snapshots, pins, and specs.
+//! What the fake holds: its served models, snapshots, pins, and specs.
 //!
 //! Specs and pins, with the snapshots they keep, are written to `state_dir` and survive a
 //! restart. Other snapshots live in memory only.
@@ -9,15 +9,33 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gogi_proto::canon::sha256_hex;
+use gogi_proto::identity::ModelStatus;
 use serde_json::{Value, json};
 
 pub const IDENTITY_KEY: &str = "gogi-fake-1";
 /// What one token of a snapshot costs, as `limits.snapshot_bytes` reports.
 pub const BYTES_PER_TOKEN: u64 = 64;
 
+/// A served model of the fake. Its `seed` makes its numbers its own.
+#[derive(Clone, Debug)]
+pub struct FakeModel {
+    pub name: String,
+    pub aliases: Vec<String>,
+    pub seed: u64,
+    pub status: ModelStatus,
+}
+
+impl FakeModel {
+    pub fn ready(name: &str, seed: u64) -> FakeModel {
+        FakeModel { name: name.into(), aliases: vec![], seed, status: ModelStatus::Ready }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub addr: String,
+    /// The served models, in the order identity lists them.
+    pub models: Vec<FakeModel>,
     pub state_dir: Option<PathBuf>,
     /// The most tokens a prompt may have, counting a generation's prompt and reply together.
     pub context_tokens: usize,
@@ -30,11 +48,14 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { addr: "127.0.0.1:0".into(), state_dir: None, context_tokens: 4096, decision_context_tokens: 3072, pin_bytes: 1 << 20, max_snapshots: 10_000 }
+        let toy = FakeModel { aliases: vec!["toy".into()], ..FakeModel::ready("gogi-toy-1", 0) };
+        Config { addr: "127.0.0.1:0".into(), models: vec![toy], state_dir: None, context_tokens: 4096, decision_context_tokens: 3072, pin_bytes: 1 << 20, max_snapshots: 10_000 }
     }
 }
 
 pub struct Snap {
+    /// The served model the snapshot belongs to.
+    pub model: String,
     pub tokens: Arc<Vec<u32>>,
     pub parent: Option<String>,
     born: u64,
@@ -56,11 +77,15 @@ pub struct Store {
     next_born: u64,
 }
 
-/// The id of the snapshot after `tokens`, with boundaries at the token counts `counts`.
-pub fn snapshot_id(tokens: &[u32], counts: &[usize]) -> String {
+/// The id of served model `model`'s snapshot after `tokens`, with boundaries at the token counts
+/// `counts`.
+pub fn snapshot_id(model: &FakeModel, tokens: &[u32], counts: &[usize]) -> String {
     let mut bytes = Vec::with_capacity(tokens.len() * 4 + 64);
     bytes.extend_from_slice(b"gogi-fake-held-v1\0");
     bytes.extend_from_slice(IDENTITY_KEY.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(model.name.as_bytes());
+    bytes.extend_from_slice(&model.seed.to_le_bytes());
     bytes.push(0);
     for t in tokens {
         bytes.extend_from_slice(&t.to_le_bytes());
@@ -101,13 +126,13 @@ impl Store {
         self.snaps.contains_key(id)
     }
 
-    /// Holds a snapshot built on `parent`.
-    pub fn hold(&mut self, id: String, tokens: &[u32], parent: Option<String>) {
+    /// Holds a snapshot of served model `model` built on `parent`.
+    pub fn hold(&mut self, id: String, model: &str, tokens: &[u32], parent: Option<String>) {
         if self.snaps.contains_key(&id) {
             return;
         }
         self.next_born += 1;
-        self.snaps.insert(id, Snap { tokens: Arc::new(tokens.to_vec()), parent, born: self.next_born });
+        self.snaps.insert(id, Snap { model: model.to_string(), tokens: Arc::new(tokens.to_vec()), parent, born: self.next_born });
         self.evict();
     }
 
@@ -170,7 +195,7 @@ impl Store {
         let Some(dir) = &self.cfg.state_dir else { return };
         let kept = self.kept();
         let snaps: serde_json::Map<String, Value> =
-            kept.iter().filter_map(|id| self.snaps.get(id).map(|s| (id.clone(), json!({"tokens": *s.tokens, "parent": s.parent})))).collect();
+            kept.iter().filter_map(|id| self.snaps.get(id).map(|s| (id.clone(), json!({"model": s.model, "tokens": *s.tokens, "parent": s.parent})))).collect();
         let pins: serde_json::Map<String, Value> = self.pins.iter().map(|(o, p)| (o.clone(), json!({"snapshots": p.snapshots, "expires": p.expires}))).collect();
         let v = json!({"specs": self.specs, "pins": pins, "snapshots": snaps});
         let _ = std::fs::create_dir_all(dir);
@@ -192,7 +217,7 @@ impl Store {
         snaps.sort_by_key(|(_, s)| s["tokens"].as_array().map_or(0, |t| t.len()));
         for (id, s) in snaps {
             let tokens: Vec<u32> = s["tokens"].as_array().into_iter().flatten().filter_map(|t| t.as_u64().map(|t| t as u32)).collect();
-            self.hold(id.clone(), &tokens, s["parent"].as_str().map(String::from));
+            self.hold(id.clone(), s["model"].as_str().unwrap_or(""), &tokens, s["parent"].as_str().map(String::from));
         }
         let now = self.now();
         for (o, p) in v["pins"].as_object().into_iter().flatten() {

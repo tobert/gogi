@@ -85,6 +85,7 @@ impl Suite {
 
         // A stream sends token events and ends with done.
         let body = json!({"context": ctx, "max_tokens": 300, "sample": {"temperature": 0}, "stream": true});
+        let body = self.routed("POST", "/council/v2/generations", Some(body)).unwrap_or_default();
         match self.http.raw("POST", "/council/v2/generations", Some(&body)) {
             Err(e) => self.r.fail("stream succeeds", e),
             Ok(response) => {
@@ -104,7 +105,7 @@ impl Suite {
         }
 
         // A prompt over context_tokens is a 413 context_full, returned before anything runs.
-        let limit = self.identity.as_ref().map_or(0, |i| i.limits.context_tokens) as usize;
+        let limit = self.limits().map_or(0, |l| l.context_tokens) as usize;
         let filler = filler_text(limit * 6, &self.nonce);
         let big = self.ctx(vec![json!({"role": "user", "content": filler})]);
         if limit * 7 > 900_000 {

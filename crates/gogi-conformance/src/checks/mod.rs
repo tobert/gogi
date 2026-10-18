@@ -2,13 +2,14 @@
 
 mod decisions;
 mod generations;
+mod models;
 mod pins;
 mod reads;
 mod restart;
 mod ride;
 
 use gogi_proto::context::ContextBuilt;
-use gogi_proto::identity::{Capability, ServerIdentity};
+use gogi_proto::identity::{Capability, ModelLimits, ModelStatus, ServerIdentity};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
@@ -20,12 +21,38 @@ pub(crate) fn shell_tools() -> Value {
 }
 
 impl Suite {
+    /// Whether the server or the checked served model declares a capability.
     pub(crate) fn has(&self, c: Capability) -> bool {
-        self.identity.as_ref().is_some_and(|i| i.has(c))
+        self.identity.as_ref().is_some_and(|i| i.has(c)) || self.model.as_ref().is_some_and(|m| m.has(c))
     }
 
-    /// Sends a request and returns its status and body. A transport failure is recorded.
+    /// The checked served model's limits.
+    pub(crate) fn limits(&self) -> Option<&ModelLimits> {
+        self.model.as_ref().map(|m| &m.limits)
+    }
+
+    /// The checked served model's `model`.
+    pub(crate) fn model_name(&self) -> String {
+        self.model.as_ref().map_or_else(String::new, |m| m.model.clone())
+    }
+
+    /// Names the checked served model in a body for a route that reads a context, unless the body
+    /// names a model already. Other bodies pass unchanged.
+    pub(crate) fn routed(&self, method: &str, path: &str, body: Option<Value>) -> Option<Value> {
+        let reads = ["/council/v2/contexts", "/council/v2/decisions", "/council/v2/reads", "/council/v2/generations"];
+        match body {
+            Some(Value::Object(mut b)) if method == "POST" && reads.contains(&path) => {
+                b.entry("model").or_insert_with(|| json!(self.model_name()));
+                Some(Value::Object(b))
+            }
+            other => other,
+        }
+    }
+
+    /// Sends a request and returns its status and body. A transport failure is recorded. A body for
+    /// a route that reads a context names the checked served model unless it names one.
     pub(crate) fn send(&mut self, what: &str, method: &str, path: &str, body: Option<Value>) -> Option<(u16, Value)> {
+        let body = self.routed(method, path, body);
         match self.http.call(method, path, body.as_ref()) {
             Ok(r) => Some(r),
             Err(e) => {
@@ -126,19 +153,44 @@ impl Suite {
 
     // ---- identity
 
-    pub(crate) fn identity(&mut self) -> bool {
+    /// Reads identity and chooses the served model to check: `want`, by name or alias, or else the
+    /// first `ready` one.
+    pub(crate) fn identity(&mut self, want: Option<&str>) -> bool {
         let Some(v) = self.expect("identity succeeds", "GET", "/council/v2/identity", None, 200) else { return false };
         let Some(id) = self.decode::<ServerIdentity>("identity has the contract's fields", &v) else { return false };
         let l = &id.limits;
-        self.r.check("identity limits are positive", l.context_tokens > 0 && l.state_bytes > 0 && l.contexts_per_decision >= 1 && l.contexts_per_decision <= 8 && l.choice_options >= 2 && l.default_timeout_ms > 0, &id.limits);
-        self.r.check("identity limits name the decision limit, pins, and snapshot cost", l.decision_context_tokens.is_some() && l.pin_bytes.is_some() && l.snapshot_bytes.is_some(), &id.limits);
-        self.r.check(
-            "identity decision_context_tokens is at most context_tokens",
-            l.decision_context_tokens.is_none_or(|d| d <= l.context_tokens),
-            &id.limits,
-        );
-        let unknown = id.capabilities.iter().filter(|c| **c == Capability::Unknown).count();
-        self.r.ok_with("identity capabilities", format!("{} capabilities, {} unknown to gogi", id.capabilities.len(), unknown));
+        self.r.check("identity server limits are positive", l.state_bytes > 0 && l.choice_options >= 2, l);
+        self.r.check("identity server limits name pin_bytes when the server has pins", l.pin_bytes.is_some() || !id.has(Capability::Pins), l);
+        self.r.check("identity lists at least one served model", !id.models.is_empty(), &v["models"]);
+        let mut names: Vec<&str> = id.models.iter().flat_map(|m| std::iter::once(m.model.as_str()).chain(m.aliases.iter().map(String::as_str))).collect();
+        let all = names.len();
+        names.sort();
+        names.dedup();
+        self.r.check("each served model's name and aliases name no other", names.len() == all, &names);
+        for m in &id.models {
+            let l = &m.limits;
+            self.r.check(
+                &format!("{}: limits are positive", m.model),
+                l.context_tokens > 0 && l.decision_context_tokens > 0 && l.snapshot_bytes > 0 && (1..=8).contains(&l.contexts_per_decision) && l.default_timeout_ms > 0,
+                l,
+            );
+            self.r.check(&format!("{}: decision_context_tokens is at most context_tokens", m.model), l.decision_context_tokens <= l.context_tokens, l);
+            self.r.check(&format!("{}: its status is one the contract names", m.model), m.status != ModelStatus::Unknown, &m.status);
+        }
+        let caps: Vec<&Capability> = id.capabilities.iter().chain(id.models.iter().flat_map(|m| &m.capabilities)).collect();
+        let unknown = caps.iter().filter(|c| ***c == Capability::Unknown).count();
+        self.r.ok_with("identity capabilities", format!("{} capabilities, {} unknown to gogi", caps.len(), unknown));
+        let chosen = match want {
+            Some(name) => id.route(Some(name)).ok().filter(|m| m.status == ModelStatus::Ready),
+            None => id.models.iter().find(|m| m.status == ModelStatus::Ready),
+        };
+        let Some(m) = chosen.cloned() else {
+            let statuses: Vec<String> = id.models.iter().map(|m| format!("{} {:?}", m.model, m.status)).collect();
+            self.r.fail("a served model to check is ready", format!("no checks ran: {} is not a ready served model; identity lists {:?}", want.unwrap_or("any model"), statuses));
+            return false;
+        };
+        self.r.ok_with("a served model to check is ready", m.model.clone());
+        self.model = Some(m);
         self.identity = Some(id);
         true
     }

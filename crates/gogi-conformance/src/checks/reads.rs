@@ -51,7 +51,7 @@ impl Suite {
         for (name, body) in bad {
             self.refused(&format!("{} are refused", name), "POST", "/council/v2/reads", Some(body), 400);
         }
-        let limit = self.identity.as_ref().map_or(0, |i| i.limits.context_tokens) as usize;
+        let limit = self.limits().map_or(0, |l| l.context_tokens) as usize;
         if limit * 7 <= 900_000 {
             let big = self.ctx(vec![json!({"role": "user", "content": super::generations::filler_text(limit * 6, &self.nonce)})]);
             self.refused("reads past context_tokens are refused", "POST", "/council/v2/reads", Some(json!({"contexts": [big], "suffixes": ["x"], "letters": ["A", "B"]})), 413);

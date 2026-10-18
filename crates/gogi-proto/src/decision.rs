@@ -6,6 +6,7 @@ use serde_json::{Map, Value};
 
 use crate::context::Context;
 use crate::error::Invalid;
+use crate::identity::Class;
 use crate::ids::{SnapshotId, SpecId};
 use crate::required_nullable;
 
@@ -60,6 +61,7 @@ pub struct Think {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DecisionRequest {
+    /// The served model: its `model` or an alias. May be absent only when the server serves one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// A string, object, or array.
@@ -91,6 +93,11 @@ pub struct DecisionRequest {
     pub provider: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub think: Option<Think>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<Class>,
+    /// Higher runs first within its class. Absent: 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
 }
 
 impl DecisionRequest {

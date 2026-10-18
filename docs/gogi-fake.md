@@ -1,8 +1,25 @@
 # gogi-fake: the toy model
 
 `gogi-fake` serves council v2 over a model small enough to read in one sitting. Run it
-with `cargo run -p gogi-fake -- --listen 127.0.0.1:8091 [--state-dir DIR]`, or from Python
-with `with gogi.FakeServer(state_dir=DIR) as fake:`, which serves at `fake.url`.
+with `cargo run -p gogi-fake -- --listen 127.0.0.1:8091 [--state-dir DIR] [--model NAME]...`,
+or from Python with `with gogi.FakeServer(state_dir=DIR) as fake:`, which serves at `fake.url`.
+
+## Served models
+
+By default the fake serves one model, `gogi-toy-1`, with the alias `toy`, so a request may
+leave out `model`. Each `--model NAME` serves a model of that name, ready; with two or more, a
+request names one. Every served model uses the template below. Each has a seed, its position
+among the `--model` flags, that changes its numbers and its `weight_hash`, so two served models
+give two sets of numbers and two sets of snapshots.
+
+In Rust, `Config::models` lists `FakeModel`s with any status, and `Server::set_status` changes
+one while the server runs, as a server does when it loads or unloads a model. Python has the
+same: `gogi.FakeServer(models=["day", {"name": "night", "aliases": ["n"], "seed": 7, "status":
+"unloaded"}])` and `fake.set_status("night", "ready")`. A model given as a name is ready, with
+no aliases and its position as its seed. Two served models with the same seed give the same
+numbers but hold separate snapshots. A restart returns each model to its configured status. A request to a
+served model that is not `ready` is a `503` with `error.type` `model_unavailable`. Snapshots
+and pins stay held through the change.
 
 ## Tokens
 
@@ -35,7 +52,8 @@ generation prompt   <asst> [<think>]
 
 ## Model
 
-The model's state after a token prefix is a hash folded over the tokens. The logits are a
+The model's state after a token prefix is a hash folded over the served model's seed and the
+tokens. The logits are a
 function of that hash, between -6 and 6, so the same prefix gives the same bits.
 
 - Raw reads and decisions read the logits of the letters `A`, `B`, ... after the context and
@@ -48,7 +66,8 @@ function of that hash, between -6 and 6, so the same prefix gives the same bits.
 
 ## Held state
 
-- Snapshot ids hash the identity, the tokens, and the boundary counts along them.
+- Snapshot ids hash the served model, the tokens, and the boundary counts along them. A
+  build starts only from the snapshots of the served model it names.
 - A build starts from the longest held snapshot whose tokens begin the context, and reports
   `kept`, `fed`, and `from`. A generation holds the head after its reply, so the next request
   starts there even though the reply is not marked `snap`.
@@ -59,5 +78,7 @@ function of that hash, between -6 and 6, so the same prefix gives the same bits.
 
 ## Limits
 
-`context_tokens` defaults to 4096 and `decision_context_tokens` to 3072. A prompt past
+`context_tokens` defaults to 4096, `decision_context_tokens` to 3072, `pin_bytes` to 1 MiB,
+and `max_snapshots` to 10,000. Each is a field of `Config` in Rust and an argument of
+`gogi.FakeServer` in Python. A prompt past
 `context_tokens` is a `413` with `error.type` `context_full`.

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::Invalid;
+use crate::identity::Class;
 use crate::ids::SnapshotId;
 use crate::message::{self, Message};
 use crate::required_nullable;
@@ -53,9 +54,17 @@ impl Context {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextBuild {
+    /// The served model: its `model` or an alias. May be absent only when the server serves one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub context: Context,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dry_run: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<Class>,
+    /// Higher runs first within its class. Absent: 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
 }
 
 /// Where a snapshot's model state is stored.
@@ -86,6 +95,8 @@ pub struct SnapshotInfo {
 /// The response to `POST /council/v2/contexts`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextBuilt {
+    /// The served model's `model`, never an alias.
+    pub model: String,
     /// The snapshot at the context's end.
     pub head: SnapshotId,
     pub tokens: u64,
@@ -154,7 +165,7 @@ mod tests {
 
     #[test]
     fn a_build_response_round_trips_and_needs_from() {
-        let v = json!({"head": snap("51d0"), "tokens": 1840, "kept": 0, "fed": 1840, "from": null, "dry_run": false,
+        let v = json!({"model": "m", "head": snap("51d0"), "tokens": 1840, "kept": 0, "fed": 1840, "from": null, "dry_run": false,
             "snapshots": [{"id": snap("9a1e"), "message": 1, "tokens": 412, "tier": "host"}, {"id": snap("51d0"), "message": 4, "tokens": 1840, "tier": "host"}]});
         let r: ContextBuilt = serde_json::from_value(v.clone()).unwrap();
         assert_eq!(serde_json::to_value(&r).unwrap(), v);

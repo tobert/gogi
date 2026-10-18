@@ -31,6 +31,7 @@ fn status_line(code: u16) -> &'static str {
         400 => "400 Bad Request",
         404 => "404 Not Found",
         413 => "413 Payload Too Large",
+        503 => "503 Service Unavailable",
         _ => "500 Internal Server Error",
     }
 }

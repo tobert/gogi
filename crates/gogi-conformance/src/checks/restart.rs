@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use gogi_proto::spec_id_of;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::{Restart, Suite, num};
 
@@ -22,7 +22,8 @@ impl Suite {
         }
         let req = json!({"spec_id": spec_id, "state": "git push origin main", "contexts": [ctx]});
         let before = self.expect("restart: decision succeeds", "POST", "/council/v2/decisions", Some(req.clone()), 200);
-        let identity_before = self.identity.as_ref().and_then(|i| serde_json::to_value(i).ok());
+        let identity_before = self.identity.as_ref().and_then(|i| serde_json::to_value(i).ok()).map(without_status);
+        let model = self.model_name();
 
         let result = match restart {
             Restart::Command(cmd) => match std::process::Command::new("sh").arg("-c").arg(&*cmd).status() {
@@ -37,9 +38,13 @@ impl Suite {
             return;
         }
         let deadline = Instant::now() + Duration::from_secs(300);
+        // The server is back when identity reports the checked served model ready.
         let back = loop {
             if let Ok((200, v)) = self.http.call("GET", "/council/v2/identity", None) {
-                break Some(v);
+                let ready = v["models"].as_array().is_some_and(|ms| ms.iter().any(|m| m["model"] == json!(model) && m["status"] == "ready"));
+                if ready {
+                    break Some(without_status(v));
+                }
             }
             if Instant::now() > deadline {
                 break None;
@@ -47,11 +52,11 @@ impl Suite {
             std::thread::sleep(Duration::from_millis(500));
         };
         let Some(identity_after) = back else {
-            self.r.fail(name, "the server did not answer identity within 300 seconds of the restart");
+            self.r.fail(name, format!("the server did not report {} ready within 300 seconds of the restart", model));
             return;
         };
         self.r.ok_with("the server answers again after the restart", "");
-        self.r.check("identity is unchanged by a restart", identity_before.as_ref() == Some(&identity_after), (&identity_before, &identity_after));
+        self.r.check("identity, apart from status, is unchanged by a restart", identity_before.as_ref() == Some(&identity_after), (&identity_before, &identity_after));
 
         if let Some(g) = self.expect("restart: spec get succeeds", "GET", &format!("/council/v2/specs/{}", spec_id), None, 200) {
             self.r.check("a held spec survives a restart", g["spec"] == spec && Some(g["spec_id"].as_str().unwrap_or("")) == spec_id_of(&spec).ok().as_deref(), &g);
@@ -78,4 +83,14 @@ impl Suite {
         }
         self.expect("restart: spec cleanup", "DELETE", &format!("/council/v2/specs/{}", spec_id), None, 204);
     }
+}
+
+/// Identity with each served model's status removed, which a restart may change.
+fn without_status(mut v: Value) -> Value {
+    for m in v["models"].as_array_mut().into_iter().flatten() {
+        if let Some(o) = m.as_object_mut() {
+            o.remove("status");
+        }
+    }
+    v
 }

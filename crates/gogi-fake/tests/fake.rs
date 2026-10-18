@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
-use gogi_fake::{Config, Server};
+use gogi_fake::{Config, FakeModel, ModelStatus, Server};
 use gogi_proto::decision::DecisionResponse;
 use serde_json::{Value, json};
 
@@ -244,4 +244,44 @@ fn reads_are_per_letter_bit_for_bit_and_report_control_text_in_suffixes() {
     assert!((a["reads"][1]["mass"].as_f64().unwrap() - gogi_proto::math::log_sum_exp(&lp)).abs() < 1e-12);
     let (code, _) = post(&s, "/council/v2/reads", json!({"contexts": [ctx(json!([{"role": "user", "content": "u"}]))], "suffixes": ["x"], "letters": ["AB", "C"]}));
     assert_eq!(code, 400);
+}
+
+fn day_and_night() -> Server {
+    let night = FakeModel { aliases: vec!["night".into()], status: ModelStatus::Unloaded, ..FakeModel::ready("gogi-toy-night", 7) };
+    Server::start(Config { models: vec![FakeModel::ready("gogi-toy-day", 0), night], ..Config::default() }).unwrap()
+}
+
+#[test]
+fn with_two_served_models_a_request_names_one() {
+    let s = day_and_night();
+    let c = ctx(json!([{"role": "user", "content": "u", "snap": true}]));
+    let (code, e) = post(&s, "/council/v2/contexts", json!({"context": c}));
+    assert_eq!((code, &e["error"]["param"]), (400, &json!("model")), "{e}");
+    let (code, e) = post(&s, "/council/v2/contexts", json!({"model": "gogi-toy-1", "context": c}));
+    assert_eq!((code, &e["error"]["param"]), (400, &json!("model")), "{e}");
+    let (code, e) = post(&s, "/council/v2/reads", json!({"model": "night", "contexts": [c], "suffixes": ["x"], "letters": ["A", "B"]}));
+    assert_eq!((code, &e["error"]["type"], &e["error"]["model"], &e["error"]["status"]), (503, &json!("model_unavailable"), &json!("gogi-toy-night"), &json!("unloaded")), "{e}");
+    let (code, day) = post(&s, "/council/v2/contexts", json!({"model": "gogi-toy-day", "context": c}));
+    assert_eq!((code, &day["model"]), (200, &json!("gogi-toy-day")), "{day}");
+    let (_, snap) = call(&s, "GET", &format!("/council/v2/snapshots/{}", day["head"].as_str().unwrap()), None);
+    assert_eq!(snap["model"], "gogi-toy-day");
+}
+
+#[test]
+fn each_served_model_has_its_own_snapshots_and_numbers_and_keeps_them_across_an_unload() {
+    let s = day_and_night();
+    s.set_status("gogi-toy-night", ModelStatus::Ready).unwrap();
+    let c = ctx(json!([{"role": "user", "content": "u", "snap": true}]));
+    let read = |model: &str| post(&s, "/council/v2/reads", json!({"model": model, "contexts": [c], "suffixes": ["x"], "letters": ["A", "B"]}));
+    let ((_, day), (_, night)) = (read("gogi-toy-day"), read("night"));
+    assert_eq!(night["model"], "gogi-toy-night", "an alias is answered with the name");
+    assert_ne!(day["reads"][0]["snapshot"], night["reads"][0]["snapshot"]);
+    assert_ne!(day["reads"][0]["logprobs"], night["reads"][0]["logprobs"]);
+    s.set_status("gogi-toy-night", ModelStatus::Unloaded).unwrap();
+    assert_eq!(read("night").0, 503);
+    s.set_status("gogi-toy-night", ModelStatus::Ready).unwrap();
+    let (_, again) = read("night");
+    assert_eq!(again["reads"], night["reads"]);
+    let (_, b) = post(&s, "/council/v2/contexts", json!({"model": "night", "context": c}));
+    assert_eq!(b["fed"], 0, "the snapshot outlived the unload: {b}");
 }

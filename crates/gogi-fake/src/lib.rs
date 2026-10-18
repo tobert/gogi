@@ -4,7 +4,8 @@
 //! tested against a server whose behavior is known. It keeps the contract's semantics: snapshots
 //! at the boundaries the rendering keeps, builds from the longest held snapshot, pins with an
 //! owner and a `ttl_s`, specs held by content, decisions, raw reads, and generations, with replay
-//! bit for bit. It is not a framework: nothing plugs into it.
+//! bit for bit, for one or more served models whose status a test sets. It is not a framework:
+//! nothing plugs into it.
 //!
 //! `docs/gogi-fake.md` documents the toy template.
 
@@ -17,7 +18,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-pub use state::{BYTES_PER_TOKEN, Config};
+pub use gogi_proto::identity::ModelStatus;
+pub use state::{BYTES_PER_TOKEN, Config, FakeModel};
 
 /// A running fake server.
 pub struct Server {
@@ -54,6 +56,17 @@ impl Server {
     /// Advances the clock by `secs` seconds, so pins expire without waiting.
     pub fn advance_clock(&self, secs: u64) {
         self.store.lock().unwrap().skew += secs;
+    }
+
+    /// Sets a served model's status, as a server does when it loads or unloads one. A restart
+    /// returns each served model to its status in the config.
+    pub fn set_status(&self, model: &str, status: ModelStatus) -> Result<(), String> {
+        let mut store = self.store.lock().unwrap();
+        let Some(m) = store.cfg.models.iter_mut().find(|m| m.name == model) else {
+            return Err(format!("the status is unchanged: the fake serves no model {}", model));
+        };
+        m.status = status;
+        Ok(())
     }
 
     /// Stops the server and starts a new one on the same address. Everything in memory is lost;

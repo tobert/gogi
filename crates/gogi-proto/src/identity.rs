@@ -1,6 +1,9 @@
-//! `GET /council/v2/identity`: who computed a number, what the server limits, and what it can do.
+//! `GET /council/v2/identity`: the served models, who computed a number, what the server and
+//! each served model limit, and what they can do.
 
 use serde::{Deserialize, Serialize};
+
+use crate::error::Invalid;
 
 /// What a server can do beyond the base contract. A client ignores one it does not know.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -24,36 +27,65 @@ pub enum Capability {
     Tiers,
     /// Generations accept `decisions` that ride with them.
     Ride,
+    /// Requests are scheduled by `class` and `priority`.
+    Classes,
     #[serde(other)]
     Unknown,
 }
 
-/// A server's limits.
+/// Whether a served model takes requests now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelStatus {
+    Ready,
+    Loading,
+    /// Finishes the requests it has and takes no new ones.
+    Draining,
+    Unloaded,
+    #[serde(other)]
+    Unknown,
+}
+
+/// How a request is scheduled. It never changes a number.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Class {
+    #[default]
+    Interactive,
+    Batch,
+}
+
+/// A served model's limits.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Limits {
+pub struct ModelLimits {
     pub context_tokens: u64,
-    pub state_bytes: u64,
+    pub decision_context_tokens: u64,
+    pub snapshot_bytes: u64,
     pub contexts_per_decision: u64,
-    pub choice_options: u64,
     pub default_timeout_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_tokens: Option<u64>,
+}
+
+/// The server's own limits, which every served model shares.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerLimits {
+    pub state_bytes: u64,
+    pub choice_options: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub questions_per_spec: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snapshot_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decision_context_tokens: Option<u64>,
 }
 
-/// The response to `GET /council/v2/identity`.
+/// One served model: its identity, limits, capabilities, and status. It reports the same identity
+/// in every status.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ServerIdentity {
+pub struct ServedModel {
     pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub aliases: Option<Vec<String>>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    pub status: ModelStatus,
     pub weight_hash: String,
     pub tokenizer_hash: String,
     pub template: String,
@@ -62,16 +94,58 @@ pub struct ServerIdentity {
     pub device: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_stop: Option<String>,
-    pub limits: Limits,
+    pub limits: ModelLimits,
+    pub capabilities: Vec<Capability>,
+}
+
+impl ServedModel {
+    pub fn has(&self, c: Capability) -> bool {
+        self.capabilities.contains(&c)
+    }
+
+    /// Whether a request's `model` names this served model, by its `model` or an alias.
+    pub fn is_named(&self, name: &str) -> bool {
+        self.model == name || self.aliases.iter().any(|a| a == name)
+    }
+
+    /// The identity fields a number depends on, in a decision's `identity` shape.
+    pub fn identity(&self) -> [(&'static str, &str); 5] {
+        [("model", &self.model), ("weight_hash", &self.weight_hash), ("tokenizer_hash", &self.tokenizer_hash), ("template", &self.template), ("engine", &self.engine)]
+    }
+}
+
+/// The response to `GET /council/v2/identity`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerIdentity {
+    /// Every model the server serves, loaded or not.
+    pub models: Vec<ServedModel>,
+    pub limits: ServerLimits,
     pub capabilities: Vec<Capability>,
     /// The server's own route prefixes, such as `["/mk/v1"]`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extensions: Option<Vec<String>>,
+    #[serde(default)]
+    pub extensions: Vec<String>,
 }
 
 impl ServerIdentity {
+    /// Whether the server has a capability of its own, such as `pins`.
     pub fn has(&self, c: Capability) -> bool {
         self.capabilities.contains(&c)
+    }
+
+    /// The served model a request's `model` names. `None` names the only served model, and is a
+    /// `400` when the server serves more than one. The caller checks the model's status.
+    pub fn route(&self, model: Option<&str>) -> Result<&ServedModel, Invalid> {
+        match model {
+            Some(name) => self
+                .models
+                .iter()
+                .find(|m| m.is_named(name))
+                .ok_or_else(|| Invalid::param("model", format!("model {} is not served here; identity lists the served models", name))),
+            None => match self.models.as_slice() {
+                [only] => Ok(only),
+                all => Err(Invalid::param("model", format!("model is required: this server serves {} models", all.len()))),
+            },
+        }
     }
 }
 
@@ -79,21 +153,61 @@ impl ServerIdentity {
 mod tests {
     use super::*;
 
-    /// mkviolet's identity, as `GET /council/v2/identity` returned it.
-    const MKVIOLET: &str = r#"{"model":"google/gemma-4-26B-A4B-it","aliases":[],"weight_hash":"0x1EBEA246FC63EB7F","tokenizer_hash":"sha256:4d777ef5bdc1aa36","engine":"mkviolet:a93ed27853c9835c+numbers:15c10b5ac08a8126","device":"2x Intel(R) Arc(TM) Pro B70 Graphics","template":"mkv-letters-1:a57f304ef64f619e+gemma4-chat:ae53464bf3be2580","limits":{"context_tokens":65535,"state_bytes":65536,"contexts_per_decision":8,"questions_per_spec":16,"choice_options":26,"default_timeout_ms":30000,"pin_bytes":17179869184,"snapshot_bytes":450560,"decision_context_tokens":3072},"capabilities":["reads","generate","pins","dry_run","leave_one_out"],"extensions":["/mk/v1"]}"#;
+    /// mkviolet's identity before it served more than one model, in the old shape.
+    const MKVIOLET_ONE_MODEL: &str = r#"{"model":"google/gemma-4-26B-A4B-it","aliases":[],"weight_hash":"0x1EBEA246FC63EB7F","tokenizer_hash":"sha256:4d777ef5bdc1aa36","engine":"mkviolet:a93ed27853c9835c+numbers:15c10b5ac08a8126","device":"2x Intel(R) Arc(TM) Pro B70 Graphics","template":"mkv-letters-1:a57f304ef64f619e+gemma4-chat:ae53464bf3be2580","limits":{"context_tokens":65535,"state_bytes":65536,"contexts_per_decision":8,"questions_per_spec":16,"choice_options":26,"default_timeout_ms":30000,"pin_bytes":17179869184,"snapshot_bytes":450560,"decision_context_tokens":3072},"capabilities":["reads","generate","pins","dry_run","leave_one_out"],"extensions":["/mk/v1"]}"#;
+
+    /// The same identity with its fields moved to where they belong now.
+    const MKVIOLET: &str = r#"{"models":[{"model":"google/gemma-4-26B-A4B-it","aliases":[],"status":"ready","weight_hash":"0x1EBEA246FC63EB7F","tokenizer_hash":"sha256:4d777ef5bdc1aa36","template":"mkv-letters-1:a57f304ef64f619e+gemma4-chat:ae53464bf3be2580","engine":"mkviolet:a93ed27853c9835c+numbers:15c10b5ac08a8126","device":"2x Intel(R) Arc(TM) Pro B70 Graphics","limits":{"context_tokens":65535,"decision_context_tokens":3072,"snapshot_bytes":450560,"contexts_per_decision":8,"default_timeout_ms":30000},"capabilities":["reads","generate","dry_run","leave_one_out"]}],"limits":{"state_bytes":65536,"choice_options":26,"questions_per_spec":16,"pin_bytes":17179869184},"capabilities":["pins"],"extensions":["/mk/v1"]}"#;
+
+    fn two_models() -> ServerIdentity {
+        let mut id: ServerIdentity = serde_json::from_str(MKVIOLET).unwrap();
+        let mut night = id.models[0].clone();
+        night.model = "qwen-3.8-mutant-636".into();
+        night.aliases = vec!["mutant".into()];
+        night.status = ModelStatus::Unloaded;
+        id.models.push(night);
+        id
+    }
 
     #[test]
     fn mkviolets_identity_decodes_and_round_trips() {
         let id: ServerIdentity = serde_json::from_str(MKVIOLET).unwrap();
-        assert!(id.has(Capability::Reads) && id.has(Capability::Pins) && !id.has(Capability::Think));
-        assert_eq!(id.limits.decision_context_tokens, Some(3072));
+        let m = &id.models[0];
+        assert!(m.has(Capability::Reads) && id.has(Capability::Pins) && !m.has(Capability::Pins) && !m.has(Capability::Think));
+        assert_eq!((m.status, m.limits.decision_context_tokens), (ModelStatus::Ready, 3072));
         let a: serde_json::Value = serde_json::from_str(MKVIOLET).unwrap();
         assert_eq!(serde_json::to_value(&id).unwrap(), a);
     }
 
     #[test]
-    fn an_unknown_capability_is_not_an_error() {
+    fn the_one_model_shape_is_refused() {
+        assert!(serde_json::from_str::<ServerIdentity>(MKVIOLET_ONE_MODEL).is_err());
+    }
+
+    #[test]
+    fn a_request_routes_by_name_or_alias_and_needs_a_name_when_there_are_two() {
+        let one: ServerIdentity = serde_json::from_str(MKVIOLET).unwrap();
+        assert_eq!(one.route(None).unwrap().model, "google/gemma-4-26B-A4B-it");
+        let two = two_models();
+        assert_eq!(two.route(Some("mutant")).unwrap().model, "qwen-3.8-mutant-636");
+        assert_eq!(two.route(Some("qwen-3.8-mutant-636")).unwrap().status, ModelStatus::Unloaded);
+        for bad in [None, Some("gpt-2")] {
+            assert_eq!(two.route(bad).unwrap_err().param.as_deref(), Some("model"), "{bad:?}");
+        }
+        assert_eq!(two.route(None).unwrap_err().message, "model is required: this server serves 2 models");
+    }
+
+    #[test]
+    fn an_unknown_capability_or_status_is_not_an_error() {
         let c: Vec<Capability> = serde_json::from_str(r#"["reads","telepathy"]"#).unwrap();
         assert_eq!(c, [Capability::Reads, Capability::Unknown]);
+        assert_eq!(serde_json::from_str::<ModelStatus>(r#""warming""#).unwrap(), ModelStatus::Unknown);
+    }
+
+    #[test]
+    fn a_class_is_interactive_or_batch() {
+        assert_eq!(Class::default(), Class::Interactive);
+        assert_eq!(serde_json::from_str::<Class>(r#""batch""#).unwrap(), Class::Batch);
+        assert!(serde_json::from_str::<Class>(r#""filler""#).is_err());
     }
 }

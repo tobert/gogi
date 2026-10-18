@@ -5,6 +5,7 @@ use serde_json::{Map, Value};
 
 use crate::context::{Context, SnapshotInfo};
 use crate::error::Invalid;
+use crate::identity::Class;
 use crate::ids::SnapshotId;
 use crate::required_nullable;
 
@@ -41,6 +42,9 @@ impl Sample {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationRequest {
+    /// The served model: its `model` or an alias. May be absent only when the server serves one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub context: Context,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
@@ -51,6 +55,11 @@ pub struct GenerationRequest {
     /// Decisions that ride with the generation. Capability `ride`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decisions: Vec<RidingDecision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<Class>,
+    /// Higher runs first within its class. Absent: 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
 }
 
 /// When a riding decision is asked: `before`, after the context and before the reply, or `after`,
@@ -199,6 +208,8 @@ pub struct GenerationUsage {
 /// appends the reply to its context's messages for the next request.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GenerationDone {
+    /// The served model's `model`, never an alias.
+    pub model: String,
     pub content: String,
     /// Empty when the model did not think.
     #[serde(default)]
@@ -254,7 +265,7 @@ mod tests {
     }
 
     fn done() -> Value {
-        json!({"content": "", "reasoning": "list it",
+        json!({"model": "m", "content": "", "reasoning": "list it",
                "tool_calls": [{"id": "c2", "name": "ls", "arguments": {"path": "/tmp", "all": true}}],
                "finish": "stop", "usage": {"prompt": 1852, "kept": 1840, "fed": 12, "completion": 30},
                "head": snap("77aa"), "snapshots": [{"id": snap("9a1e"), "message": 1, "tokens": 412}]})
@@ -273,7 +284,7 @@ mod tests {
 
     #[test]
     fn done_needs_its_members_and_a_head_that_may_be_null() {
-        for missing in ["head", "snapshots", "usage", "finish", "content"] {
+        for missing in ["model", "head", "snapshots", "usage", "finish", "content"] {
             let mut v = done();
             v.as_object_mut().unwrap().remove(missing);
             assert!(serde_json::from_value::<GenerationDone>(v).is_err(), "{missing}");
@@ -309,7 +320,7 @@ mod tests {
     #[test]
     fn the_request_rules_each_refuse() {
         let ctx = Context { messages: vec![crate::message::Message::user("u")], ..Default::default() };
-        let r = GenerationRequest { context: ctx, max_tokens: Some(8), sample: Some(Sample { temperature: Some(0.0), ..Default::default() }), stream: None, decisions: Vec::new() };
+        let r = GenerationRequest { model: None, context: ctx, max_tokens: Some(8), sample: Some(Sample { temperature: Some(0.0), ..Default::default() }), stream: None, decisions: Vec::new(), class: None, priority: None };
         r.validate().unwrap();
         assert!(GenerationRequest { max_tokens: Some(0), ..r.clone() }.validate().is_err());
         assert!(GenerationRequest { context: Context::default(), ..r.clone() }.validate().is_err());

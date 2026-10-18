@@ -91,6 +91,8 @@ pub struct PinOwner {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotDetail {
     pub id: SnapshotId,
+    /// The served model the snapshot belongs to.
+    pub model: String,
     pub tokens: u64,
     pub tier: Tier,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -21,7 +21,10 @@ here. Each item is an observation from the code unless it says "inferred".
 | 12 | A snapshot's `tokens` | Left out when the server cannot count them (`if let Some(n)`). | Required. | Required in `SnapshotState`. |
 | 13 | A pin set's `GET` | `snapshots` is a list of ids. | Accepts ids or objects with an `id`. | Accepts both. The draft now says ids. |
 | 14 | An unknown `role` | `400` with a message naming the role. | Decode error. | Decode error; still a `400` on a server built on this crate, but the text differs from mkviolet's. |
-| 15 | The `template` a decision, a held spec, and `identity` report | A decision and a held spec reported the letters template alone; `identity` added the chat template. | n/a | One value, `identity`'s. `gogi-conformance` checks both; mkviolet now reports it. |
+| 15 | The `template` a decision, a held spec, and `identity` report | A decision and a held spec reported the letters template alone; `identity` added the chat template. | n/a | A decision reports its served model's `template`, which `gogi-conformance` checks; mkviolet now reports it. A held spec reports none in v2, because each served model renders it with its own template; `HeldSpec` still accepts mkviolet's. |
+| 16 | `GET /council/v2/identity` | One model's identity, limits, and capabilities at the top level. | Reads the one-model shape. | `models`, each with its status, limits, and capabilities, beside the server's `limits` and `capabilities`. The one-model shape does not decode, so `gogi-conformance` stops at identity until mkviolet changes. |
+| 17 | `model` on a build, raw read, or generation | Decoded with `gogi-proto`'s types and not checked (inferred: `src/council_v2.rs` never reads `req.model`). | Not sent. | A name that is not a served model's `model` or alias is a `400` naming `model`. |
+| 18 | `model` in a build's response and in `GET /snapshots/{id}` | Not sent. A generation's `done` and a raw read's response send it. | n/a | Required in all four. |
 
 mkviolet runs `gogi-proto::math::verify` on each decision before it replies; that function is kaijutsu's, ported, and
 checked against mkviolet's algorithm in `crates/gogi-proto/tests/relations.rs`.

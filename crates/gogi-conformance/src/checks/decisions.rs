@@ -23,9 +23,6 @@ impl Suite {
         let id = held.spec_id.to_string();
         self.r.check("a spec's id is the hash of its canonical JSON", spec_id_of(&spec).ok().as_deref() == Some(id.as_str()), (&id, spec_id_of(&spec)));
         self.r.check("a spec is returned as sent", a["spec"] == spec, &a["spec"]);
-        if let Some(id) = &self.identity {
-            self.r.check("a held spec names the server's template", a["template"] == json!(id.template), (&a["template"], &id.template));
-        }
 
         // The same content in another member order is the same spec.
         let mut members: Vec<(String, Value)> = spec.as_object().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
@@ -93,9 +90,9 @@ impl Suite {
         self.r.check("a choice names an option of the spec", ["allow", "ask", "report"].contains(&d["answers"]["verdict"]["choice"].as_str().unwrap_or("")), &d["answers"]["verdict"]);
         self.r.check("pool echoes its settings and one weight per read", d["pool"]["method"] == json!("loglinear") && d["pool"]["weights"] == json!("mass") && d["pool"]["normalized"]["verdict"].as_array().is_some_and(|w| w.len() == 2), &d["pool"]);
         self.r.check("identity names the spec", d["identity"]["spec_id"] == json!(spec_id), &d["identity"]);
-        if let Some(id) = self.identity.clone() {
-            let same = ["model", "weight_hash", "tokenizer_hash", "template", "engine"].iter().all(|k| d["identity"][*k] == serde_json::to_value(&id).unwrap()[*k]);
-            self.r.check("a decision's identity matches the server's", same, (&d["identity"], &id));
+        if let Some(m) = self.model.clone() {
+            let same = m.identity().iter().all(|(k, v)| d["identity"][*k] == json!(v));
+            self.r.check("a decision's identity matches its served model's", same && d["model"] == json!(m.model), (&d["identity"], m.identity()));
         }
 
         // Replay is bit for bit, whatever ran between.

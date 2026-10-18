@@ -24,7 +24,7 @@ call() {
 }
 field() { sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" | head -1; }
 
-say "Identity: the model, its limits, and what the server can do"
+say "Identity: the served models, their limits, and what the server and each model can do"
 call GET /identity
 
 # A context is a whole chat, sent with every request. `snap: true` marks a boundary where the
