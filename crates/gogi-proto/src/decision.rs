@@ -283,12 +283,23 @@ fn context_name<'de, D: Deserializer<'de>>(de: D) -> Result<Option<String>, D::E
     }))
 }
 
+/// Writes a read's `context` as an index when its text is one, else as text, else `null`.
+fn write_context_name<S: serde::Serializer>(name: &Option<String>, ser: S) -> Result<S::Ok, S::Error> {
+    match name {
+        None => ser.serialize_none(),
+        Some(n) => match n.parse::<u64>() {
+            Ok(i) if i.to_string() == *n => ser.serialize_u64(i),
+            _ => ser.serialize_str(n),
+        },
+    }
+}
+
 /// One context's read of the case.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Read {
     /// The context read, or null when the decision sends no contexts. A council v2 response names
     /// it by its index in the request's `contexts`, parsed here as that index's decimal text.
-    #[serde(deserialize_with = "context_name")]
+    #[serde(deserialize_with = "context_name", serialize_with = "write_context_name")]
     pub context: Option<String>,
     #[serde(deserialize_with = "required_nullable")]
     pub snapshot: Option<SnapshotId>,
@@ -468,6 +479,8 @@ mod tests {
         assert_eq!(serde_json::from_value::<Read>(r(json!(3))).unwrap().context.as_deref(), Some("3"));
         assert_eq!(serde_json::from_value::<Read>(r(json!("abc"))).unwrap().context.as_deref(), Some("abc"));
         assert_eq!(serde_json::from_value::<Read>(r(json!(null))).unwrap().context, None);
+        let named = |c: Value| serde_json::to_value(serde_json::from_value::<Read>(r(c)).unwrap()).unwrap()["context"].clone();
+        assert_eq!((named(json!(3)), named(json!("abc")), named(json!(null))), (json!(3), json!("abc"), json!(null)));
         let mut missing = r(json!(0));
         missing.as_object_mut().unwrap().remove("snapshot");
         assert!(serde_json::from_value::<Read>(missing).is_err());
