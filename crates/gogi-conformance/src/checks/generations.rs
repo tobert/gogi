@@ -164,7 +164,7 @@ impl Suite {
 
     /// `finish` agrees with the reply: `tool_use` when it ends after calls and `end_turn` when it
     /// ends without them; `max_tokens` when it wrote `max_tokens`; `context_full` when prompt and
-    /// reply reach `context_tokens`.
+    /// reply reach `context_tokens` and do not pass it.
     pub(crate) fn check_finish(&mut self, what: &str, d: &GenerationDone, max_tokens: u64) {
         let u = d.usage;
         let limit = self.limits().map_or(0, |l| l.context_tokens);
@@ -172,7 +172,7 @@ impl Suite {
             Finish::ToolUse => !d.tool_calls.is_empty(),
             Finish::EndTurn => d.tool_calls.is_empty(),
             Finish::MaxTokens => u.completion == max_tokens,
-            Finish::ContextFull => u.prompt + u.completion >= limit,
+            Finish::ContextFull => u.prompt + u.completion == limit,
         };
         self.r.check(&format!("{}: finish agrees with the reply", what), ok && u.completion <= max_tokens, (d.finish, d.tool_calls.len(), u, max_tokens, limit));
     }
