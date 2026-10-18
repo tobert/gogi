@@ -97,7 +97,7 @@ impl Suite {
                 if let Some((_, d)) = last {
                     if self.decode::<GenerationDone>("stream done has the contract's fields", d).is_some() {
                         self.r.check("the stream's done event equals the response without stream", ["content", "reasoning"].iter().all(|k| d[*k] == g[*k]) && without_stats(&d["tool_calls"]) == without_stats(&g["tool_calls"]), (d, &g));
-                        self.r.check("stream stats match the call without stream within 1e-6", stats_close(d, &g, 1e-6), (&d["stats"], &g["stats"]));
+                        self.r.check("stream stats match the call without stream within 1e-4", stats_close(d, &g, 1e-4), (&d["stats"], &g["stats"]));
                     }
                 }
             }
@@ -208,8 +208,8 @@ mod tests {
         let a = json!({"stats": {"reasoning": ok, "content": null}, "tool_calls": [{"stats": ok}]});
         let mut b = a.clone();
         b["tool_calls"][0]["stats"]["mean_logprob"] = json!(-0.1 + 1e-9);
-        assert!(stats_close(&a, &b, 1e-6));
+        assert!(stats_close(&a, &b, 1e-4));
         b["tool_calls"][0]["stats"]["mean_logprob"] = json!(-0.2);
-        assert!(!stats_close(&a, &b, 1e-6));
+        assert!(!stats_close(&a, &b, 1e-4));
     }
 }

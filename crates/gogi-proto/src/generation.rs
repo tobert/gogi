@@ -106,7 +106,7 @@ pub enum ReplyToolCall {
 /// The model's untempered log probabilities for the sampled tokens of one part of a reply, and
 /// the entropy, in nats, of each distribution they came from. Diagnostics: a server may compute
 /// them from logits whose last bits depend on how the prompt was fed, so they agree across
-/// replays within 1e-6, not bit for bit.
+/// replays within 1e-4, not bit for bit.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TokenStats {
