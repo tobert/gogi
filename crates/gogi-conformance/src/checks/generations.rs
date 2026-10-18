@@ -1,4 +1,4 @@
-use gogi_proto::generation::{Finish, GenerationDone, Phase, StreamEvent};
+use gogi_proto::generation::{check_pieces, Finish, GenerationDone, Phase, StreamEvent};
 use serde_json::{Value, json};
 
 use crate::http::sse_events;
@@ -115,6 +115,8 @@ impl Suite {
                         self.r.check("stream sends one token event for each completion token", tokens.len() as u64 == d.usage.completion, (tokens.len(), d.usage));
                         let thought = tokens.iter().filter(|t| t.phase == Phase::Reasoning).count() as u64;
                         self.r.check("stream reasoning token events are usage.reasoning", thought == d.usage.reasoning, (thought, d.usage));
+                        let joined = check_pieces(&tokens.iter().map(|t| (*t).clone()).collect::<Vec<_>>(), d);
+                        self.r.check("stream reasoning and content pieces join to done's text", joined.is_ok(), joined.err());
                         let dv = serde_json::to_value(d).unwrap_or_default();
                         self.r.check("the stream's done event equals the response without stream", ["content", "reasoning", "finish"].iter().all(|k| dv[*k] == g[*k]) && without_stats(&dv["tool_calls"]) == without_stats(&g["tool_calls"]) && d.usage.completion == u.completion, (&dv, &g));
                         self.r.check("stream stats match the call without stream within 1e-4", stats_close(&dv, &g, 1e-4), (&dv["stats"], &g["stats"]));

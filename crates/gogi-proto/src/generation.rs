@@ -292,6 +292,30 @@ pub struct TokenEvent {
     pub tps: Option<f64>,
 }
 
+/// Whether `c` is whitespace that a part's joined pieces and `done`'s text may differ by at either
+/// end: Unicode White_Space, and U+001C to U+001F, which Python's `str.strip` also removes.
+pub fn is_edge_space(c: char) -> bool {
+    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
+}
+
+/// `s` without edge whitespace at either end.
+pub fn trim_edges(s: &str) -> &str {
+    s.trim_matches(is_edge_space)
+}
+
+/// Checks that the pieces of a stream's `reasoning` tokens, joined, equal `done.reasoning`, and its
+/// `content` pieces `done.content`, each up to edge whitespace at either end. `call` pieces are
+/// display text only; the calls are `done.tool_calls`.
+pub fn check_pieces(tokens: &[TokenEvent], done: &GenerationDone) -> Result<(), String> {
+    for (phase, name, text) in [(Phase::Reasoning, "reasoning", &done.reasoning), (Phase::Content, "content", &done.content)] {
+        let joined: String = tokens.iter().filter(|t| t.phase == phase).map(|t| t.piece.as_str()).collect();
+        if trim_edges(&joined) != trim_edges(text) {
+            return Err(format!("the {} pieces join to {:?}, but done.{} is {:?}", name, joined, name, text));
+        }
+    }
+    Ok(())
+}
+
 /// One server-sent event of a streamed generation. The stream ends after `done` or `error`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StreamEvent {
@@ -381,6 +405,21 @@ mod tests {
             v["finish"] = json!(old);
             assert!(serde_json::from_value::<GenerationDone>(v).is_err(), "{old}");
         }
+    }
+
+    #[test]
+    fn a_parts_pieces_join_to_dones_text_up_to_edge_whitespace() {
+        let tok = |piece: &str, phase: Phase| TokenEvent { id: 1, piece: piece.into(), phase, p: 1.0, h: 0.0, n: 1, tps: None };
+        let mut d: GenerationDone = serde_json::from_value(done()).unwrap();
+        d.content = "ls -la".into();
+        let tokens = [tok("list", Phase::Reasoning), tok(" it\n", Phase::Reasoning), tok("\n", Phase::Content), tok("ls", Phase::Content), tok(" -la", Phase::Content), tok("<call>", Phase::Call)];
+        check_pieces(&tokens, &d).unwrap();
+        let shown_twice = [tok("list it", Phase::Reasoning), tok("ls -la", Phase::Content), tok("ls", Phase::Content)];
+        assert!(check_pieces(&shown_twice, &d).unwrap_err().starts_with("the content pieces join"));
+        let hidden = [tok("", Phase::Reasoning), tok("ls -la", Phase::Content)];
+        assert!(check_pieces(&hidden, &d).unwrap_err().starts_with("the reasoning pieces join"));
+        assert_eq!(trim_edges("\u{1f}\u{a0} x \u{2029}"), "x");
+        assert!(!is_edge_space('\u{200b}'));
     }
 
     #[test]

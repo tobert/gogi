@@ -619,9 +619,14 @@ data: {"model": "gemma-4-26b-a4b", "content": "…", "finish": "end_turn", …}
 - **A stream ends with exactly one `done` or `error`.** A failure after the
   `200` is sent is an `error` event, never a closed connection without one
   and never a second HTTP response.
-- **`piece` is display text.** It may be empty, such as while a character
-  is not yet complete. The reply is `done`'s fields, never the joined
-  pieces.
+- **A part's pieces join to its text in `done`.** The `piece`s of the
+  `reasoning` tokens, joined in order, equal `done.reasoning`, and the
+  `content` pieces equal `done.content`, each up to whitespace at either
+  end, so a client can write pieces where they last as they arrive. The
+  whitespace is Unicode White_Space and U+001C to U+001F, the characters
+  Python's `str.strip()` removes. A piece may be empty, such as while a
+  character is not yet complete. A `call` piece is display text only; the
+  calls are `done.tool_calls`.
 - **A client ignores an event it does not know,** so a server can add one
   without breaking clients.
 - **Closing the stream cancels the reply.** The server sends nothing more

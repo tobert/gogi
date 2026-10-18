@@ -489,6 +489,7 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
     let mut ended = false;
     let mut n = 0;
     let mut thought = 0;
+    let mut shown = (0, 0);
     let letters: Vec<u32> = (b'a'..=b'z').map(u32::from).chain([u32::from(b' ')]).collect();
     while n < max_tokens && toks.len() + 1 < limit {
         if phase == Phase::Answer && trigger && !queued {
@@ -525,7 +526,21 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
         if kind == EventPhase::Reasoning {
             thought += 1;
         }
-        events.push(StreamEvent::Token(TokenEvent { id: tok, piece: model::piece(tok), phase: kind, p, h, n: n as u64, tps: None }));
+        // A reasoning or content token shows the text it adds to its part, so a part's pieces join
+        // to that part in `done`; a marker in either shows nothing.
+        let piece = match (kind, tok) {
+            (EventPhase::Reasoning, t) if t < 256 => {
+                reasoning.push(t as u8);
+                next_piece(&reasoning, &mut shown.0)
+            }
+            (EventPhase::Content, t) if t < 256 => {
+                content.push(t as u8);
+                next_piece(&content, &mut shown.1)
+            }
+            (EventPhase::Call, t) => model::piece(t),
+            _ => String::new(),
+        };
+        events.push(StreamEvent::Token(TokenEvent { id: tok, piece, phase: kind, p, h, n: n as u64, tps: None }));
         if fail && n == 2 {
             let e = ErrorBody::new(ErrorType::Internal, "the reply stopped: the fake fails a reply whose context ends with a message containing FAIL");
             events.push(StreamEvent::Error(e));
@@ -537,8 +552,6 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
                 ended = true;
                 break;
             }
-            (Phase::Think, t) => reasoning.push(t as u8),
-            (Phase::Answer, t) if !in_call && t < 256 => content.push(t as u8),
             _ => {}
         }
     }
@@ -791,4 +804,17 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
                "usage": usage,
                "queue_ms": 0.0, "ms": t0.elapsed().as_secs_f64() * 1000.0}),
     )
+}
+
+/// The text `buf` adds past the `shown` bytes of its decoding. An incomplete last character waits
+/// for a later piece.
+fn next_piece(buf: &[u8], shown: &mut usize) -> String {
+    let upto = match std::str::from_utf8(buf) {
+        Err(e) if e.error_len().is_none() => e.valid_up_to(),
+        _ => buf.len(),
+    };
+    let text = String::from_utf8_lossy(&buf[..upto]);
+    let piece = text.get(*shown..).unwrap_or("").to_string();
+    *shown = text.len();
+    piece
 }
