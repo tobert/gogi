@@ -3,8 +3,8 @@
 gogi (合議, "deliberation by a panel") holds the council API contract.
 kaijutsu is the client and mkviolet is a server; both speak it.
 
-The council v2 draft is edited here. kaijutsu keeps a copy of it that follows
-this one.
+The council v2 draft is edited here; kaijutsu keeps no copy. kaijutsu and
+mkviolet both depend on `gogi-proto`.
 
 | File | Holds |
 |---|---|

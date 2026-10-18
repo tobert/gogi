@@ -3,9 +3,9 @@
 **Status: replaced by `council-api-v2.md`.** v2 builds on this document and
 says where it differs, so this one stays as the reference for the parts v2
 keeps. It was written in kaijutsu so that two decision servers, the HIP
-megakernel (`/mk/v1`) and lfm2d (`/v1/opinion`), could converge on it. The
-machine-readable form is kaijutsu's `docs/council-api.openapi.yaml` (OpenAPI
-3.1), and kaijutsu's own use is its `docs/council.md`.
+megakernel (`/mk/v1`) and lfm2d (`/v1/opinion`), could converge on it.
+kaijutsu's own use is its `docs/council.md`. No server or client speaks v1
+now.
 
 The words here are v1's. A context is a record the server holds under an id
 the client chose, and a decision names contexts by id. In v2 the client sends
