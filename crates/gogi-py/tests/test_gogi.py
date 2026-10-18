@@ -1,6 +1,8 @@
 import json
 import math
 import pathlib
+import urllib.error
+import urllib.request
 
 import pytest
 
@@ -28,7 +30,7 @@ def test_context_rules():
     with pytest.raises(ValueError, match="at least one message"):
         gogi.check_context({"messages": []})
     bad = {"messages": [{"role": "tool", "tool_call_id": "a", "content": "r"}]}
-    with pytest.raises(ValueError, match=r"messages\[0\]: tool_call_id a answers no call"):
+    with pytest.raises(ValueError, match=r"messages\[0\]: tool_call_id a names no call"):
         gogi.check_context(bad)
     with pytest.raises(ValueError, match="queue nope names no tool"):
         gogi.check_context({**ok, "queue": "nope"})
@@ -75,3 +77,42 @@ def test_verify_decision_accepts_the_fixture_and_names_a_changed_number():
     renamed["answers"]["verdict"]["probabilities"]["ask"] += 1e-6
     with pytest.raises(ValueError, match=r"answers\.verdict\.probabilities\.ask"):
         gogi.verify_decision(req, renamed)
+
+
+GATE = {"name": "gate", "instructions": "Judge the statement.", "input_label": "Statement",
+        "questions": [{"id": "verdict", "type": "choice", "instructions": "What happens with it.",
+                       "criteria": [{"option": "allow", "means": "routine"}, {"option": "ask", "means": "risky"}]}]}
+
+
+def _call(url, method, path, body=None):
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(url + path, data=data, method=method, headers={"content-type": "application/json"})
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.loads(r.read() or b"null")
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"null")
+
+
+def test_the_fake_serves_and_its_spec_ids_match_ours():
+    with gogi.FakeServer() as fake:
+        status, ident = _call(fake.url, "GET", "/council/v2/identity")
+        assert status == 200 and ident["engine"].startswith("gogi-fake")
+        status, held = _call(fake.url, "POST", "/council/v2/specs", GATE)
+        assert status == 200 and held["spec_id"] == gogi.spec_id(GATE)
+    with pytest.raises(ValueError, match="closed"):
+        fake.url
+
+
+def test_the_fake_keeps_specs_and_pins_across_a_restart_and_expires_pins(tmp_path):
+    ctx = {"messages": [{"role": "user", "content": "u", "snap": True}]}
+    with gogi.FakeServer(state_dir=tmp_path) as fake:
+        _, held = _call(fake.url, "POST", "/council/v2/specs", GATE)
+        _, built = _call(fake.url, "POST", "/council/v2/contexts", {"context": ctx})
+        status, _ = _call(fake.url, "PUT", "/council/v2/pins/t", {"snapshots": [built["head"]], "ttl_s": 60})
+        assert status == 200
+        fake.restart()
+        assert _call(fake.url, "GET", "/council/v2/specs/" + held["spec_id"])[0] == 200
+        assert _call(fake.url, "GET", "/council/v2/pins/t")[1]["snapshots"] == [built["head"]]
+        fake.advance_clock(61)
+        assert _call(fake.url, "GET", "/council/v2/pins/t")[0] == 404

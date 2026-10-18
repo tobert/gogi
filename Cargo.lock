@@ -131,6 +131,7 @@ dependencies = [
 name = "gogi-py"
 version = "0.1.0"
 dependencies = [
+ "gogi-fake",
  "gogi-proto",
  "pyo3",
  "serde_json",

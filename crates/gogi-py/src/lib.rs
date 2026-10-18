@@ -1,5 +1,5 @@
-//! Python bindings for gogi-proto. Functions take and return JSON text; `gogi/__init__.py`
-//! turns it into Python values.
+//! Python bindings for gogi-proto and gogi-fake. Functions take and return JSON text;
+//! `gogi/__init__.py` turns it into Python values.
 
 use gogi_proto::decision::{DecisionRequest, DecisionResponse, PoolMethod};
 use gogi_proto::math::{self, Row, WeightSpec};
@@ -28,7 +28,7 @@ mod _gogi {
         c.check().map_err(value_err)
     }
 
-    /// Checks messages that follow `before`, a generation's append to its context.
+    /// Checks `messages` appended after `before`, such as a generation's reply after its context.
     #[pyfunction]
     fn validate_messages(before_json: &str, messages_json: &str) -> PyResult<()> {
         let before: Vec<gogi_proto::Message> = serde_json::from_str(before_json).map_err(value_err)?;
@@ -98,5 +98,50 @@ mod _gogi {
         let req: DecisionRequest = serde_json::from_str(request_json).map_err(value_err)?;
         let resp: DecisionResponse = serde_json::from_str(response_json).map_err(value_err)?;
         math::verify(&resp, &req.expect()).map_err(value_err)
+    }
+
+    /// gogi-fake's server, serving on its own thread until `close` or until it is dropped.
+    #[pyclass(name = "_FakeServer")]
+    struct FakeServer {
+        server: Option<gogi_fake::Server>,
+    }
+
+    impl FakeServer {
+        fn running(&self) -> PyResult<&gogi_fake::Server> {
+            self.server.as_ref().ok_or_else(|| value_err("the fake server is closed"))
+        }
+    }
+
+    #[pymethods]
+    impl FakeServer {
+        #[new]
+        #[pyo3(signature = (addr="127.0.0.1:0", state_dir=None, context_tokens=None))]
+        fn new(addr: &str, state_dir: Option<std::path::PathBuf>, context_tokens: Option<usize>) -> PyResult<Self> {
+            let d = gogi_fake::Config::default();
+            let cfg = gogi_fake::Config { addr: addr.into(), state_dir, context_tokens: context_tokens.unwrap_or(d.context_tokens), ..d };
+            Ok(FakeServer { server: Some(gogi_fake::Server::start(cfg).map_err(value_err)?) })
+        }
+
+        /// The base URL, such as `http://127.0.0.1:41234`.
+        fn url(&self) -> PyResult<String> {
+            Ok(self.running()?.url())
+        }
+
+        /// Advances the clock by `secs` seconds, so pins expire without waiting.
+        fn advance_clock(&self, secs: u64) -> PyResult<()> {
+            self.running()?.advance_clock(secs);
+            Ok(())
+        }
+
+        /// Stops the server and starts it again on the same address. Everything in memory is lost;
+        /// specs, pins, and the snapshots pins keep come back from the state directory, when
+        /// there is one.
+        fn restart(&mut self) -> PyResult<()> {
+            self.server.as_mut().ok_or_else(|| value_err("the fake server is closed"))?.restart().map_err(value_err)
+        }
+
+        fn close(&mut self) {
+            self.server = None;
+        }
     }
 }

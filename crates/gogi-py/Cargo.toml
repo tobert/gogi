@@ -1,6 +1,6 @@
 [package]
 name = "gogi-py"
-description = "Python bindings for gogi-proto: validation, spec ids, and the pooling math."
+description = "Python bindings for gogi-proto and gogi-fake: validation, spec ids, the pooling math, and the fake server."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,5 +12,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 gogi-proto = { path = "../gogi-proto" }
+gogi-fake = { path = "../gogi-fake" }
 serde_json.workspace = true
 pyo3 = { version = "0.30", features = ["extension-module"] }
