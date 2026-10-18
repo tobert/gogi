@@ -57,7 +57,7 @@ fn the_fake_passes_with_three_served_models_in_three_statuses() {
     let r = run(Opts { url: server.url(), restart: None, model: Some("night".into()) }, false);
     assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
     for name in [
-        "with more than one served model, a build without model is a 400 naming model",
+        "a build without model is a 400 naming model",
         "gogi-toy-big, Loading in identity, is a 503 model_unavailable naming it and its status",
         "gogi-toy-day builds the same context into a snapshot of its own",
     ] {

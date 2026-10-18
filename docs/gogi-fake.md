@@ -6,9 +6,10 @@ or from Python with `with gogi.FakeServer(state_dir=DIR) as fake:`, which serves
 
 ## Served models
 
-By default the fake serves one model, `gogi-toy-1`, with the alias `toy`, so a request may
-leave out `model`. Each `--model NAME` serves a model of that name, ready; with two or more, a
-request names one. Every served model uses the template below. Each has a seed, its position
+By default the fake serves one model, `gogi-toy-1`, with the alias `toy`. Every request that
+reads a context names its served model in `model`, as the contract requires. Each `--model NAME`
+serves a model of that name, ready. Every served model uses the template below, whose id is
+`gogi-toy-chat-2`. Each has a seed, its position
 among the `--model` flags, that changes its numbers and its `weight_hash`, so two served models
 give two sets of numbers and two sets of snapshots.
 
@@ -23,7 +24,7 @@ and pins stay held through the change.
 
 ## Tokens
 
-A token is one of the 256 byte values, or one of 13 template markers (ids 256 to 268).
+A token is one of the 256 byte values, or one of 14 template markers (ids 256 to 269).
 Text becomes its UTF-8 bytes, so content never spells a marker. Only a `reads` suffix does:
 marker text in a suffix, such as `<user>`, becomes one marker id, and the reply lists it in
 `signals.control_text`.
@@ -35,15 +36,16 @@ marker text in a suffix, such as `<user>`, becomes one marker id, and the reply 
 
 system     <sys> content <end>
 user       <user> content <end>
-assistant  <asst> [<think> reasoning <endthink>] content (<call> name(ARGS_JSON) <endcall>)* <end>
-tool       <tool> content <end>
+assistant  <asst> [<think> reasoning <endthink>] content (<call> name(INPUT_JSON) <endcall>)* <end>
+tool       <tool> [<error>] content <end>
 
 generation prompt   <asst> [<think>]
 ```
 
 - `<nothink>` renders when the context sets `thinking: false`. With thinking on, every
   assistant message renders its `<think>` region, empty when it has no reasoning.
-- A call's `id` is never rendered.
+- `TOOLS_JSON` is the context's `tools` as JSON, each `{name, description, input_schema}`.
+- A call's `id` is never rendered. `<error>` renders when a tool message has `is_error: true`.
 - The thinking rule: an assistant message without tool calls loses its `reasoning` once a later
   user message follows. A message with tool calls keeps it.
 - A marked message is a boundary only when its own rendering is a prefix of the whole
@@ -62,7 +64,15 @@ function of that hash, between -6 and 6, so the same prefix gives the same bits.
   thinking on it first writes its thought, ending at `<endthink>`. At temperature 0 it takes the
   largest logit. Without `sample.seed` the seed comes from the prompt, so a reply replays.
 - A context with tools whose last message contains the text `CALL` gets a reply that calls its
-  first tool with `{}`. Call ids are `call_{prompt tokens}_{k}`.
+  first tool with the input `{}`. Call ids are `call_{prompt tokens}_{k}`.
+- `finish` is `end_turn` or `tool_use` when the reply wrote `<end>`, `max_tokens` when it wrote
+  `max_tokens` tokens, and `context_full` when the prompt and the reply reached
+  `context_tokens`. `usage.reasoning` counts the tokens of the thought, `<endthink>` included.
+- A context whose last message contains the text `FAIL` gets no reply: without `stream`, a `500`
+  with `error.type` `internal`; with `stream`, two `token` events and then an `error` event,
+  so a client can test how it handles a failure after the stream began.
+- A stream sends one `ping` before its first `token` event, so a client can test that it
+  ignores it.
 
 ## Held state
 
@@ -75,6 +85,13 @@ function of that hash, between -6 and 6, so the same prefix gives the same bits.
   `max_snapshots` drops the oldest unpinned snapshots first.
 - With `--state-dir`, specs, pins, and the snapshots pins keep survive a restart. Other
   snapshots do not.
+
+## Requests and errors
+
+- Every response carries a `request-id` header, `req_<16 hex digits>_<n>`, and every error body
+  and `error` event repeats it as `request_id`. A `traceparent` header is accepted and ignored.
+- A body that does not decode is a `400`. When a member is missing or unknown, `error.param`
+  names it, such as `model` or `state`.
 
 ## Limits
 

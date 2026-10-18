@@ -32,7 +32,7 @@ These words drifted before. Use the term on the right.
 |---|---|
 | held context, stored context | context (the server holds snapshots, never contexts) |
 | seat, agent seat, council context | queue context, or context |
-| state, for the thing judged | case (`state` is only the wire field) |
+| state, for the thing judged | case (v1 sent it as `state`; v2 sends `case`) |
 | state, for what a snapshot holds | model state |
 | rows, for what a snapshot stores | KV cache, or model state (`math::Row` is a row of the matrix a pool combines) |
 | spec layer | the spec as rendered |

@@ -3,7 +3,7 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use crate::context::Context;
+use crate::context::{Context, Usage};
 use crate::decision::Signals;
 use crate::error::Invalid;
 use crate::identity::Class;
@@ -16,9 +16,8 @@ pub const MAX_CONTEXTS: usize = 8;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReadsRequest {
-    /// The served model: its `model` or an alias. May be absent only when the server serves one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
+    /// The served model: its `model` or an alias.
+    pub model: String,
     pub contexts: Vec<Context>,
     /// Text the client formats itself; special-token text in it becomes one token id each.
     pub suffixes: Vec<String>,
@@ -89,6 +88,8 @@ pub struct ReadsResponse {
     pub reads: Vec<RawRead>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signals: Option<Signals>,
+    /// Summed over the reads: `prompt` is each context and suffix as read. `completion` is 0.
+    pub usage: Usage,
 }
 
 #[cfg(test)]
@@ -99,7 +100,7 @@ mod tests {
 
     fn req() -> ReadsRequest {
         ReadsRequest {
-            model: None,
+            model: "m".into(),
             contexts: vec![Context { messages: vec![Message::user("u")], ..Default::default() }],
             suffixes: vec!["x".into()],
             letters: vec!["A".into(), "B".into()],
@@ -131,7 +132,8 @@ mod tests {
     #[test]
     fn a_response_keeps_letter_order_and_the_token_ids() {
         let r: ReadsResponse = serde_json::from_value(json!({"model": "m", "reads": [{"context": 0, "snapshot": format!("snap:{}", "0".repeat(64)), "suffix": 1,
-            "logprobs": {"B": -1.0, "A": -2.0}, "mass": -0.7, "top": [{"token": "A", "id": 65, "logprob": -2.0}]}], "signals": {"control_text": []}})).unwrap();
+            "logprobs": {"B": -1.0, "A": -2.0}, "mass": -0.7, "top": [{"token": "A", "id": 65, "logprob": -2.0}]}], "signals": {"control_text": []},
+            "usage": {"prompt": 20, "kept": 18, "fed": 2, "completion": 0, "reasoning": 0}})).unwrap();
         assert_eq!(r.reads[0].logprobs.keys().collect::<Vec<_>>(), ["B", "A"]);
         assert_eq!(r.reads[0].top[0].id, Some(65));
     }

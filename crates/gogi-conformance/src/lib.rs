@@ -40,6 +40,11 @@ pub(crate) struct Suite {
     /// The served model the checks read.
     pub model: Option<ServedModel>,
     pub nonce: String,
+    /// The `request-id` of each response, in order.
+    pub request_ids: Vec<String>,
+    /// Responses whose `request-id` header is missing or malformed, or whose error body's
+    /// `request_id` differs from it.
+    pub request_id_faults: Vec<String>,
 }
 
 /// Runs every check against the server at `opts.url` and returns what happened. With `print`,
@@ -49,7 +54,7 @@ pub fn run(mut opts: Opts, print: bool) -> Report {
         let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
         format!("{:x}{:x}", t & 0xffff_ffff_ffff, std::process::id())
     };
-    let mut s = Suite { http: http::Http::new(&opts.url), r: Report::new(print), identity: None, model: None, nonce };
+    let mut s = Suite { http: http::Http::new(&opts.url), r: Report::new(print), identity: None, model: None, nonce, request_ids: Vec::new(), request_id_faults: Vec::new() };
     if s.identity(opts.model.as_deref()) {
         s.validation();
         s.models();
@@ -62,10 +67,12 @@ pub fn run(mut opts: Opts, print: bool) -> Report {
         s.reads();
         s.ride();
         s.replay();
+        s.tracing();
         match opts.restart.as_mut() {
             Some(restart) => s.restart(restart),
             None => s.r.skip("specs and pins survive a restart", "run with --allow-restart <cmd> to check"),
         }
+        s.request_ids();
     }
     s.r
 }

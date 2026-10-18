@@ -34,7 +34,7 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     /// A JSON object, in the member order the model wrote.
-    pub arguments: Map<String, Value>,
+    pub input: Map<String, Value>,
 }
 
 /// A council v2 message. `snap` marks a boundary at its end.
@@ -52,13 +52,16 @@ pub struct Message {
     /// A `tool` message names the call whose result it gives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// A `tool` message's result is the call's failure. The template renders it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_error: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub snap: bool,
 }
 
 impl Message {
     fn text(role: Role, content: impl Into<String>) -> Self {
-        Message { role, content: Some(content.into()), reasoning: None, tool_calls: Vec::new(), tool_call_id: None, snap: false }
+        Message { role, content: Some(content.into()), reasoning: None, tool_calls: Vec::new(), tool_call_id: None, is_error: false, snap: false }
     }
 
     pub fn system(content: impl Into<String>) -> Self {
@@ -76,6 +79,11 @@ impl Message {
     /// The result of the call `call_id`.
     pub fn tool(call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Message { tool_call_id: Some(call_id.into()), ..Self::text(Role::Tool, content) }
+    }
+
+    /// The failed result of the call `call_id`.
+    pub fn tool_error(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Message { is_error: true, ..Self::tool(call_id, content) }
     }
 
     /// The same message with a boundary at its end.
@@ -118,6 +126,9 @@ pub fn validate(before: &[Message], messages: &[Message]) -> Result<(), Invalid>
             (_, Some(_)) => return bad("only a tool message carries tool_call_id"),
             _ => {}
         }
+        if m.is_error && m.role != Role::Tool {
+            return bad("only a tool message carries is_error");
+        }
         if m.role == Role::Assistant {
             calls = m.tool_calls.iter().map(|c| c.id.as_str()).collect();
         }
@@ -132,7 +143,7 @@ mod tests {
     use serde_json::json;
 
     fn call(id: &str) -> ToolCall {
-        ToolCall { id: id.into(), name: "shell".into(), arguments: Map::new() }
+        ToolCall { id: id.into(), name: "shell".into(), input: Map::new() }
     }
 
     fn asks(calls: &[&str]) -> Message {
@@ -187,6 +198,15 @@ mod tests {
     }
 
     #[test]
+    fn is_error_goes_on_tool_messages_only() {
+        validate(&[], &[asks(&["a"]), Message::tool_error("a", "exit 1")]).unwrap();
+        let m = Message { is_error: true, ..Message::user("u") };
+        assert_eq!(refused(&[], &[m]), "messages[0]: only a tool message carries is_error");
+        let v = serde_json::to_value(Message::tool_error("a", "exit 1")).unwrap();
+        assert_eq!(v, json!({"role": "tool", "content": "exit 1", "tool_call_id": "a", "is_error": true}));
+    }
+
+    #[test]
     fn a_call_needs_a_printable_id_and_a_name() {
         for id in ["", "a\nb", &"x".repeat(257)] {
             assert!(!is_id(id), "{id:?}");
@@ -215,12 +235,13 @@ mod tests {
         assert_eq!(serde_json::to_value(Message::user("x")).unwrap(), json!({"role": "user", "content": "x"}));
         assert!(serde_json::from_value::<Message>(json!({"role": "user", "extra": 1})).is_err());
         assert!(serde_json::from_value::<Message>(json!({"role": "wizard", "content": "x"})).is_err());
-        assert!(serde_json::from_value::<ToolCall>(json!({"id": "a", "name": "n", "arguments": "x"})).is_err());
+        assert!(serde_json::from_value::<ToolCall>(json!({"id": "a", "name": "n", "input": "x"})).is_err());
+        assert!(serde_json::from_value::<ToolCall>(json!({"id": "a", "name": "n", "arguments": {}})).is_err());
     }
 
     #[test]
-    fn arguments_keep_the_member_order_the_model_wrote() {
-        let m: Message = serde_json::from_str(r#"{"role":"assistant","tool_calls":[{"id":"a","name":"n","arguments":{"z":1,"a":2}}]}"#).unwrap();
-        assert_eq!(serde_json::to_string(&m.tool_calls[0].arguments).unwrap(), r#"{"z":1,"a":2}"#);
+    fn input_keeps_the_member_order_the_model_wrote() {
+        let m: Message = serde_json::from_str(r#"{"role":"assistant","tool_calls":[{"id":"a","name":"n","input":{"z":1,"a":2}}]}"#).unwrap();
+        assert_eq!(serde_json::to_string(&m.tool_calls[0].input).unwrap(), r#"{"z":1,"a":2}"#);
     }
 }

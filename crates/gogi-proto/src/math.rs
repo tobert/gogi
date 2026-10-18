@@ -422,6 +422,13 @@ pub fn verify(response: &DecisionResponse, expect: &Expect) -> Result<(), Mismat
     if response.pool.weights != weights_kind {
         return Err(Mismatch::new("pool.weights", format!("{weights_kind:?}"), format!("{:?}", response.pool.weights)));
     }
+    let u = &response.usage;
+    if u.kept + u.fed != u.prompt {
+        return Err(Mismatch::new("usage.prompt", format!("{} (kept + fed)", u.kept + u.fed), u.prompt.to_string()));
+    }
+    if u.reasoning > u.completion {
+        return Err(Mismatch::new("usage.reasoning", format!("at most {} (completion)", u.completion), u.reasoning.to_string()));
+    }
     let spec = match weights_kind {
         PoolWeights::Uniform => WeightSpec::Uniform,
         PoolWeights::Mass => WeightSpec::Mass,

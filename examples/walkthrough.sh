@@ -25,7 +25,13 @@ call() {
 field() { sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" | head -1; }
 
 say "Identity: the served models, their limits, and what the server and each model can do"
-call GET /identity
+# Shown with its headers once: the server names every request in a request-id header, and an
+# error body repeats it as request_id. A client that traces sends traceparent; it travels only
+# as a header, never in a body.
+curl -sS -i -H "traceparent: 00-$(printf '%032x' $$)-$(printf '%016x' $RANDOM)-01" "$base/identity"
+echo
+# Every request names the served model it reads.
+model=$(curl -sS "$base/identity" | field model)
 
 # A context is a whole chat, sent with every request. `snap: true` marks a boundary where the
 # server holds a snapshot of model state.
@@ -34,13 +40,13 @@ ask='{"role": "user", "content": "Name three rivers.", "snap": true}'
 chat="{\"thinking\": false, \"messages\": [$system, $ask]}"
 
 say "Build a chat context. Nothing is held yet, so every token is fed (kept 0)"
-call POST /contexts "{\"context\": $chat}"
+call POST /contexts "{\"model\": \"$model\", \"context\": $chat}"
 
 say "Build it again. The snapshot is held, so nothing is fed (fed 0)"
-call POST /contexts "{\"context\": $chat}"
+call POST /contexts "{\"model\": \"$model\", \"context\": $chat}"
 
 say "Generate a reply. The server starts from the held snapshot and feeds only the generation prompt"
-reply=$(curl -sS -H 'content-type: application/json' -d "{\"context\": $chat, \"max_tokens\": 16, \"sample\": {\"temperature\": 0}}" "$base/generations")
+reply=$(curl -sS -H 'content-type: application/json' -d "{\"model\": \"$model\", \"context\": $chat, \"max_tokens\": 16, \"sample\": {\"temperature\": 0}}" "$base/generations")
 echo "$reply"
 content=$(printf '%s' "$reply" | field content)
 
@@ -48,14 +54,13 @@ say "Add the reply and a new user message. The build starts from the reply's hea
 next="{\"thinking\": false, \"messages\": [$system, $ask,
   {\"role\": \"assistant\", \"content\": \"$content\"},
   {\"role\": \"user\", \"content\": \"Which is longest?\", \"snap\": true}]}"
-built=$(curl -sS -H 'content-type: application/json' -d "{\"context\": $next}" "$base/contexts")
+built=$(curl -sS -H 'content-type: application/json' -d "{\"model\": \"$model\", \"context\": $next}" "$base/contexts")
 echo "$built"
 head=$(printf '%s' "$built" | field head)
 
 say "Change the first user message. Sharing a prefix is the fork: only the system message is reused"
-call POST /contexts '{"context": {"thinking": false, "messages": [
-  {"role": "system", "content": "You are a terse assistant.", "snap": true},
-  {"role": "user", "content": "Name three mountains.", "snap": true}]}}'
+call POST /contexts "{\"model\": \"$model\", \"context\": {\"thinking\": false, \"messages\": [
+  $system, {\"role\": \"user\", \"content\": \"Name three mountains.\", \"snap\": true}]}}"
 
 say "Pin the head so the server keeps it for a minute"
 call PUT /pins/walkthrough "{\"snapshots\": [\"$head\"], \"ttl_s\": 60}"
@@ -82,12 +87,12 @@ shared='{"thinking": false, "messages": [
   {"role": "system", "content": "You review actions a coding agent proposes."},
   {"role": "user", "content": "Ask before pushing to a branch other people use.", "snap": true}]}'
 
-say "Ask a decision. reads answer per context, answers pools them, and leave_one_out pools without each one"
-call POST /decisions "{\"spec_id\": \"$spec_id\", \"contexts\": [$tests, $shared],
-  \"state\": \"git push origin main\", \"pool\": {\"method\": \"loglinear\", \"weights\": \"mass\"}}"
+say "Ask a decision. Each context reads the case, answers pools the reads, and leave_one_out pools without each one"
+call POST /decisions "{\"model\": \"$model\", \"spec_id\": \"$spec_id\", \"contexts\": [$tests, $shared],
+  \"case\": \"git push origin main\", \"pool\": {\"method\": \"loglinear\", \"weights\": \"mass\"}}"
 
-say "A broken rule is a 400 that names it"
-call POST /contexts '{"context": {"messages": []}}' || true
+say "A broken rule is a 400 that names it, with the request's id"
+call POST /contexts "{\"model\": \"$model\", \"context\": {\"messages\": []}}" || true
 
 say "Clean up"
 call DELETE /pins/walkthrough

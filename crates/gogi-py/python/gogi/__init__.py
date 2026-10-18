@@ -67,7 +67,11 @@ class FakeServer:
     ``models`` lists the served models, each a name or a dict with ``name`` and, optionally,
     ``aliases`` (default none), ``seed`` (default its position; two seeds are two models), and
     ``status`` (default ``"ready"``). Without ``models`` the fake serves ``gogi-toy-1``, alias
-    ``toy``, so a request may leave out ``model``. ``set_status`` changes one while it serves.
+    ``toy``. Every request names its served model with ``model``. ``set_status`` changes one
+    while it serves.
+
+    Each response carries a ``request-id`` header, and each error body the same id as
+    ``request_id``.
 
     ``context_tokens`` (default 4096), ``decision_context_tokens`` (default 3072), and
     ``pin_bytes`` (default 1 MiB) are the limits identity reports. Past ``max_snapshots``

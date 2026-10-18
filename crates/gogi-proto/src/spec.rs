@@ -212,43 +212,6 @@ pub fn parse_spec(v: &Value, rules: &SpecRules) -> Result<Spec, Invalid> {
     Ok(Spec { value: v.clone(), name, instructions, input_label, questions })
 }
 
-/// Parses inline questions, sent in place of `spec_id`: `{id: {type, instructions, criteria}}`,
-/// a choice's criteria an object from option to meaning, in the order listed. There is no
-/// `text`.
-pub fn parse_inline(map: &Map<String, Value>, rules: &SpecRules) -> Result<Vec<Question>, Invalid> {
-    let mut questions = Vec::new();
-    for (id, v) in map {
-        let param = format!("questions.{}", id);
-        if !is_question_id(id) {
-            return Err(Invalid::param(&param, "not a question id"));
-        }
-        let obj = v.as_object().ok_or_else(|| Invalid::param(&param, "a question is an object"))?;
-        only_fields(obj, &["type", "instructions", "criteria"], &param)?;
-        let ty = obj.get("type").and_then(|v| v.as_str()).ok_or_else(|| Invalid::param(&param, "type is required"))?;
-        let instructions = instructions_text(obj.get("instructions").ok_or_else(|| Invalid::param(&param, "instructions are required"))?, &param)?;
-        let kind = match ty {
-            "choice" => {
-                let crit = obj.get("criteria").and_then(|v| v.as_object()).ok_or_else(|| Invalid::param(&param, "criteria maps option to meaning"))?;
-                let mut options = Vec::new();
-                for (o, m) in crit {
-                    let m = m.as_str().ok_or_else(|| Invalid::param(&param, "a meaning is a string"))?;
-                    options.push((o.clone(), m.to_string()));
-                }
-                check_options(&options.iter().map(|(o, _)| o.clone()).collect::<Vec<_>>(), &param, rules)?;
-                QuestionKind::Choice { options }
-            }
-            "score" => QuestionKind::Score { levels: levels_of(obj, &param)? },
-            "noul" => QuestionKind::Noul { criteria: noul_criteria(obj, &param)? },
-            other => return Err(Invalid::param(&param, format!("unknown inline question type {}", other))),
-        };
-        questions.push(Question { id: id.clone(), instructions, kind });
-    }
-    if questions.is_empty() || questions.len() > rules.questions_per_spec {
-        return Err(Invalid::param("questions", format!("1 to {} questions", rules.questions_per_spec)));
-    }
-    Ok(questions)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,16 +295,6 @@ mod tests {
         let s = parse_spec(&mk(json!({"id": "v", "type": "noul", "instructions": "fine?"})), &rules()).unwrap();
         assert_eq!(s.questions[0].answer_keys(), ["yes", "no"]);
         parse_spec(&mk(json!({"id": "v", "type": "noul", "instructions": "fine?", "criteria": "guidance"})), &rules()).unwrap();
-    }
-
-    #[test]
-    fn inline_questions_keep_the_order_listed() {
-        let m = json!({"verdict": {"type": "choice", "instructions": "x", "criteria": {"zebra": "z", "apple": "a"}}, "risky": {"type": "noul", "instructions": "y"}});
-        let qs = parse_inline(m.as_object().unwrap(), &rules()).unwrap();
-        assert_eq!(qs.iter().map(|q| q.id.as_str()).collect::<Vec<_>>(), ["verdict", "risky"]);
-        assert_eq!(qs[0].answer_keys(), ["zebra", "apple"]);
-        let text = json!({"d": {"type": "text", "instructions": "x"}});
-        assert!(parse_inline(text.as_object().unwrap(), &rules()).is_err());
     }
 
     #[test]

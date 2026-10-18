@@ -42,8 +42,16 @@ server against it.
   name, for a time it renews.
 - **A server serves several models.** Identity lists each served model with
   its own identity, limits, and capabilities, and a status that changes when
-  the server loads or unloads it. A request names its served model with
+  the server loads or unloads it. Every request names its served model with
   `model`. v1's server had one model.
+- **Decisions are the council's own.** v1 accepted any request in the
+  gateway Decisions API's shape. v2 does not: a decision names a held spec,
+  sends its case as `case`, and has no inline questions and no gateway
+  fields.
+- **Tools and calls take Anthropic's shape.** A tool is `{name, description,
+  input_schema}` and a call is `{id, name, input}`.
+- **Every response has a request id,** and every response counts tokens in
+  one `usage` shape.
 
 ## Terms
 
@@ -69,11 +77,10 @@ thing, and each thing has one term.
 | pin | An owner's claim that keeps a snapshot, and the snapshots it is built on, from eviction until `ttl_s` runs out. |
 | owner | The name a client pins under. |
 | spec | A held set of questions, with instructions and an input label. Its id is the sha256 of its canonical JSON. |
-| inline questions | Questions a decision sends in place of `spec_id`, in the gateway Decisions API's form. |
 | question | One item of a spec: `choice`, `score`, `noul`, or `text`. |
 | option | One possible answer to a `choice` question, or one level of a `score` question. |
 | letter | The token `A`, `B`, and so on, that stands for an option when the model answers. |
-| case | What a decision judges, sent as the request's `state` field. |
+| case | What a decision judges, sent as the request's `case` field. |
 | decision | A request that reads one case after each of its contexts and pools the reads. |
 | read | The numbers one context gives for one input. A decision read answers the spec's questions about the case; a raw read, from `POST /reads`, gives letter log probabilities after a client's suffix. |
 | answer | One question's result, either from one read or pooled over all of a decision's reads. |
@@ -83,6 +90,10 @@ thing, and each thing has one term.
 | riding decision | A spec's questions asked during a generation, `before` or `after` the reply. Capability `ride`. |
 | reply | The assistant message a generation writes. |
 | response | The HTTP body a server returns for any request. |
+| request id | The id a server gives one request, sent in the `request-id` header of its response and in every error body. |
+| trace context | The client's W3C `traceparent` header, which joins the server's spans to the client's trace. It travels only as a header. |
+| usage | The token counts a response reports: `prompt`, `kept`, `fed`, `completion`, and `reasoning`. |
+| phase | The part of a reply a streamed token belongs to: `reasoning`, `content`, or `call`. |
 | identity | The model, weights, tokenizer, template, and engine that produced a number. Each served model has one. |
 | served model | One identity a server serves, with its own limits, capabilities, and status. A request names it with `model`. |
 | status | Whether a served model takes requests now: `ready`, `loading`, `draining`, or `unloaded`. |
@@ -116,7 +127,7 @@ GET /council/v2/identity
                   "contexts_per_decision": 8, "default_timeout_ms": 30000},
        "capabilities": ["reads", "generate", "dry_run", "leave_one_out"]},
       {"model": "qwen-3.8-mutant-636", "aliases": [], "status": "unloaded", …}],
-    "limits": {"pin_bytes": 17179869184, "state_bytes": 65536, "questions_per_spec": 16, "choice_options": 26},
+    "limits": {"pin_bytes": 17179869184, "case_bytes": 65536, "questions_per_spec": 16, "choice_options": 26},
     "capabilities": ["pins"],
     "extensions": ["/mk/v1"]}
 ```
@@ -124,14 +135,14 @@ GET /council/v2/identity
 - **`models` lists every model the server serves, loaded or not,** so a
   client can tell a name the server never serves from a name it serves
   later. A served model reports the same identity in every status.
-- **A request names its served model with `model`.** `POST /contexts`,
-  `/decisions`, `/reads`, and `/generations` take it. It is a served model's
-  `model` or one of its `aliases`; any other name is a `400` naming `model`.
-  Each response names the served model by its `model`, never by an alias.
-- **`model` may be left out only when `models` has exactly one entry.**
-  Otherwise a request without `model` is a `400` naming `model`. The server
-  never chooses a served model for a client, because the loaded one can
-  change during a day.
+- **Every request names its served model with `model`.** `POST /contexts`,
+  `/decisions`, `/reads`, and `/generations` require it. It is a served
+  model's `model` or one of its `aliases`. A request without `model`, or with
+  any other name, is a `400` naming `model`, even when the server serves one
+  model. The server never chooses a served model for a client, because a
+  client that worked with one served model would break the day a second one
+  is added.
+- Each response names the served model by its `model`, never by an alias.
 - **A served model that is not `ready` gets a `503`** with `error.type`
   `model_unavailable`, `model`, and `status`, before anything runs. A server
   that knows when the model will be `ready` sends `Retry-After` in seconds.
@@ -159,6 +170,10 @@ GET /council/v2/identity
   value is a `400`. `priority` is a 32-bit signed integer, default 0, and a
   higher priority runs first within its class. All four requests accept
   both; a server without capability `classes` ignores them.
+- **A server trusts every client with `priority`.** The contract has no
+  authentication, so any client can send a high priority and run before the
+  others. A server that serves clients it does not trust leaves out
+  capability `classes`.
 
 ## Contexts
 
@@ -166,16 +181,16 @@ Every request that reads a context carries it as this object:
 
 ```json
 {"thinking": true,
- "tools": [{"type": "function", "function": {"name": "next_command", "description": "…", "parameters": {…}}}],
+ "tools": [{"name": "next_command", "description": "…", "input_schema": {"type": "object", "properties": {…}}}],
  "queue": "next_command",
  "messages": [
    {"role": "system", "content": "You are a policy expert for shell commands. …"},
    {"role": "user", "content": "Commands from a coding agent wait in a queue. …", "snap": true},
    {"role": "assistant", "reasoning": "I should get the first command.",
-    "tool_calls": [{"id": "c0", "name": "next_command", "arguments": {}}]},
+    "tool_calls": [{"id": "c0", "name": "next_command", "input": {}}]},
    {"role": "tool", "tool_call_id": "c0", "content": "{\"command\": \"ls -la src\"}"},
    {"role": "assistant", "reasoning": "ls only lists. …",
-    "tool_calls": [{"id": "c1", "name": "next_command", "arguments": {"answers": {"verdict": "A"}}}],
+    "tool_calls": [{"id": "c1", "name": "next_command", "input": {"answers": {"verdict": "A"}}}],
     "snap": true}]}
 ```
 
@@ -186,7 +201,8 @@ a queue context a client builds at startup:
 POST /council/v2/contexts
 {"model": "google/gemma-4-26B-A4B-it",
  "context": {"thinking": true, "tools": […], "queue": "next_command", "messages": […]}}
--> {"model": "google/gemma-4-26B-A4B-it", "head": "snap:51d0…", "tokens": 1840, "kept": 0, "fed": 1840, "from": null, "dry_run": false,
+-> {"model": "google/gemma-4-26B-A4B-it", "head": "snap:51d0…", "from": null, "dry_run": false,
+    "usage": {"prompt": 1840, "kept": 0, "fed": 1840, "completion": 0, "reasoning": 0},
     "snapshots": [{"id": "snap:9a1e…", "message": 1, "tokens": 412, "tier": "host"},
                   {"id": "snap:51d0…", "message": 4, "tokens": 1840, "tier": "host"}]}
 ```
@@ -196,6 +212,15 @@ POST /council/v2/contexts
   `reasoning` (its thinking), and `tool_calls`; a `tool` message gives the
   result of the call its `tool_call_id` names. The server renders them with its model's own
   template, so a client never writes template tokens.
+- **A tool is `{name, description, input_schema}`,** as in Anthropic's
+  Messages API: a name no other tool in the context has, an optional
+  description, and a JSON Schema object for the call's input. Any other
+  member is a `400`. A call is `{id, name, input}`, with `input` a JSON
+  object in the member order the model wrote.
+- **`is_error: true` on a `tool` message** says the result is the call's
+  failure. How it renders is the template's, but a failed result never
+  renders the same as the same result without `is_error`. Any other role
+  with `is_error` is a `400`.
 - **An assistant's text renders before its tool calls,** as the model
   writes them.
 - **A system message may come later.** The first message is usually
@@ -215,8 +240,9 @@ POST /council/v2/contexts
   renders the context, starts from the longest boundary it holds, feeds
   the rest, and holds a snapshot at each boundary it passes and at the end.
   The response says what it reused: `from` names the snapshot the build
-  started from, held from this context or any other, or `null`; `kept`
-  counts the tokens it did not feed.
+  started from, held from this context or any other, or `null`;
+  `usage.kept` counts the tokens it did not feed and `usage.prompt` the
+  context's tokens.
 - **A boundary exists only where the rendering keeps it.** A marked message
   whose rendering is not a prefix of the whole context is not a boundary,
   and the response lists no snapshot for it. In Gemma 4 this is an
@@ -235,8 +261,8 @@ POST /council/v2/contexts
   earlier message sends the new messages; the server starts from the last
   boundary they share with anything it holds. There is no fork request:
   sharing a prefix is the fork.
-- **`dry_run: true`** renders and reports `kept`, `fed`, and `from`
-  without feeding.
+- **`dry_run: true`** renders and reports `usage` and `from` without
+  feeding.
 - **`tier`** says where a snapshot's model state is stored: `device`,
   `host`, or `disk`. A read from a `host` or `disk` snapshot loads it first and reports
   the time in `ms.load`.
@@ -283,15 +309,31 @@ PUT /council/v2/pins/kernel-7f3a
 
 ## Decisions
 
-Unchanged from v1 except where noted: `spec_id` or inline `questions`,
-`contexts`, `state`, `pool`, `timeout_ms`, the answers and their exact
-relations, `leave_one_out`, and the errors.
+A decision reads one case after each of its contexts with a held spec's
+questions, and pools the reads. These parts are as v1 defines them: `ask`
+and `options`, `pool`, `timeout_ms`, the answers and their exact relations,
+and `leave_one_out`.
 
 ```json
 POST /council/v2/decisions
-{"spec_id": "sha256:9c1f…", "state": {"command": "rm -rf build", …},
+{"model": "google/gemma-4-26B-A4B-it", "spec_id": "sha256:9c1f…",
+ "case": {"command": "rm -rf build", …},
  "contexts": [{"thinking": true, "tools": […], "queue": "next_command", "messages": […]}]}
 ```
+
+- **A decision names a held spec with `spec_id`.** It is required; a spec
+  the server does not hold is a `404`. A decision has no inline questions:
+  wording moves letter probabilities by an order of magnitude, so a question
+  is asked only as a spec the client holds, measures, and fits thresholds
+  for.
+- **`case` is what the decision judges:** a string, an object, or an array,
+  at most `case_bytes` long. Any other value is a `400` naming `case`.
+- **A decision takes `model`, `spec_id`, `case`, `contexts`, `ask`,
+  `options`, `pool`, `timeout_ms`, `think`, `class`, and `priority`.** Any
+  other field is a `400`, including the gateway Decisions API's
+  `questions`, `session_id`, `user`, `trace`, and `provider`, and v1's
+  `state`. A client joins its trace with the `traceparent` header (see
+  "Request ids and tracing").
 
 - **`contexts` are context objects,** each sent whole, as above. Each read
   names its context by its index in `contexts`, as do the keys of
@@ -302,10 +344,11 @@ POST /council/v2/decisions
   rendered is part of `template`.
 - **The client writes the queue tool's `answers` schema.** The tools render
   at the top of the context, before any spec, so the server cannot add them
-  at decision time. Each asked question is an `answers` property whose
-  `enum` is the letters of its options in order, `A`, `B`, and so on, with
-  the options described in the property. The server checks this and
-  otherwise responds with a `400` naming `queue`.
+  at decision time. Each asked question is a property of
+  `input_schema.properties.answers` whose `enum` is the letters of its
+  options in order, `A`, `B`, and so on, with the options described in the
+  property. The server checks this and otherwise responds with a `400`
+  naming `queue`.
 - **A queue context's questions are read in the order the model writes one call:**
   in the order the template writes the keys, each after the most likely
   letters of the ones before it. Unlike v1's reads, these answers condition
@@ -318,6 +361,9 @@ POST /council/v2/decisions
   tokens, and each read reports its `thought`. Greedy keeps rule 1: the same
   snapshot and case give the same thought and the same numbers. Capability
   `think`.
+- **`usage` sums over the reads.** `prompt` counts every token a read was
+  conditioned on, and `completion` the `text` answers and thoughts the
+  model wrote, with the thoughts also in `reasoning`.
 
 ## Raw reads
 
@@ -327,7 +373,8 @@ questions.
 
 ```json
 POST /council/v2/reads
-{"contexts": [{"thinking": true, "tools": […], "messages": […]}],
+{"model": "google/gemma-4-26B-A4B-it",
+ "contexts": [{"thinking": true, "tools": […], "messages": […]}],
  "suffixes": ["<channel|><|tool_call>call:next_command{answers:{verdict:<|\"|>"],
  "letters": ["A", "B", "C"], "top": 5}
 ```
@@ -342,27 +389,50 @@ POST /council/v2/reads
   tokens as `{token, id, logprob}`, so a client sees where the rest of the
   probability went. Reads are not pooled; a client that pools follows the
   decision rules.
+- `usage` sums over the reads: `prompt` counts each context and suffix as
+  read, and `completion` is 0.
+- **A suffix is written for one template.** When identity's `template`
+  changes, a client's suffixes may no longer read what they were written to
+  read, so a client keys its suffixes on `template`.
 
 ## Generations
 
 ```json
 POST /council/v2/generations
-{"context": {"thinking": true, "tools": […],
+{"model": "google/gemma-4-26B-A4B-it",
+ "context": {"thinking": true, "tools": […],
              "messages": [… , {"role": "user", "content": "how did it go?", "snap": true}]},
- "max_tokens": 2048, "sample": {"temperature": 1.0}, "stream": true}
+ "max_tokens": 2048, "sample": {"temperature": 1.0, "seed": 7}, "stream": true}
 ```
 
 - **A generation replies after its context.** The server builds the
   context as `POST /contexts` does, then samples the reply. The client
   appends the reply to its own messages for the next request.
-- **`stream: true`** sends server-sent events: `token`, as `/mk/v1`'s, then
-  `done` with `model`, the reply's `content`, `reasoning`, `tool_calls`,
-  `finish`, `usage` (`prompt`, `kept`, `fed`, `completion`), `head`, and
-  the context's `snapshots`. Closing the stream cancels the reply. Without
-  `stream`, `done` is the JSON response.
+- **`max_tokens` is required:** 1 to the served model's `context_tokens`.
+  Any other value, or none, is a `400` naming `max_tokens`.
+- **`done` is the reply.** It has `model`, the reply's `content`,
+  `reasoning`, and `tool_calls`, `finish`, `usage`, `head`, the context's
+  `snapshots`, and `seed`. Without `stream`, `done` is the JSON response.
+- **`finish`** says why the reply ended:
+
+  | `finish` | When |
+  |---|---|
+  | `end_turn` | The model ended its turn with no tool call. |
+  | `tool_use` | The model ended its turn after one or more tool calls. |
+  | `max_tokens` | The reply reached `max_tokens`: `usage.completion` is `max_tokens`. |
+  | `context_full` | The prompt and the reply reached `context_tokens`. |
+
+- **`usage`** counts the prompt in `prompt`, `kept`, and `fed`, and the
+  reply in `completion`, with its thinking also in `reasoning`.
+- **`seed`** in `done` is the seed the server sampled with: the request's
+  `sample.seed`, or one the server chose. The same request with the same
+  seed usually samples the same reply, but rule 1 does not promise it:
+  logits whose last bits depend on how the prompt was fed can change a
+  sample. `temperature: 0` is greedy and replays.
 - **The server names each call of the reply** with the `id` a later `tool`
-  message answers. A call that does not parse is kept as written,
-  `{id, name, raw, error}`; a client that sends it back sends it as text.
+  message answers. A parsed call is `{id, name, input}`. A call that does
+  not parse is kept as written, `{id, name, raw, error}`; a client that
+  sends it back sends it as text.
 - **`head` is the snapshot after the reply,** as the reply's message
   renders, when the server holds it. The server holds it when that costs at
   most a few tokens of feeding, so the next request, which sends the reply
@@ -393,12 +463,84 @@ POST /council/v2/generations
   `context_full`, `prompt_tokens`, and `context_tokens`, before anything
   runs. The client shortens the context.
 
+### Streams
+
+`stream: true` sends server-sent events. Each event's `data` is one JSON
+object.
+
+```text
+event: token
+data: {"id": 1820, "piece": "ls", "phase": "content", "p": 0.91, "h": 0.42, "n": 37, "tps": 48.2}
+
+event: done
+data: {"model": "google/gemma-4-26B-A4B-it", "content": "…", "finish": "end_turn", …}
+```
+
+| Event | `data` |
+|---|---|
+| `token` | One sampled token: its `id`; `piece`, the text it adds; `phase`, `reasoning`, `content`, or `call`; `p`, its untempered probability; `h`, the entropy in nats of the distribution it came from; `n`, the reply's tokens so far, this one included; and `tps`, reply tokens per second so far, when the server reports it. |
+| `ping` | `{}`. A server may send it at any time, such as while it feeds a long prompt. |
+| `done` | The reply, as above. The last event of a stream that succeeds. |
+| `error` | An error body, as a status response's: `{error, request_id}`. The last event of a stream that fails; no `done` follows it. |
+
+- **Each completion token is one `token` event.** `n` counts them from 1,
+  so a stream that ends with `done` has `usage.completion` `token` events,
+  and `usage.reasoning` of them have the phase `reasoning`.
+- **A stream ends with exactly one `done` or `error`.** A failure after the
+  `200` is sent is an `error` event, never a closed connection without one.
+- **`piece` is display text.** It may be empty, such as while a character
+  is not yet complete. The reply is `done`'s fields, never the joined
+  pieces.
+- **A client ignores an event it does not know,** so a server can add one
+  without breaking clients.
+- **Closing the stream cancels the reply.** The server sends nothing more
+  and holds no head for it.
+
+## Request ids and tracing
+
+- **Every response carries a `request-id` header,** a status response, an
+  empty one, and a stream alike. The server chooses it: printable ASCII
+  without spaces, 1 to 128 bytes, different for each request, such as
+  `req_01JB4N8V3Q`. A client treats it as opaque and logs it with the
+  request.
+- **Every error body carries `request_id`,** the same value as the header,
+  beside `error`. An `error` event carries it too.
+- **A client joins its trace with the `traceparent` header** (W3C Trace
+  Context), and `tracestate` when it has one. The trace context travels only
+  as a header: no request or response body carries it, and it never changes
+  a number. A server without tracing ignores it.
+- **A request id and a trace context are different things.** The server
+  names one request with the request id; the client names its own operation,
+  which can span many requests and other services, with the trace context.
+
+## Errors
+
+The body is `{"error": {"type", "message", "param"?, …}, "request_id"}`.
+`message` leads with the consequence, names the condition, and suggests the
+next step when one is known.
+
+| Status | `error.type` | When |
+|---|---|---|
+| `400` | `invalid_request` | The body is outside the schema, including a missing `model` or an unknown field; `model` names no served model; `ask` or `options` names what the spec lacks; a needed capability is missing. `param` names the field. |
+| `404` | `not_found` | An unknown spec id, snapshot id, or pin owner. |
+| `413` | `too_large` | A case, spec, or pin set is past a limit in identity; `param` names the limit, such as `case_bytes` or `pin_bytes`. Nothing is held. |
+| `413` | `context_full` | A generation's prompt leaves no room for a reply; the body has `prompt_tokens` and `context_tokens`. |
+| `429` | `busy` | The server has more requests than it runs. `Retry-After` when known. |
+| `500` | `internal` | The server failed. A decision's numbers that fail `gogi-proto`'s check are a `500`, never a response. |
+| `503` | `model_unavailable` | The served model is not `ready`; the body has `model` and `status`. `Retry-After` when known. |
+| `503` | `unavailable` | The server is stopping or stopped. |
+| `504` | `timeout` | A decision's `timeout_ms` passed. No partial answer is returned. |
+
+v1's `409`, `412`, and `507` are gone with context records and owned pins.
+
 ## Rules every server keeps
 
 v1's six rules hold: raw numbers replay bit for bit; content is never
 control, except a `reads` suffix; each context describes for itself; no
 winner is decided; failures are explicit; the rendering is the server's.
-One more:
+In rule 2, `signals.control_text` names the case's hits `case`, not v1's
+`state`. In rule 4, `choice` is the argmax for a client to show; it is not
+a decision. One more:
 
 7. **A snapshot never changes.** Its id names one model state, made by one
    identity from its tokens and the boundaries along them, so a read from it
@@ -424,7 +566,7 @@ on the store or on specs, which every served model shares.
 | `default_timeout_ms` | served model | A decision's `timeout_ms` when it sends none. |
 | `text_tokens` | served model | The most tokens a `text` answer writes, with `describe`. |
 | `pin_bytes` | server | The most snapshot bytes all pins together keep, over every served model. |
-| `state_bytes` | server | The longest case, in bytes. |
+| `case_bytes` | server | The longest case, in bytes. |
 | `questions_per_spec` | server | The most questions a spec holds. |
 | `choice_options` | server | The most options a `choice` question has. |
 
@@ -439,7 +581,7 @@ on the store or on specs, which every served model shares.
 | `dry_run`, `leave_one_out`, `describe` | served model | As v1. |
 | `pins` | server | `/council/v2/pins`. |
 | `tiers` | server | Snapshots report `tier`, and pinned snapshots move between tiers. |
-| `classes` | server | Requests are scheduled by `class` and `priority`. |
+| `classes` | server | Requests are scheduled by `class` and `priority`. The server trusts every client with `priority`. |
 
 ## Extensions
 
@@ -459,11 +601,11 @@ A server serves the model-specific rest under its own prefix and lists it in
 
 | From | Changes |
 |---|---|
-| council v1 | `system` and `turns` become `messages`, with the system message first, and a context travels with each request instead of living under an id. `snap` moves onto messages. Contexts gain `tools`, `thinking`, and `queue`. `pin` and `persist` become owned pins. Decisions gain `think`. Paths move to `/council/v2`. |
+| council v1 | `system` and `turns` become `messages`, with the system message first, and a context travels with each request instead of living under an id. `snap` moves onto messages. Contexts gain `tools`, `thinking`, and `queue`. `pin` and `persist` become owned pins. Decisions gain `think`, send `case` in place of `state`, and lose inline `questions` and the gateway fields. Paths move to `/council/v2`. |
 | HIP megakernel `/mk/v1` | Context ids and `POST /contexts` give way to sending the context; the content-hash id becomes the snapshot id. `reads` takes `contexts` and is otherwise the same. `generate`'s `from.context` becomes `generations` with the context. |
 | lfm2d `/v1/opinion` | Held specs and describe-first carry over as `specs` and `text` questions. Contexts move from a domain-tagged token hash to messages with `snap` boundaries. |
 | mkviolet | One snapshot store for contexts, generations, and decisions; each snapshot stores the KV cache for the tokens after its parent boundary, in memory and on NVMe. `/mk/v1/choices` is gone, replaced by `reads`. v1 contexts and `/mk/v1/generate` keep their own stores. Identity lists its one model under `models`, and a build's response names `model`. |
-| kaijutsu | The mk provider sends each chat whole, with `snap` on user messages and tool messages. The council builds one queue context per spec at startup, with a `queue` tool whose `answers` schema is the spec's, and pins it under the kernel's name. Every request names its `model`. |
+| kaijutsu | The mk provider sends each chat whole, with `snap` on user messages and tool messages. The council builds one queue context per spec at startup, with a `queue` tool whose `answers` schema is the spec's, and pins it under the kernel's name. Every request names its `model`. Tools and calls move to `{name, description, input_schema}` and `{id, name, input}`. |
 
 ## Open questions
 

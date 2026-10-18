@@ -5,7 +5,7 @@ says where it differs, so this one stays as the reference for the parts v2
 keeps. It was written in kaijutsu so that two decision servers, the HIP
 megakernel (`/mk/v1`) and lfm2d (`/v1/opinion`), could converge on it.
 kaijutsu's own use is its `docs/council.md`. No server or client speaks v1
-now.
+now. v2 is not a superset of the gateway Decisions API, as v1 was below.
 
 The words here are v1's. A context is a record the server holds under an id
 the client chose, and a decision names contexts by id. In v2 the client sends

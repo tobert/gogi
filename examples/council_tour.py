@@ -11,6 +11,7 @@ another server the tour skips them.
 """
 
 import json
+import os
 import sys
 import tempfile
 import urllib.error
@@ -20,24 +21,34 @@ import gogi
 
 
 class Council:
-    """A council v2 client in a dozen lines: JSON in, JSON out."""
+    """A council v2 client in a dozen lines: JSON in, JSON out.
+
+    Every request carries one W3C ``traceparent`` header, so a server that traces joins its spans
+    to this tour's trace. The server names each request in its ``request-id`` header; ``last_id``
+    keeps the latest one.
+    """
 
     def __init__(self, url):
         self.base = url.rstrip("/") + "/council/v2"
+        self.traceparent = f"00-{os.urandom(16).hex()}-{os.urandom(8).hex()}-01"
+        self.last_id = None
 
     def call(self, method, path, body=None):
         data = None if body is None else json.dumps(body).encode()
-        req = urllib.request.Request(self.base + path, data=data, method=method, headers={"content-type": "application/json"})
+        headers = {"content-type": "application/json", "traceparent": self.traceparent}
+        req = urllib.request.Request(self.base + path, data=data, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req) as r:
+                self.last_id = r.headers.get("request-id")
                 return r.status, json.loads(r.read() or b"null")
         except urllib.error.HTTPError as e:
+            self.last_id = e.headers.get("request-id")
             return e.code, json.loads(e.read() or b"null")
 
     def ok(self, method, path, body=None):
         status, response = self.call(method, path, body)
         if status >= 300:
-            sys.exit(f"{method} {path} -> {status}: {response}")
+            sys.exit(f"{method} {path} -> {status} (request {response.get('request_id')}): {response['error']}")
         return response
 
 
@@ -47,7 +58,8 @@ def step(title):
 
 def built(label, b):
     origin = "from nothing" if b["from"] is None else f"from {b['from'][:17]}…"
-    print(f"  {label:<28} {b['tokens']:>4} tokens: kept {b['kept']:>4}, fed {b['fed']:>3}, {origin}")
+    u = b["usage"]
+    print(f"  {label:<28} {u['prompt']:>4} tokens: kept {u['kept']:>4}, fed {u['fed']:>3}, {origin}")
 
 
 def user(text, snap=True):
@@ -81,21 +93,24 @@ def tour(council, fake):
         print(f"    {limits['context_tokens']} tokens a context, {limits['decision_context_tokens']} for a decision, "
               f"{limits['contexts_per_decision']} contexts a decision")
     print(f"  server capabilities {', '.join(ident['capabilities'])}")
+    model = next(m["model"] for m in ident["models"] if m["status"] == "ready")
+    print(f"  every request below names {model}; the server named this one {council.last_id}")
 
     step("A chat: every request sends the whole context, and held snapshots make that cheap")
     chat = {"thinking": False, "messages": [{"role": "system", "content": "You are a terse assistant.", "snap": True},
                                             user("Name three rivers.")]}
     gogi.check_context(chat)
-    built("first build", council.ok("POST", "/contexts", {"context": chat}))
-    built("same context again", council.ok("POST", "/contexts", {"context": chat}))
-    reply = council.ok("POST", "/generations", {"context": chat, "max_tokens": 24, "sample": {"temperature": 0}})
+    built("first build", council.ok("POST", "/contexts", {"model": model, "context": chat}))
+    built("same context again", council.ok("POST", "/contexts", {"model": model, "context": chat}))
+    reply = council.ok("POST", "/generations", {"model": model, "context": chat, "max_tokens": 24, "sample": {"temperature": 0}})
     u = reply["usage"]
-    print(f"  reply {reply['content']!r}: prompt {u['prompt']}, kept {u['kept']}, fed {u['fed']}, wrote {u['completion']}")
+    print(f"  reply {reply['content']!r} ({reply['finish']}): prompt {u['prompt']}, kept {u['kept']}, fed {u['fed']}, "
+          f"wrote {u['completion']}, seed {reply.get('seed')}")
     chat["messages"] += [{"role": "assistant", "content": reply["content"]}, user("Which is longest?")]
-    head = council.ok("POST", "/contexts", {"context": chat})
+    head = council.ok("POST", "/contexts", {"model": model, "context": chat})
     built("reply and a new message", head)
     fork = {"thinking": False, "messages": [chat["messages"][0], user("Name three mountains.")]}
-    built("an edited first message (fork)", council.ok("POST", "/contexts", {"context": fork}))
+    built("an edited first message (fork)", council.ok("POST", "/contexts", {"model": model, "context": fork}))
 
     step("A spec: a held question set, named by its content")
     held = council.ok("POST", "/specs", GATE)
@@ -110,7 +125,7 @@ def tour(council, fake):
         {"thinking": False, "messages": [SYSTEM, user("Deleting anything outside the build directory needs a person.")]},
     ]
     for statement in ["cargo test --workspace", "git push origin main", "rm -rf ~/src"]:
-        req = {"spec_id": spec_id, "contexts": guidance, "state": statement, "pool": {"method": "loglinear", "weights": "mass"}}
+        req = {"model": model, "spec_id": spec_id, "contexts": guidance, "case": statement, "pool": {"method": "loglinear", "weights": "mass"}}
         d = council.ok("POST", "/decisions", req)
         gogi.verify_decision(req, d)
         v = d["answers"]["verdict"]
@@ -132,20 +147,19 @@ def tour(council, fake):
     answers = {q["id"]: {"type": "string", "enum": letters(q), "description": json.dumps(q["criteria"])} for q in GATE["questions"]}
     queued = {
         "thinking": True,
-        "tools": [{"type": "function", "function": {
-            "name": "next_command", "description": "Fetches the next command to judge, after answering the last one.",
-            "parameters": {"type": "object", "properties": {"answers": {"type": "object", "properties": answers}}}}}],
+        "tools": [{"name": "next_command", "description": "Fetches the next command to judge, after answering the last one.",
+                   "input_schema": {"type": "object", "properties": {"answers": {"type": "object", "properties": answers}}}}],
         "queue": "next_command",
         "messages": [SYSTEM, user("Commands from a coding agent wait in a queue. Fetch the first one."),
                      {"role": "assistant", "reasoning": "I should get the first command.",
-                      "tool_calls": [{"id": "c0", "name": "next_command", "arguments": {}}]}],
+                      "tool_calls": [{"id": "c0", "name": "next_command", "input": {}}]}],
     }
     gogi.check_context(queued)
-    built("the queue context", council.ok("POST", "/contexts", {"context": queued}))
-    req = {"spec_id": spec_id, "contexts": [queued], "state": "git push --force origin main"}
+    built("the queue context", council.ok("POST", "/contexts", {"model": model, "context": queued}))
+    req = {"model": model, "spec_id": spec_id, "contexts": [queued], "case": "git push --force origin main"}
     d = council.ok("POST", "/decisions", req)
     gogi.verify_decision(req, d)
-    print(f"  {req['state']!r}: {d['answers']['verdict']['choice']}, read after {d['reads'][0]['snapshot'][:17]}…")
+    print(f"  {req['case']!r}: {d['answers']['verdict']['choice']}, read after {d['reads'][0]['snapshot'][:17]}…")
     status, err = council.call("POST", "/decisions", {**req, "contexts": [queued, guidance[0]]})
     print(f"  a queue context and another context in one decision: {status}, {err['error']['message']!r}")
 
@@ -158,8 +172,8 @@ def tour(council, fake):
         step("A restart: memory is lost; specs, pins, and pinned snapshots come back")
         fake.restart()
         print(f"  spec still held: {council.call('GET', f'/specs/{spec_id}')[0] == 200}")
-        built("the pinned chat", council.ok("POST", "/contexts", {"context": chat, "dry_run": True}))
-        built("the fork", council.ok("POST", "/contexts", {"context": fork, "dry_run": True}))
+        built("the pinned chat", council.ok("POST", "/contexts", {"model": model, "context": chat, "dry_run": True}))
+        built("the fork", council.ok("POST", "/contexts", {"model": model, "context": fork, "dry_run": True}))
         print("  the fork keeps its system message: a pin also keeps the snapshots its snapshot is built on")
 
         step("Pins expire: a client that goes away leaves nothing held")
@@ -174,8 +188,8 @@ def tour(council, fake):
         gogi.check_context(bad)
     except ValueError as e:
         print(f"  gogi:   {e}")
-    status, err = council.call("POST", "/contexts", {"context": bad})
-    print(f"  server: {status} {err['error']['message']}")
+    status, err = council.call("POST", "/contexts", {"model": model, "context": bad})
+    print(f"  server: {status} {err['error']['message']} (request {err['request_id']})")
 
     council.ok("DELETE", f"/specs/{spec_id}")
 

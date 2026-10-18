@@ -2,6 +2,7 @@
 
 mod decisions;
 mod generations;
+mod headers;
 mod models;
 mod pins;
 mod reads;
@@ -13,11 +14,12 @@ use gogi_proto::identity::{Capability, ModelLimits, ModelStatus, ServerIdentity}
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use crate::http::Response;
 use crate::{Suite, num};
 
 pub(crate) fn shell_tools() -> Value {
-    json!([{"type": "function", "function": {"name": "shell", "description": "Runs a shell command.",
-        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}}}}])
+    json!([{"name": "shell", "description": "Runs a shell command.",
+        "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}}}])
 }
 
 impl Suite {
@@ -53,13 +55,35 @@ impl Suite {
     /// a route that reads a context names the checked served model unless it names one.
     pub(crate) fn send(&mut self, what: &str, method: &str, path: &str, body: Option<Value>) -> Option<(u16, Value)> {
         let body = self.routed(method, path, body);
-        match self.http.call(method, path, body.as_ref()) {
-            Ok(r) => Some(r),
+        self.send_as_written(what, method, path, body.as_ref())
+    }
+
+    /// Sends a request with its body as written. A transport failure is recorded.
+    pub(crate) fn send_as_written(&mut self, what: &str, method: &str, path: &str, body: Option<&Value>) -> Option<(u16, Value)> {
+        match self.http.raw(method, path, body) {
+            Ok(r) => {
+                self.note(method, path, &r);
+                Some((r.status, r.json()))
+            }
             Err(e) => {
                 self.r.fail(what, e);
                 None
             }
         }
+    }
+
+    /// Records a response's `request-id`, and a fault when the header is missing or malformed or
+    /// an error body's `request_id` differs from it.
+    pub(crate) fn note(&mut self, method: &str, path: &str, r: &Response) {
+        let Some(id) = r.request_id.clone().filter(|i| gogi_proto::ids::is_request_id(i)) else {
+            self.request_id_faults.push(format!("{} {} returned {} with request-id {:?}", method, path, r.status, r.request_id));
+            return;
+        };
+        let v = r.json();
+        if r.status >= 400 && v.get("error").is_some() && v["request_id"] != json!(id) {
+            self.request_id_faults.push(format!("{} {} returned {} with request-id {} and an error body whose request_id is {}", method, path, r.status, id, v["request_id"]));
+        }
+        self.request_ids.push(id);
     }
 
     /// Sends a request that must return the status `want`. A different status is recorded as a failure.
@@ -131,7 +155,7 @@ impl Suite {
         }
         let calls: Vec<Value> = g["tool_calls"]
             .as_array()
-            .map(|a| a.iter().filter(|c| c["arguments"].is_object()).map(|c| json!({"id": c["id"], "name": c["name"], "arguments": c["arguments"]})).collect())
+            .map(|a| a.iter().filter(|c| c["input"].is_object()).map(|c| json!({"id": c["id"], "name": c["name"], "input": c["input"]})).collect())
             .unwrap_or_default();
         let mut out = Vec::new();
         if calls.is_empty() {
@@ -159,7 +183,7 @@ impl Suite {
         let Some(v) = self.expect("identity succeeds", "GET", "/council/v2/identity", None, 200) else { return false };
         let Some(id) = self.decode::<ServerIdentity>("identity has the contract's fields", &v) else { return false };
         let l = &id.limits;
-        self.r.check("identity server limits are positive", l.state_bytes > 0 && l.choice_options >= 2, l);
+        self.r.check("identity server limits are positive", l.case_bytes > 0 && l.choice_options >= 2, l);
         self.r.check("identity server limits name pin_bytes when the server has pins", l.pin_bytes.is_some() || !id.has(Capability::Pins), l);
         self.r.check("identity lists at least one served model", !id.models.is_empty(), &v["models"]);
         let mut names: Vec<&str> = id.models.iter().flat_map(|m| std::iter::once(m.model.as_str()).chain(m.aliases.iter().map(String::as_str))).collect();
@@ -181,7 +205,7 @@ impl Suite {
         let unknown = caps.iter().filter(|c| ***c == Capability::Unknown).count();
         self.r.ok_with("identity capabilities", format!("{} capabilities, {} unknown to gogi", caps.len(), unknown));
         let chosen = match want {
-            Some(name) => id.route(Some(name)).ok().filter(|m| m.status == ModelStatus::Ready),
+            Some(name) => id.route(name).ok().filter(|m| m.status == ModelStatus::Ready),
             None => id.models.iter().find(|m| m.status == ModelStatus::Ready),
         };
         let Some(m) = chosen.cloned() else {
@@ -199,7 +223,7 @@ impl Suite {
 
     pub(crate) fn validation(&mut self) {
         let user = json!({"role": "user", "content": "hi"});
-        let call = |id: &str| json!({"id": id, "name": "shell", "arguments": {}});
+        let call = |id: &str| json!({"id": id, "name": "shell", "input": {}});
         let asst = |id: &str| json!({"role": "assistant", "tool_calls": [call(id)]});
         let bad: Vec<(&str, Value)> = vec![
             ("a context with no messages", json!({"messages": []})),
@@ -210,8 +234,13 @@ impl Suite {
             ("a tool message after a user message", json!({"messages": [asst("a"), user.clone(), {"role": "tool", "tool_call_id": "a", "content": "r"}]})),
             ("tool_call_id on a user message", json!({"messages": [{"role": "user", "content": "x", "tool_call_id": "a"}]})),
             ("a call with an empty id", json!({"messages": [user.clone(), asst("")]})),
-            ("a call with no name", json!({"messages": [user.clone(), {"role": "assistant", "tool_calls": [{"id": "a", "name": "", "arguments": {}}]}]})),
-            ("a call whose arguments are not an object", json!({"messages": [user.clone(), {"role": "assistant", "tool_calls": [{"id": "a", "name": "shell", "arguments": "x"}]}]})),
+            ("a call with no name", json!({"messages": [user.clone(), {"role": "assistant", "tool_calls": [{"id": "a", "name": "", "input": {}}]}]})),
+            ("a call whose input is not an object", json!({"messages": [user.clone(), {"role": "assistant", "tool_calls": [{"id": "a", "name": "shell", "input": "x"}]}]})),
+            ("a call with arguments in place of input", json!({"messages": [user.clone(), {"role": "assistant", "tool_calls": [{"id": "a", "name": "shell", "arguments": {}}]}]})),
+            ("is_error on a user message", json!({"messages": [{"role": "user", "content": "x", "is_error": true}]})),
+            ("a tool in OpenAI's shape", json!({"tools": [{"type": "function", "function": {"name": "shell", "parameters": {}}}], "messages": [user.clone()]})),
+            ("a tool without input_schema", json!({"tools": [{"name": "shell"}], "messages": [user.clone()]})),
+            ("two tools with one name", json!({"tools": [shell_tools()[0].clone(), shell_tools()[0].clone()], "messages": [user.clone()]})),
             ("a queue that names no tool", json!({"queue": "nope", "tools": shell_tools(), "messages": [user.clone()]})),
             ("an unknown role", json!({"messages": [{"role": "wizard", "content": "x"}]})),
             ("an unknown member of a context", json!({"messages": [user.clone()], "system": "x"})),
@@ -223,6 +252,13 @@ impl Suite {
         }
         self.refused("a build refuses an unknown member of the body", "POST", "/council/v2/contexts", Some(json!({"context": {"messages": [user.clone()]}, "persist": true})), 400);
         self.refused("a build refuses a body that is not JSON", "POST", "/council/v2/contexts", Some(json!("x")), 400);
+        let mut failed = vec![user.clone(), asst("a"), json!({"role": "tool", "tool_call_id": "a", "content": format!("exit 1 {}", self.nonce), "is_error": true})];
+        if let Some(f) = self.build("a failed tool result builds", &self.ctx(failed.clone()), false) {
+            failed[2]["is_error"] = json!(false);
+            if let Some(ok) = self.build("the same tool result, not failed, builds", &self.ctx(failed), false) {
+                self.r.check("is_error is part of the context", f["head"] != ok["head"], (&f["head"], &ok["head"]));
+            }
+        }
         let later = self.ctx(vec![json!({"role": "system", "content": format!("s {}", self.nonce)}), user.clone(), json!({"role": "assistant", "content": "ok"}), json!({"role": "system", "content": "You replied without a tool call."})]);
         if let Some(b) = self.build("a system message may come after the first", &later, false) {
             self.r.check("a context that ends in a later system message has its head there", b["snapshots"].as_array().and_then(|s| s.last()).is_some_and(|s| s["message"] == 3), &b);
@@ -239,8 +275,10 @@ impl Suite {
         let ctx = self.ctx(msgs.clone());
         let Some(b) = self.build("build succeeds", &ctx, false) else { return };
         let Some(built) = self.decode::<ContextBuilt>("build response has the contract's fields", &b) else { return };
-        self.r.check("build: kept and fed make tokens", built.kept + built.fed == built.tokens && built.tokens > 0, &b);
-        self.r.check("build: the last snapshot is the head", b["snapshots"].as_array().and_then(|s| s.last()).is_some_and(|s| s["id"] == b["head"] && s["tokens"] == b["tokens"]), &b);
+        let u = built.usage;
+        self.r.check("build usage: kept and fed make prompt", u.check().is_ok() && u.prompt > 0, &b["usage"]);
+        self.r.check("build usage: a build writes nothing", u.completion == 0 && u.reasoning == 0, &b["usage"]);
+        self.r.check("build: the last snapshot is the head", b["snapshots"].as_array().and_then(|s| s.last()).is_some_and(|s| s["id"] == b["head"] && s["tokens"] == b["usage"]["prompt"]), &b);
         self.r.check("build: a marked user message has a snapshot", b["snapshots"].as_array().is_some_and(|s| s.iter().any(|x| x["message"] == 1)), &b);
         self.r.check("build: dry_run is false", b["dry_run"] == json!(false), &b);
         let ids: Vec<&Value> = b["snapshots"].as_array().map(|s| s.iter().map(|x| &x["id"]).collect()).unwrap_or_default();
@@ -251,10 +289,10 @@ impl Suite {
         self.r.check("build: snapshots run in order with distinct sizes", tokens == before && ids.len() == before.len(), &b["snapshots"]);
 
         if let Some(b2) = self.build("same context again succeeds", &ctx, false) {
-            self.r.check("same context again feeds nothing", num(&b2["fed"]) == 0 && b2["head"] == b["head"] && num(&b2["kept"]) == num(&b["tokens"]), &b2);
+            self.r.check("same context again feeds nothing", num(&b2["usage"]["fed"]) == 0 && b2["head"] == b["head"] && num(&b2["usage"]["kept"]) == num(&b["usage"]["prompt"]), &b2);
         }
         if let Some(d) = self.build("dry run succeeds", &ctx, true) {
-            self.r.check("a dry run of a built context feeds nothing", d["dry_run"] == json!(true) && num(&d["fed"]) == 0 && d["head"] == b["head"], &d);
+            self.r.check("a dry run of a built context feeds nothing", d["dry_run"] == json!(true) && num(&d["usage"]["fed"]) == 0 && d["head"] == b["head"], &d);
         }
 
         // A longer context starts from the snapshot held at the shorter context's boundary.
@@ -263,14 +301,14 @@ impl Suite {
         longer.push(json!({"role": "user", "content": "Go ahead.", "snap": true}));
         let lctx = self.ctx(longer);
         if let Some(l) = self.build("longer context succeeds", &lctx, false) {
-            self.r.check("a longer context starts from the held boundary", num(&l["kept"]) > 0 && num(&l["fed"]) < num(&l["tokens"]), &l);
+            self.r.check("a longer context starts from the held boundary", num(&l["usage"]["kept"]) > 0 && num(&l["usage"]["fed"]) < num(&l["usage"]["prompt"]), &l);
             self.r.check("a longer context keeps the shared boundary's id", l["snapshots"][0]["id"] == b["snapshots"][0]["id"], (&l["snapshots"], &b["snapshots"]));
         }
 
         // An edited earlier message shares only what precedes it.
         let edited = self.ctx(vec![msgs[0].clone(), json!({"role": "user", "content": "Only delete the build directory.", "snap": true})]);
         if let Some(e) = self.build("dry run of an edit succeeds", &edited, true) {
-            self.r.check("dry run of an edit reports a fresh build", e["dry_run"] == json!(true) && num(&e["fed"]) > 0 && e["snapshots"] == json!([]), &e);
+            self.r.check("dry run of an edit reports a fresh build", e["dry_run"] == json!(true) && num(&e["usage"]["fed"]) > 0 && e["snapshots"] == json!([]), &e);
         }
 
         // Thinking off is a different context.
@@ -300,13 +338,13 @@ impl Suite {
                 self.r.ok_with("a boundary the rendering drops gets no snapshot", "this template keeps earlier thinking, so there was no boundary to drop");
             }
             None => {
-                self.r.check("a boundary the rendering drops gets no snapshot and is not reused", b2["from"] != b1["head"] && num(&b2["kept"]) < num(&b1["tokens"]), &b2);
+                self.r.check("a boundary the rendering drops gets no snapshot and is not reused", b2["from"] != b1["head"] && num(&b2["usage"]["kept"]) < num(&b1["usage"]["prompt"]), &b2);
             }
         }
 
         // The end of a run of tool results is always a boundary.
         let mut agent = opening;
-        agent.push(json!({"role": "assistant", "reasoning": "I should list files.", "tool_calls": [{"id": "t0", "name": "shell", "arguments": {"command": "ls"}}], "snap": true}));
+        agent.push(json!({"role": "assistant", "reasoning": "I should list files.", "tool_calls": [{"id": "t0", "name": "shell", "input": {"command": "ls"}}], "snap": true}));
         agent.push(json!({"role": "tool", "tool_call_id": "t0", "content": "Cargo.toml\nsrc/\n", "snap": true}));
         let a1 = self.ctx(agent.clone());
         let Some(r1) = self.build("an agent turn builds", &a1, false) else { return };

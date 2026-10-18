@@ -3,6 +3,7 @@
 use std::io::Read;
 use std::time::Duration;
 
+use gogi_proto::ids::REQUEST_ID_HEADER;
 use serde_json::Value;
 
 pub struct Http {
@@ -13,6 +14,8 @@ pub struct Http {
 pub struct Response {
     pub status: u16,
     pub content_type: String,
+    /// The `request-id` header, when the response has one.
+    pub request_id: Option<String>,
     pub text: String,
 }
 
@@ -29,7 +32,15 @@ impl Http {
     }
 
     pub fn raw(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Response, String> {
-        let req = self.agent.request(method, &format!("{}{}", self.base, path));
+        self.raw_with(method, path, body, &[])
+    }
+
+    /// Sends a request with extra headers, such as `traceparent`.
+    pub fn raw_with(&self, method: &str, path: &str, body: Option<&Value>, headers: &[(&str, &str)]) -> Result<Response, String> {
+        let mut req = self.agent.request(method, &format!("{}{}", self.base, path));
+        for (k, v) in headers {
+            req = req.set(k, v);
+        }
         let sent = match body {
             Some(b) => req.set("Content-Type", "application/json").send_string(&b.to_string()),
             None => req.call(),
@@ -41,9 +52,10 @@ impl Http {
         };
         let status = resp.status();
         let content_type = resp.header("content-type").unwrap_or("").to_string();
+        let request_id = resp.header(REQUEST_ID_HEADER).map(String::from);
         let mut text = String::new();
         resp.into_reader().read_to_string(&mut text).map_err(|e| format!("{} {}: reading the response: {}", method, path, e))?;
-        Ok(Response { status, content_type, text })
+        Ok(Response { status, content_type, request_id, text })
     }
 
     pub fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value), String> {
@@ -51,8 +63,8 @@ impl Http {
     }
 }
 
-/// The events of a server-sent event stream: the `event:` name and the `data:` JSON.
-pub fn sse_events(text: &str) -> Vec<(String, Value)> {
+/// The events of a server-sent event stream: the `event:` name and the `data:` text.
+pub fn sse_events(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for block in text.split("\n\n") {
         let mut name = String::from("message");
@@ -65,7 +77,7 @@ pub fn sse_events(text: &str) -> Vec<(String, Value)> {
             }
         }
         if !data.is_empty() {
-            out.push((name, serde_json::from_str(&data).unwrap_or(Value::String(data))));
+            out.push((name, data));
         }
     }
     out
@@ -79,6 +91,6 @@ mod tests {
     fn events_carry_their_name_and_json() {
         let e = sse_events("event: token\ndata: {\"n\":1}\n\nevent: done\ndata: {\"content\":\"x\"}\n\n");
         assert_eq!(e.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["token", "done"]);
-        assert_eq!(e[0].1["n"], 1);
+        assert_eq!(e[0].1, "{\"n\":1}");
     }
 }

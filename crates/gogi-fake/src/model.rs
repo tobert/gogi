@@ -1,6 +1,6 @@
 //! The toy model and its chat template.
 //!
-//! Tokens are the 256 byte values plus 13 template markers (ids 256 and up). Text becomes
+//! Tokens are the 256 byte values plus 14 template markers (ids 256 and up). Text becomes
 //! its UTF-8 bytes, so content can never spell a marker: only a `reads` suffix, through
 //! [`tokenize_suffix`], turns marker text into marker ids.
 //!
@@ -10,14 +10,14 @@
 //! <bos> [<nothink>] [<tools> TOOLS_JSON <endtools>] MESSAGE*
 //! system     <sys> content <end>
 //! user       <user> content <end>
-//! assistant  <asst> [<think> reasoning <endthink>] content (<call> name(ARGS_JSON) <endcall>)* <end>
-//! tool       <tool> content <end>
+//! assistant  <asst> [<think> reasoning <endthink>] content (<call> name(INPUT_JSON) <endcall>)* <end>
+//! tool       <tool> [<error>] content <end>
 //! generation prompt: <asst> [<think>]
 //! ```
 //!
 //! `<nothink>` renders when the context sets `thinking: false`. With thinking on, every
 //! assistant message renders its `<think>` region, empty when it has no reasoning. A call's id
-//! is never rendered.
+//! is never rendered. `<error>` renders when a tool message has `is_error: true`.
 //!
 //! The thinking rule: an assistant message without tool calls loses its reasoning once a later
 //! user message follows. A message with tool calls keeps it. So a marked assistant message with
@@ -27,8 +27,8 @@
 //! the tokens, and the logits are a deterministic function of that hash. The same served model and
 //! prefix give the same bits; two seeds are two models.
 
+use gogi_proto::context::Tool;
 use gogi_proto::message::{Message, Role};
-use serde_json::Value;
 
 pub const BOS: u32 = 256;
 pub const SYS: u32 = 257;
@@ -43,9 +43,10 @@ pub const ENDCALL: u32 = 265;
 pub const TOOLS: u32 = 266;
 pub const ENDTOOLS: u32 = 267;
 pub const NOTHINK: u32 = 268;
-pub const VOCAB: usize = 269;
+pub const ERROR: u32 = 269;
+pub const VOCAB: usize = 270;
 
-pub const MARKERS: [(&str, u32); 13] = [
+pub const MARKERS: [(&str, u32); 14] = [
     ("<bos>", BOS),
     ("<sys>", SYS),
     ("<user>", USER),
@@ -59,6 +60,7 @@ pub const MARKERS: [(&str, u32); 13] = [
     ("<tools>", TOOLS),
     ("<endtools>", ENDTOOLS),
     ("<nothink>", NOTHINK),
+    ("<error>", ERROR),
 ];
 
 pub fn push_text(t: &mut Vec<u32>, s: &str) {
@@ -108,7 +110,7 @@ fn kept_reasoning(messages: &[Message], i: usize) -> bool {
 }
 
 /// The rendering of `messages`, with the generation prompt after it when asked.
-pub fn render_tokens(tools: &[Value], thinking: bool, messages: &[Message], generation_prompt: bool) -> Vec<u32> {
+pub fn render_tokens(tools: &[Tool], thinking: bool, messages: &[Message], generation_prompt: bool) -> Vec<u32> {
     let mut t = vec![BOS];
     if !thinking {
         t.push(NOTHINK);
@@ -131,6 +133,9 @@ pub fn render_tokens(tools: &[Value], thinking: bool, messages: &[Message], gene
             }
             Role::Tool => {
                 t.push(TOOL);
+                if m.is_error {
+                    t.push(ERROR);
+                }
                 push_text(&mut t, text);
             }
             Role::Assistant => {
@@ -145,7 +150,7 @@ pub fn render_tokens(tools: &[Value], thinking: bool, messages: &[Message], gene
                 push_text(&mut t, text);
                 for c in &m.tool_calls {
                     t.push(CALL);
-                    push_text(&mut t, &format!("{}({})", c.name, serde_json::to_string(&c.arguments).unwrap()));
+                    push_text(&mut t, &format!("{}({})", c.name, serde_json::to_string(&c.input).unwrap()));
                     t.push(ENDCALL);
                 }
             }
@@ -179,7 +184,7 @@ pub struct Rendering {
 
 /// Renders a context. A marked message is a boundary only when its own rendering is a prefix
 /// of the whole; the context's end is always one.
-pub fn render(tools: &[Value], thinking: bool, messages: &[Message], generation_prompt: bool) -> Rendering {
+pub fn render(tools: &[Tool], thinking: bool, messages: &[Message], generation_prompt: bool) -> Rendering {
     let whole = render_tokens(tools, thinking, messages, false);
     let mut cuts: Vec<Cut> = Vec::new();
     for (i, m) in messages.iter().enumerate() {
@@ -253,7 +258,7 @@ mod tests {
     use gogi_proto::message::ToolCall;
 
     fn calls(id: &str) -> Message {
-        Message { tool_calls: vec![ToolCall { id: id.into(), name: "sh".into(), arguments: Default::default() }], ..Message::assistant("") }
+        Message { tool_calls: vec![ToolCall { id: id.into(), name: "sh".into(), input: Default::default() }], ..Message::assistant("") }
     }
 
     fn with_reasoning(m: Message) -> Message {
@@ -286,6 +291,14 @@ mod tests {
         let after = render(&[], true, &m, false);
         assert_eq!(after.tokens[..before.end], before.tokens[..]);
         assert!(after.cuts.iter().any(|c| c.message == 1 && c.tokens == before.end));
+    }
+
+    #[test]
+    fn a_failed_tool_result_renders_its_error_marker() {
+        let ok = render_tokens(&[], true, &[calls("a"), Message::tool("a", "r")], false);
+        let failed = render_tokens(&[], true, &[calls("a"), Message::tool_error("a", "r")], false);
+        assert_eq!(failed.iter().filter(|x| **x == ERROR).count(), 1);
+        assert_eq!(ok.len() + 1, failed.len());
     }
 
     #[test]

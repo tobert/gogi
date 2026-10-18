@@ -18,11 +18,11 @@ impl Suite {
         let c2 = self.ctx(m2);
         let Some(b2) = self.build("build from a held snapshot for pins", &c2, false) else { return };
         let (first, head) = (b1["head"].as_str().unwrap_or("").to_string(), b2["head"].as_str().unwrap_or("").to_string());
-        self.r.check("the second build starts from the first's head", b2["from"] == b1["head"] || num(&b2["kept"]) >= num(&b1["tokens"]), &b2);
+        self.r.check("the second build starts from the first's head", b2["from"] == b1["head"] || num(&b2["usage"]["kept"]) >= num(&b1["usage"]["prompt"]), &b2);
 
         if let Some(s) = self.expect("snapshot info succeeds", "GET", &format!("/council/v2/snapshots/{}", head), None, 200) {
             if let Some(st) = self.decode::<SnapshotDetail>("snapshot info has the contract's fields", &s) {
-                self.r.check("snapshot info: tokens match the build", st.tokens as i64 == num(&b2["tokens"]) && st.pins.is_empty(), &s);
+                self.r.check("snapshot info: tokens match the build", st.tokens as i64 == num(&b2["usage"]["prompt"]) && st.pins.is_empty(), &s);
                 self.r.check("snapshot info names its served model", st.model == self.model_name(), (&st.model, self.model_name()));
             }
         }

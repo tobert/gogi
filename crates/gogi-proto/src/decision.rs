@@ -4,7 +4,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
-use crate::context::Context;
+use crate::context::{Context, Tool, Usage};
 use crate::error::Invalid;
 use crate::identity::Class;
 use crate::ids::{SnapshotId, SpecId};
@@ -61,36 +61,23 @@ pub struct Think {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DecisionRequest {
-    /// The served model: its `model` or an alias. May be absent only when the server serves one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    /// A string, object, or array.
-    pub state: Value,
+    /// The served model: its `model` or an alias.
+    pub model: String,
+    /// What the decision judges: a string, object, or array.
+    pub case: Value,
     /// A held spec's id. Text: an id the server does not hold is a `404`, not a decode error.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spec_id: Option<String>,
+    pub spec_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask: Option<Vec<QuestionId>>,
     /// Question id to the options to narrow it to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<Map<String, Value>>,
-    /// Inline questions, sent in place of `spec_id`; see `spec::parse_inline`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub questions: Option<Map<String, Value>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contexts: Vec<Context>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool: Option<Pool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trace: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub think: Option<Think>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,21 +88,13 @@ pub struct DecisionRequest {
 }
 
 impl DecisionRequest {
-    /// Checks the rules a client can check without the server: exactly one of `spec_id` and
-    /// `questions`; `ask` and `options` only with a spec; a string, object, or array `state`;
-    /// at most 8 valid contexts, all of them queue contexts or none of them; a
+    /// Checks the rules a client can check without the server: a string, object, or array
+    /// `case`; at most 8 valid contexts, all of them queue contexts or none of them; a
     /// positive `timeout_ms`; and pool `values` that go with `given` weights, one per read,
     /// finite, at least 0, summing above 0.
     pub fn validate(&self) -> Result<(), Invalid> {
-        match (&self.spec_id, &self.questions) {
-            (Some(_), Some(_)) | (None, None) => return Err(Invalid::new("exactly one of spec_id or questions")),
-            (None, Some(_)) if self.ask.is_some() || self.options.is_some() => {
-                return Err(Invalid::new("ask and options apply to a spec, not inline questions"));
-            }
-            _ => {}
-        }
-        if !matches!(self.state, Value::String(_) | Value::Object(_) | Value::Array(_)) {
-            return Err(Invalid::param("state", "state is a string, object, or array"));
+        if !matches!(self.case, Value::String(_) | Value::Object(_) | Value::Array(_)) {
+            return Err(Invalid::param("case", "case is a string, object, or array"));
         }
         if self.timeout_ms == Some(0) {
             return Err(Invalid::param("timeout_ms", "timeout_ms is at least 1"));
@@ -164,13 +143,18 @@ pub fn queue_call(c: &Context) -> Option<&crate::message::ToolCall> {
     last.tool_calls.last().filter(|t| &t.name == q)
 }
 
+/// The queue tool of a context, when `queue` names one.
+pub fn queue_tool(c: &Context) -> Option<&Tool> {
+    c.tool(c.queue.as_deref()?)
+}
+
 /// Checks that the queue tool declares, for each asked question, an `answers` property whose
 /// `enum` is the letters `A`, `B`, ... of its options in order. `asked` is each question's id
 /// and option count.
 pub fn check_queue_schema(c: &Context, asked: &[(&str, usize)]) -> Result<(), Invalid> {
     let q = c.queue.as_deref().ok_or_else(|| Invalid::param("queue", "the context has no queue"))?;
-    let tool = c.tools.iter().find(|t| t["function"]["name"] == Value::String(q.into())).ok_or_else(|| Invalid::param("queue", "the queue tool is gone"))?;
-    let props = &tool["function"]["parameters"]["properties"]["answers"]["properties"];
+    let tool = c.tool(q).ok_or_else(|| Invalid::param("queue", "the queue tool is gone"))?;
+    let props = &tool.input_schema.get("properties").unwrap_or(&Value::Null)["answers"]["properties"];
     for (id, n) in asked {
         let want: Vec<Value> = (0..*n).map(|j| Value::String(((b'A' + j as u8) as char).to_string())).collect();
         if props[*id]["enum"] != Value::Array(want.clone()) {
@@ -346,16 +330,6 @@ pub struct PoolEcho {
     pub normalized: IndexMap<QuestionId, Vec<f64>>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Usage {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fed_tokens: Option<u64>,
-}
-
 /// The identity fields a decision's numbers depend on, so a client fits its thresholds per
 /// identity.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -379,8 +353,9 @@ pub struct DecisionResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signals: Option<Signals>,
     pub identity: DecisionIdentity,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<Usage>,
+    /// Summed over the reads: `prompt` is every token a read was conditioned on, and
+    /// `completion` the `text` answers and thoughts the model wrote.
+    pub usage: Usage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_ms: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -402,10 +377,10 @@ mod tests {
     }
 
     fn queue_context() -> Context {
-        let call = ToolCall { id: "c".into(), name: "next".into(), arguments: Default::default() };
+        let call = ToolCall { id: "c".into(), name: "next".into(), input: Default::default() };
         Context {
-            tools: vec![json!({"type": "function", "function": {"name": "next", "parameters": {"type": "object", "properties": {"answers": {"type": "object", "properties": {
-                "verdict": {"type": "string", "enum": ["A", "B"]}}}}}}})],
+            tools: vec![Tool::new("next", json!({"type": "object", "properties": {"answers": {"type": "object", "properties": {
+                "verdict": {"type": "string", "enum": ["A", "B"]}}}}}))],
             queue: Some("next".into()),
             messages: vec![Message::user("u"), Message { tool_calls: vec![call], ..Message::assistant("") }],
             ..Default::default()
@@ -413,7 +388,7 @@ mod tests {
     }
 
     fn req() -> DecisionRequest {
-        DecisionRequest { state: json!("git push"), spec_id: Some(spec_id()), contexts: vec![chat()], ..Default::default() }
+        DecisionRequest { model: "m".into(), case: json!("git push"), spec_id: spec_id(), contexts: vec![chat()], ..Default::default() }
     }
 
     fn param(r: DecisionRequest) -> String {
@@ -425,10 +400,7 @@ mod tests {
     fn a_plain_request_is_valid_and_each_rule_refuses() {
         req().validate().unwrap();
         DecisionRequest { contexts: vec![], ..req() }.validate().unwrap();
-        assert_eq!(param(DecisionRequest { spec_id: None, ..req() }), "exactly one of spec_id or questions");
-        assert_eq!(param(DecisionRequest { questions: Some(Map::new()), ..req() }), "exactly one of spec_id or questions");
-        assert_eq!(param(DecisionRequest { spec_id: None, questions: Some(Map::new()), ask: Some(vec![]), ..req() }), "ask and options apply to a spec, not inline questions");
-        assert_eq!(param(DecisionRequest { state: json!(3), ..req() }), "state");
+        assert_eq!(param(DecisionRequest { case: json!(3), ..req() }), "case");
         assert_eq!(param(DecisionRequest { timeout_ms: Some(0), ..req() }), "timeout_ms");
         assert_eq!(param(DecisionRequest { contexts: vec![chat(); 9], ..req() }), "contexts");
         assert_eq!(param(DecisionRequest { contexts: vec![Context::default()], ..req() }), "contexts");
@@ -461,14 +433,20 @@ mod tests {
 
     #[test]
     fn a_request_decodes_strictly_and_names_reads_by_index() {
-        let v = json!({"spec_id": spec_id(), "state": {"b": 1, "a": 2}, "contexts": [{"messages": [{"role": "user", "content": "u"}]}], "think": {"tokens": 0}});
+        let v = json!({"model": "m", "case": {"b": 1, "a": 2}, "spec_id": spec_id(), "contexts": [{"messages": [{"role": "user", "content": "u"}]}], "think": {"tokens": 0}});
         let r: DecisionRequest = serde_json::from_value(v.clone()).unwrap();
         assert_eq!(serde_json::to_value(&r).unwrap(), v);
-        assert_eq!(serde_json::to_string(&r.state).unwrap(), r#"{"b":1,"a":2}"#);
+        assert_eq!(serde_json::to_string(&r.case).unwrap(), r#"{"b":1,"a":2}"#);
         assert_eq!(r.expect().contexts, ["0"]);
-        let v1 = json!({"spec_id": spec_id(), "state": "s", "contexts": [{"id": "old-style"}]});
+        let v1 = json!({"model": "m", "spec_id": spec_id(), "case": "s", "contexts": [{"id": "old-style"}]});
         assert!(serde_json::from_value::<DecisionRequest>(v1).is_err(), "a v1 context reference is not a v2 context");
-        assert!(serde_json::from_value::<DecisionRequest>(json!({"spec_id": spec_id(), "state": "s", "contxts": []})).is_err());
+        assert!(serde_json::from_value::<DecisionRequest>(json!({"model": "m", "spec_id": spec_id(), "case": "s", "contxts": []})).is_err());
+        for gone in [json!({"state": "s"}), json!({"case": "s", "questions": {}}), json!({"case": "s", "provider": {}}), json!({"case": "s", "session_id": "x"})] {
+            let mut v = json!({"model": "m", "spec_id": spec_id()});
+            v.as_object_mut().unwrap().extend(gone.as_object().unwrap().clone());
+            assert!(serde_json::from_value::<DecisionRequest>(v.clone()).is_err(), "{v}");
+        }
+        assert!(serde_json::from_value::<DecisionRequest>(json!({"spec_id": spec_id(), "case": "s"})).is_err(), "a decision names its model");
     }
 
     #[test]

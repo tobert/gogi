@@ -39,9 +39,9 @@ impl Suite {
     }
 }
 
-/// A reply's tool calls as name and arguments.
+/// A reply's tool calls as name and input.
 fn calls(v: &Value) -> Vec<(Value, Value)> {
-    v.as_array().map(|a| a.iter().map(|c| (c["name"].clone(), c["arguments"].clone())).collect()).unwrap_or_default()
+    v.as_array().map(|a| a.iter().map(|c| (c["name"].clone(), c["input"].clone())).collect()).unwrap_or_default()
 }
 
 /// Probabilities in [0, 1] that sum to 1, and a mass at most 0.

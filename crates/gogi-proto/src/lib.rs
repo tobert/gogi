@@ -24,7 +24,7 @@ pub mod reads;
 pub mod spec;
 
 pub use canon::{canonical_json, sha256_hex, spec_id_of};
-pub use context::{Context, ContextBuild, ContextBuilt, SnapshotInfo, Tier};
+pub use context::{Context, ContextBuild, ContextBuilt, SnapshotInfo, Tier, Tool, Usage};
 pub use error::{ErrorBody, ErrorDetail, ErrorType, Invalid};
 pub use ids::{SnapshotId, SpecId};
 pub use message::{Message, Role, ToolCall};

@@ -8,7 +8,7 @@
    "id": "0199b3c4-6c1e-7a2b-9f00-3e5d1c2a7b12"
   }
  ],
- "state": "git push origin main",
+ "case": "git push origin main",
  "pool": {
   "method": "loglinear",
   "weights": "mass"

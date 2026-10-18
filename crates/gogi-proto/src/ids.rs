@@ -1,4 +1,5 @@
-//! Snapshot ids, `<scheme>:<hex>`, and spec ids, `sha256:` and 64 lowercase hex digits.
+//! Snapshot ids, `<scheme>:<hex>`, spec ids, `sha256:` and 64 lowercase hex digits, and the
+//! headers that name a request.
 
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +15,18 @@ fn is_snapshot_id(s: &str) -> bool {
             && (32..=128).contains(&hex.len())
             && is_lower_hex(hex)
     })
+}
+
+/// The response header that carries the id a server gives each request.
+pub const REQUEST_ID_HEADER: &str = "request-id";
+
+/// The W3C Trace Context request header a client sends to join the server's spans to its trace.
+/// It travels only as a header, never in a body.
+pub const TRACEPARENT_HEADER: &str = "traceparent";
+
+/// A request id: printable ASCII without spaces, 1 to 128 bytes. A client treats it as opaque.
+pub fn is_request_id(s: &str) -> bool {
+    (1..=128).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_graphic())
 }
 
 fn is_spec_id(s: &str) -> bool {

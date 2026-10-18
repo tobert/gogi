@@ -7,13 +7,7 @@ impl Suite {
     /// Sends a request as written, without the checked served model added. A transport failure is
     /// recorded.
     fn bare(&mut self, what: &str, path: &str, body: Value) -> Option<(u16, Value)> {
-        match self.http.call("POST", path, Some(&body)) {
-            Ok(r) => Some(r),
-            Err(e) => {
-                self.r.fail(what, e);
-                None
-            }
-        }
+        self.send_as_written(what, "POST", path, Some(&body))
     }
 
     /// A request names its served model, and the server routes it there or refuses it.
@@ -24,11 +18,17 @@ impl Suite {
         let Some(b) = self.expect("a build naming the served model succeeds", "POST", "/council/v2/contexts", Some(named(&me.model)), 200) else { return };
         self.r.check("a build names its served model", b["model"] == json!(me.model), &b["model"]);
 
-        if let Some((status, v)) = self.bare("a build without model", "/council/v2/contexts", json!({"context": ctx})) {
-            if id.models.len() == 1 {
-                self.r.check("with one served model, a build may leave out model", status == 200 && v["model"] == json!(me.model) && v["head"] == b["head"], (status, &v));
-            } else {
-                self.r.check("with more than one served model, a build without model is a 400 naming model", status == 400 && v["error"]["param"] == "model", (status, &v));
+        // A request without model is refused, however many models the server serves.
+        let unnamed: [(&str, &str, Value); 4] = [
+            ("a build", "/council/v2/contexts", json!({"context": ctx})),
+            ("a decision", "/council/v2/decisions", json!({"spec_id": format!("sha256:{}", "0".repeat(64)), "case": "x", "contexts": [ctx]})),
+            ("a raw read", "/council/v2/reads", json!({"contexts": [ctx], "suffixes": ["x"], "letters": ["A", "B"]})),
+            ("a generation", "/council/v2/generations", json!({"context": ctx, "max_tokens": 8})),
+        ];
+        for (what, path, body) in unnamed {
+            if let Some((status, v)) = self.bare(&format!("{} without model", what), path, body) {
+                let named = v["error"]["param"] == "model" || v["error"]["message"].as_str().is_some_and(|m| m.contains("model"));
+                self.r.check(&format!("{} without model is a 400 naming model", what), status == 400 && named, (status, &v));
             }
         }
         let unknown = format!("gogi-conformance-no-such-model-{}", self.nonce);
@@ -101,7 +101,7 @@ impl Suite {
             b
         };
         if let Some(b) = self.expect("an interactive build with a priority succeeds", "POST", "/council/v2/contexts", Some(build(json!({"class": "interactive", "priority": 7}))), 200) {
-            self.r.check("class and priority do not change a build", b["fed"] == 0, &b);
+            self.r.check("class and priority do not change a build", b["usage"]["fed"] == 0, &b);
         }
         self.refused("a class the contract does not name is refused", "POST", "/council/v2/contexts", Some(build(json!({"class": "filler"}))), 400);
         self.refused("a priority outside 32 bits is refused", "POST", "/council/v2/contexts", Some(build(json!({"priority": 1u64 << 31}))), 400);

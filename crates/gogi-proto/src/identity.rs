@@ -9,10 +9,7 @@ use crate::error::Invalid;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
-    Park,
-    Warm,
     DryRun,
-    Persist,
     Describe,
     LeaveOneOut,
     /// `POST /council/v2/reads`.
@@ -27,7 +24,8 @@ pub enum Capability {
     Tiers,
     /// Generations accept `decisions` that ride with them.
     Ride,
-    /// Requests are scheduled by `class` and `priority`.
+    /// Requests are scheduled by `class` and `priority`. Every client is trusted with
+    /// `priority`.
     Classes,
     #[serde(other)]
     Unknown,
@@ -70,7 +68,8 @@ pub struct ModelLimits {
 /// The server's own limits, which every served model shares.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerLimits {
-    pub state_bytes: u64,
+    /// The longest case, in bytes.
+    pub case_bytes: u64,
     pub choice_options: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub questions_per_spec: Option<u64>,
@@ -132,20 +131,13 @@ impl ServerIdentity {
         self.capabilities.contains(&c)
     }
 
-    /// The served model a request's `model` names. `None` names the only served model, and is a
-    /// `400` when the server serves more than one. The caller checks the model's status.
-    pub fn route(&self, model: Option<&str>) -> Result<&ServedModel, Invalid> {
-        match model {
-            Some(name) => self
-                .models
-                .iter()
-                .find(|m| m.is_named(name))
-                .ok_or_else(|| Invalid::param("model", format!("model {} is not served here; identity lists the served models", name))),
-            None => match self.models.as_slice() {
-                [only] => Ok(only),
-                all => Err(Invalid::param("model", format!("model is required: this server serves {} models", all.len()))),
-            },
-        }
+    /// The served model a request's `model` names, by its `model` or an alias. The caller checks
+    /// the model's status.
+    pub fn route(&self, model: &str) -> Result<&ServedModel, Invalid> {
+        self.models
+            .iter()
+            .find(|m| m.is_named(model))
+            .ok_or_else(|| Invalid::param("model", format!("model {} is not served here; identity lists the served models", model)))
     }
 }
 
@@ -156,8 +148,9 @@ mod tests {
     /// mkviolet's identity before it served more than one model, in the old shape.
     const MKVIOLET_ONE_MODEL: &str = r#"{"model":"google/gemma-4-26B-A4B-it","aliases":[],"weight_hash":"0x1EBEA246FC63EB7F","tokenizer_hash":"sha256:4d777ef5bdc1aa36","engine":"mkviolet:a93ed27853c9835c+numbers:15c10b5ac08a8126","device":"2x Intel(R) Arc(TM) Pro B70 Graphics","template":"mkv-letters-1:a57f304ef64f619e+gemma4-chat:ae53464bf3be2580","limits":{"context_tokens":65535,"state_bytes":65536,"contexts_per_decision":8,"questions_per_spec":16,"choice_options":26,"default_timeout_ms":30000,"pin_bytes":17179869184,"snapshot_bytes":450560,"decision_context_tokens":3072},"capabilities":["reads","generate","pins","dry_run","leave_one_out"],"extensions":["/mk/v1"]}"#;
 
-    /// The same identity with its fields moved to where they belong now.
-    const MKVIOLET: &str = r#"{"models":[{"model":"google/gemma-4-26B-A4B-it","aliases":[],"status":"ready","weight_hash":"0x1EBEA246FC63EB7F","tokenizer_hash":"sha256:4d777ef5bdc1aa36","template":"mkv-letters-1:a57f304ef64f619e+gemma4-chat:ae53464bf3be2580","engine":"mkviolet:a93ed27853c9835c+numbers:15c10b5ac08a8126","device":"2x Intel(R) Arc(TM) Pro B70 Graphics","limits":{"context_tokens":65535,"decision_context_tokens":3072,"snapshot_bytes":450560,"contexts_per_decision":8,"default_timeout_ms":30000},"capabilities":["reads","generate","dry_run","leave_one_out"]}],"limits":{"state_bytes":65536,"choice_options":26,"questions_per_spec":16,"pin_bytes":17179869184},"capabilities":["pins"],"extensions":["/mk/v1"]}"#;
+    /// The same identity with its fields moved to where they belong now, and `case_bytes` for
+    /// `state_bytes`.
+    const MKVIOLET: &str = r#"{"models":[{"model":"google/gemma-4-26B-A4B-it","aliases":[],"status":"ready","weight_hash":"0x1EBEA246FC63EB7F","tokenizer_hash":"sha256:4d777ef5bdc1aa36","template":"mkv-letters-1:a57f304ef64f619e+gemma4-chat:ae53464bf3be2580","engine":"mkviolet:a93ed27853c9835c+numbers:15c10b5ac08a8126","device":"2x Intel(R) Arc(TM) Pro B70 Graphics","limits":{"context_tokens":65535,"decision_context_tokens":3072,"snapshot_bytes":450560,"contexts_per_decision":8,"default_timeout_ms":30000},"capabilities":["reads","generate","dry_run","leave_one_out"]}],"limits":{"case_bytes":65536,"choice_options":26,"questions_per_spec":16,"pin_bytes":17179869184},"capabilities":["pins"],"extensions":["/mk/v1"]}"#;
 
     fn two_models() -> ServerIdentity {
         let mut id: ServerIdentity = serde_json::from_str(MKVIOLET).unwrap();
@@ -185,16 +178,14 @@ mod tests {
     }
 
     #[test]
-    fn a_request_routes_by_name_or_alias_and_needs_a_name_when_there_are_two() {
-        let one: ServerIdentity = serde_json::from_str(MKVIOLET).unwrap();
-        assert_eq!(one.route(None).unwrap().model, "google/gemma-4-26B-A4B-it");
+    fn a_request_routes_by_name_or_alias() {
         let two = two_models();
-        assert_eq!(two.route(Some("mutant")).unwrap().model, "qwen-3.8-mutant-636");
-        assert_eq!(two.route(Some("qwen-3.8-mutant-636")).unwrap().status, ModelStatus::Unloaded);
-        for bad in [None, Some("gpt-2")] {
+        assert_eq!(two.route("google/gemma-4-26B-A4B-it").unwrap().model, "google/gemma-4-26B-A4B-it");
+        assert_eq!(two.route("mutant").unwrap().model, "qwen-3.8-mutant-636");
+        assert_eq!(two.route("qwen-3.8-mutant-636").unwrap().status, ModelStatus::Unloaded);
+        for bad in ["gpt-2", ""] {
             assert_eq!(two.route(bad).unwrap_err().param.as_deref(), Some("model"), "{bad:?}");
         }
-        assert_eq!(two.route(None).unwrap_err().message, "model is required: this server serves 2 models");
     }
 
     #[test]

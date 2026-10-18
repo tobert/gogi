@@ -36,6 +36,21 @@ def test_context_rules():
         gogi.check_context({**ok, "queue": "nope"})
 
 
+def test_tools_calls_and_results_take_the_anthropic_shape():
+    tool = {"name": "shell", "description": "Runs a command.", "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}}}
+    call = {"role": "assistant", "tool_calls": [{"id": "c0", "name": "shell", "input": {"command": "ls"}}]}
+    failed = {"role": "tool", "tool_call_id": "c0", "content": "exit 1", "is_error": True}
+    gogi.check_context({"tools": [tool], "messages": [{"role": "user", "content": "u"}, call, failed]})
+    with pytest.raises(ValueError):
+        gogi.check_context({"tools": [{"type": "function", "function": {"name": "shell", "parameters": {}}}], "messages": [{"role": "user", "content": "u"}]})
+    with pytest.raises(ValueError):
+        gogi.validate_messages([], [{"role": "assistant", "tool_calls": [{"id": "c0", "name": "shell", "arguments": {}}]}])
+    with pytest.raises(ValueError, match="only a tool message carries is_error"):
+        gogi.validate_messages([], [{"role": "user", "content": "u", "is_error": True}])
+    with pytest.raises(ValueError, match="no other tool has"):
+        gogi.check_context({"tools": [tool, tool], "messages": [{"role": "user", "content": "u"}]})
+
+
 def test_parse_spec_id_refuses_text_without_describe():
     spec = json.loads((FIXTURES / "spec.json").read_text())
     with pytest.raises(ValueError, match="describe capability"):
@@ -72,8 +87,14 @@ def test_verify_decision_accepts_the_fixture_and_names_a_changed_number():
     ids = [r["context"] for r in resp["reads"]]
     renamed = json.loads(json.dumps(resp).replace(ids[0], "0").replace(ids[1], "1"))
     ctx = {"messages": [{"role": "user", "content": "u"}]}
-    req = {"spec_id": "sha256:" + "a" * 64, "state": "git push origin main", "contexts": [ctx, ctx], "pool": {"method": "loglinear", "weights": "mass"}}
+    req = {"model": "m", "spec_id": "sha256:" + "a" * 64, "case": "git push origin main", "contexts": [ctx, ctx], "pool": {"method": "loglinear", "weights": "mass"}}
     gogi.verify_decision(req, renamed)
+    with pytest.raises(ValueError, match="state"):
+        gogi.verify_decision({**{k: v for k, v in req.items() if k != "case"}, "state": "git push origin main"}, renamed)
+    bad_usage = json.loads(json.dumps(renamed))
+    bad_usage["usage"]["fed"] += 1
+    with pytest.raises(ValueError, match=r"usage\.prompt"):
+        gogi.verify_decision(req, bad_usage)
     renamed["answers"]["verdict"]["probabilities"]["ask"] += 1e-6
     with pytest.raises(ValueError, match=r"answers\.verdict\.probabilities\.ask"):
         gogi.verify_decision(req, renamed)
@@ -84,14 +105,20 @@ GATE = {"name": "gate", "instructions": "Judge the statement.", "input_label": "
                        "criteria": [{"option": "allow", "means": "routine"}, {"option": "ask", "means": "risky"}]}]}
 
 
-def _call(url, method, path, body=None):
+def _call_with_id(url, method, path, body=None):
+    """The status, the response, and the ``request-id`` header."""
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(url + path, data=data, method=method, headers={"content-type": "application/json"})
     try:
         with urllib.request.urlopen(req) as r:
-            return r.status, json.loads(r.read() or b"null")
+            return r.status, json.loads(r.read() or b"null"), r.headers.get("request-id")
     except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read() or b"null")
+        return e.code, json.loads(e.read() or b"null"), e.headers.get("request-id")
+
+
+def _call(url, method, path, body=None):
+    status, body, _ = _call_with_id(url, method, path, body)
+    return status, body
 
 
 def test_the_fake_serves_and_its_spec_ids_match_ours():
@@ -108,7 +135,7 @@ def test_the_fake_keeps_specs_and_pins_across_a_restart_and_expires_pins(tmp_pat
     ctx = {"messages": [{"role": "user", "content": "u", "snap": True}]}
     with gogi.FakeServer(state_dir=tmp_path) as fake:
         _, held = _call(fake.url, "POST", "/council/v2/specs", GATE)
-        _, built = _call(fake.url, "POST", "/council/v2/contexts", {"context": ctx})
+        _, built = _call(fake.url, "POST", "/council/v2/contexts", {"model": "toy", "context": ctx})
         status, _ = _call(fake.url, "PUT", "/council/v2/pins/t", {"snapshots": [built["head"]], "ttl_s": 60})
         assert status == 200
         fake.restart()
@@ -125,12 +152,25 @@ def _read(url, model):
     return _call(url, "POST", "/council/v2/reads", {"model": model, "contexts": [CTX], "suffixes": ["x"], "letters": ["A", "B"]})
 
 
-def test_the_default_fake_serves_one_model_that_a_request_may_leave_out():
+def test_the_default_fake_serves_one_model_that_a_request_still_names():
     with gogi.FakeServer() as fake:
         _, ident = _call(fake.url, "GET", "/council/v2/identity")
         assert [(m["model"], m["aliases"], m["status"]) for m in ident["models"]] == [("gogi-toy-1", ["toy"], "ready")]
-        status, built = _call(fake.url, "POST", "/council/v2/contexts", {"context": CTX})
+        status, built = _call(fake.url, "POST", "/council/v2/contexts", {"model": "toy", "context": CTX})
         assert status == 200 and built["model"] == "gogi-toy-1"
+        u = built["usage"]
+        assert u["kept"] + u["fed"] == u["prompt"] and (u["completion"], u["reasoning"]) == (0, 0)
+        status, e = _call(fake.url, "POST", "/council/v2/contexts", {"context": CTX})
+        assert (status, e["error"]["param"]) == (400, "model")
+
+
+def test_each_response_has_a_request_id_and_an_error_body_repeats_it():
+    with gogi.FakeServer() as fake:
+        a = _call_with_id(fake.url, "GET", "/council/v2/identity")[2]
+        b = _call_with_id(fake.url, "GET", "/council/v2/identity")[2]
+        assert a and b and a != b
+        status, e, rid = _call_with_id(fake.url, "POST", "/council/v2/contexts", {"context": CTX})
+        assert status == 400 and rid and e["request_id"] == rid
 
 
 def test_served_models_route_by_name_or_alias_and_refuse_when_not_ready():
@@ -154,7 +194,7 @@ def test_served_models_route_by_name_or_alias_and_refuse_when_not_ready():
         assert _read(fake.url, "night")[0] == 503
         fake.set_status("night", "ready")
         status, again = _call(fake.url, "POST", "/council/v2/contexts", {"model": "night", "context": CTX})
-        assert status == 200 and again["fed"] == 0, "a snapshot outlives a status change"
+        assert status == 200 and again["usage"]["fed"] == 0, "a snapshot outlives a status change"
         fake.restart()
         assert _read(fake.url, "night")[0] == 503, "a restart returns a model to its configured status"
 
@@ -176,12 +216,12 @@ def test_the_fake_reports_and_keeps_the_limits_it_is_given():
         _, ident = _call(fake.url, "GET", "/council/v2/identity")
         limits = ident["models"][0]["limits"]
         assert (limits["context_tokens"], limits["decision_context_tokens"], ident["limits"]["pin_bytes"]) == (512, 256, 4096)
-        status, e = _call(fake.url, "POST", "/council/v2/contexts", {"context": {"messages": [{"role": "user", "content": "x" * 600}]}})
+        status, e = _call(fake.url, "POST", "/council/v2/contexts", {"model": "toy", "context": {"messages": [{"role": "user", "content": "x" * 600}]}})
         assert (status, e["error"]["type"]) == (413, "context_full")
-        heads = [_call(fake.url, "POST", "/council/v2/contexts", {"context": {"messages": [{"role": "user", "content": f"u{i}"}]}})[1]["head"] for i in range(3)]
+        heads = [_call(fake.url, "POST", "/council/v2/contexts", {"model": "toy", "context": {"messages": [{"role": "user", "content": f"u{i}"}]}})[1]["head"] for i in range(3)]
         assert _call(fake.url, "GET", "/council/v2/snapshots/" + heads[0])[0] == 404, "past max_snapshots the oldest is evicted"
         assert _call(fake.url, "GET", "/council/v2/snapshots/" + heads[2])[0] == 200
         big = {"messages": [{"role": "user", "content": "y" * 200}]}
-        _, b = _call(fake.url, "POST", "/council/v2/contexts", {"context": big})
+        _, b = _call(fake.url, "POST", "/council/v2/contexts", {"model": "toy", "context": big})
         status, e = _call(fake.url, "PUT", "/council/v2/pins/t", {"snapshots": [b["head"]], "ttl_s": 60})
         assert (status, e["error"]["param"]) == (413, "pin_bytes")

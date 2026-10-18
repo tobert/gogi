@@ -1,4 +1,4 @@
-use gogi_proto::generation::GenerationDone;
+use gogi_proto::generation::{Finish, GenerationDone, Phase, StreamEvent};
 use serde_json::{Value, json};
 
 use crate::http::sse_events;
@@ -16,9 +16,10 @@ impl Suite {
         let Some(g) = self.generate("generation succeeds", &ctx, 300) else { return };
         let Some(done) = self.decode::<GenerationDone>("generation response has the contract's fields", &g) else { return };
         let u = done.usage;
-        self.r.check("generation: kept and fed make prompt", u.kept + u.fed == u.prompt && u.prompt > 0, &g["usage"]);
-        self.r.check("generation: completion is at most max_tokens, and equals it when finish is length", u.completion <= 300 && (g["finish"] != json!("length") || u.completion == 300), &g);
-        self.r.check("generation reuses the build", u.kept >= num(&b["tokens"]) as u64, (&g["usage"], &b["tokens"]));
+        self.r.check("generation usage: kept and fed make prompt, and reasoning is part of completion", u.check().is_ok() && u.prompt > 0, &g["usage"]);
+        self.check_finish("generation", &done, 300);
+        self.r.check("generation reuses the build", u.kept >= num(&b["usage"]["prompt"]) as u64, (&g["usage"], &b["usage"]));
+        self.r.check("generation reports the seed it sampled with", done.seed.is_some(), &g["seed"]);
         let parts: Vec<&Value> = [&g["stats"]["reasoning"], &g["stats"]["content"]].into_iter().chain(g["tool_calls"].as_array().into_iter().flatten().map(|c| &c["stats"])).collect();
         if g.get("stats").is_some() {
             self.r.check("reply stats are well formed where reported", parts.iter().all(|p| well_formed_stats(p)), &parts);
@@ -40,7 +41,7 @@ impl Suite {
             with_reply.push(cont[0].clone());
             let rctx = self.ctx(with_reply);
             if let Some(r) = self.build("the reply appended to its context builds", &rctx, false) {
-                self.r.check("the head is the snapshot after the reply as it renders", r["head"] == g["head"] && num(&r["fed"]) == 0, (&r, &g["head"]));
+                self.r.check("the head is the snapshot after the reply as it renders", r["head"] == g["head"] && num(&r["usage"]["fed"]) == 0, (&r, &g["head"]));
             }
         }
 
@@ -89,17 +90,41 @@ impl Suite {
         match self.http.raw("POST", "/council/v2/generations", Some(&body)) {
             Err(e) => self.r.fail("stream succeeds", e),
             Ok(response) => {
+                self.note("POST", "/council/v2/generations", &response);
                 self.r.check("stream returns an event stream", response.status == 200 && response.content_type.starts_with("text/event-stream"), (response.status, &response.content_type));
-                let events = sse_events(&response.text);
-                let last = events.last();
-                let tokens = events.iter().filter(|(n, _)| n == "token").count();
-                self.r.check("stream ends with done after only token events", last.is_some_and(|(n, _)| n == "done") && events.iter().all(|(n, _)| n == "token" || n == "done"), events.iter().map(|(n, _)| n.as_str()).take(5).collect::<Vec<_>>());
-                self.r.check("stream sends a token event for each token", tokens as u64 >= u.completion.min(1), (tokens, u.completion));
-                if let Some((_, d)) = last {
-                    if self.decode::<GenerationDone>("stream done has the contract's fields", d).is_some() {
-                        self.r.check("the stream's done event equals the response without stream", ["content", "reasoning"].iter().all(|k| d[*k] == g[*k]) && without_stats(&d["tool_calls"]) == without_stats(&g["tool_calls"]), (d, &g));
-                        self.r.check("stream stats match the call without stream within 1e-4", stats_close(d, &g, 1e-4), (&d["stats"], &g["stats"]));
+                let raw = sse_events(&response.text);
+                let mut events = Vec::new();
+                let (mut unknown, mut faults) = (Vec::new(), Vec::new());
+                for (name, data) in &raw {
+                    match StreamEvent::parse(name, data) {
+                        Ok(Some(e)) => events.push(e),
+                        Ok(None) => unknown.push(name.clone()),
+                        Err(e) => faults.push(e),
                     }
+                }
+                self.r.check("stream events decode as the contract's events", faults.is_empty(), &faults);
+                self.r.ok_with("stream events a client ignores", format!("{} events with names the contract does not define {:?}", unknown.len(), unknown.iter().take(3).collect::<Vec<_>>()));
+                let ends = events.iter().filter(|e| matches!(e, StreamEvent::Done(_) | StreamEvent::Error(_))).count();
+                let last_ends = matches!(events.last(), Some(StreamEvent::Done(_) | StreamEvent::Error(_)));
+                self.r.check("stream ends with exactly one done or error, and nothing after it", ends == 1 && last_ends && raw.last().is_some_and(|(n, _)| n == "done" || n == "error"), raw.iter().map(|(n, _)| n.as_str()).rev().take(5).collect::<Vec<_>>());
+                let tokens: Vec<_> = events.iter().filter_map(|e| if let StreamEvent::Token(t) = e { Some(t) } else { None }).collect();
+                self.r.check("stream token events count up by 1 from 1", tokens.iter().enumerate().all(|(i, t)| t.n == i as u64 + 1), tokens.iter().map(|t| t.n).take(8).collect::<Vec<_>>());
+                self.r.check("stream token events name a phase the contract defines", tokens.iter().all(|t| t.phase != Phase::Unknown), tokens.iter().map(|t| t.phase).find(|p| *p == Phase::Unknown));
+                match events.last() {
+                    Some(StreamEvent::Done(d)) => {
+                        self.r.check("stream sends one token event for each completion token", tokens.len() as u64 == d.usage.completion, (tokens.len(), d.usage));
+                        let thought = tokens.iter().filter(|t| t.phase == Phase::Reasoning).count() as u64;
+                        self.r.check("stream reasoning token events are usage.reasoning", thought == d.usage.reasoning, (thought, d.usage));
+                        let dv = serde_json::to_value(d).unwrap_or_default();
+                        self.r.check("the stream's done event equals the response without stream", ["content", "reasoning", "finish"].iter().all(|k| dv[*k] == g[*k]) && without_stats(&dv["tool_calls"]) == without_stats(&g["tool_calls"]) && d.usage.completion == u.completion, (&dv, &g));
+                        self.r.check("stream stats match the call without stream within 1e-4", stats_close(&dv, &g, 1e-4), (&dv["stats"], &g["stats"]));
+                    }
+                    Some(StreamEvent::Error(e)) => {
+                        let ok = e.request_id.is_some() && e.request_id == response.request_id;
+                        self.r.check("a stream's error event repeats the request-id", ok, (&e.request_id, &response.request_id));
+                        self.r.fail("the stream's done event equals the response without stream", format!("the stream ended with an error: {}", e.error.message));
+                    }
+                    _ => {}
                 }
             }
         }
@@ -110,7 +135,7 @@ impl Suite {
         let big = self.ctx(vec![json!({"role": "user", "content": filler})]);
         if limit * 7 > 900_000 {
             self.r.skip("a prompt past context_tokens is refused", format!("context_tokens {} needs a body past 1 MiB", limit));
-        } else if let Some(e) = self.refused("a prompt past context_tokens is refused", "POST", "/council/v2/generations", Some(json!({"context": big})), 413) {
+        } else if let Some(e) = self.refused("a prompt past context_tokens is refused", "POST", "/council/v2/generations", Some(json!({"context": big, "max_tokens": 8})), 413) {
             self.r.check(
                 "context_full names the prompt and a limit within 1 of identity context_tokens",
                 e["error"]["type"] == json!("context_full") && num(&e["error"]["prompt_tokens"]) > num(&e["error"]["context_tokens"]) && (num(&e["error"]["context_tokens"]) - limit as i64).abs() <= 1,
@@ -118,10 +143,38 @@ impl Suite {
             );
         }
 
-        self.refused("a generation refuses a bad context", "POST", "/council/v2/generations", Some(json!({"context": self.ctx(vec![json!({"role": "tool", "tool_call_id": "nope", "content": "x"})])})), 400);
+        self.refused("a generation refuses a bad context", "POST", "/council/v2/generations", Some(json!({"context": self.ctx(vec![json!({"role": "tool", "tool_call_id": "nope", "content": "x"})]), "max_tokens": 8})), 400);
         self.refused("a generation refuses max_tokens 0", "POST", "/council/v2/generations", Some(json!({"context": ctx, "max_tokens": 0})), 400);
-        self.refused("a generation refuses a negative temperature", "POST", "/council/v2/generations", Some(json!({"context": ctx, "sample": {"temperature": -1}})), 400);
-        self.refused("a generation refuses an unknown member", "POST", "/council/v2/generations", Some(json!({"context": ctx, "from": {}})), 400);
+        if let Some(e) = self.refused("a generation without max_tokens is refused", "POST", "/council/v2/generations", Some(json!({"context": ctx})), 400) {
+            self.r.check("a generation without max_tokens is a 400 naming max_tokens", e["error"]["param"] == "max_tokens" || e["error"]["message"].as_str().is_some_and(|m| m.contains("max_tokens")), &e);
+        }
+        let over = self.limits().map_or(0, |l| l.context_tokens) + 1;
+        self.refused("a generation refuses max_tokens past context_tokens", "POST", "/council/v2/generations", Some(json!({"context": ctx, "max_tokens": over})), 400);
+        self.refused("a generation refuses a negative temperature", "POST", "/council/v2/generations", Some(json!({"context": ctx, "max_tokens": 8, "sample": {"temperature": -1}})), 400);
+        self.refused("a generation refuses an unknown member", "POST", "/council/v2/generations", Some(json!({"context": ctx, "max_tokens": 8, "from": {}})), 400);
+
+        // A reply cut off by max_tokens says so.
+        if let Some(short) = self.generate("a generation of 1 token succeeds", &ctx, 1) {
+            if let Some(d) = self.decode::<GenerationDone>("a generation of 1 token decodes", &short) {
+                self.check_finish("a generation of 1 token", &d, 1);
+                self.r.check("a generation of 1 token ends at max_tokens or with its turn", d.usage.completion <= 1 && matches!(d.finish, Finish::MaxTokens | Finish::EndTurn | Finish::ToolUse), &short);
+            }
+        }
+    }
+
+    /// `finish` agrees with the reply: `tool_use` when it ends after calls and `end_turn` when it
+    /// ends without them; `max_tokens` when it wrote `max_tokens`; `context_full` when prompt and
+    /// reply reach `context_tokens`, within 1.
+    pub(crate) fn check_finish(&mut self, what: &str, d: &GenerationDone, max_tokens: u64) {
+        let u = d.usage;
+        let limit = self.limits().map_or(0, |l| l.context_tokens);
+        let ok = match d.finish {
+            Finish::ToolUse => !d.tool_calls.is_empty(),
+            Finish::EndTurn => d.tool_calls.is_empty(),
+            Finish::MaxTokens => u.completion == max_tokens,
+            Finish::ContextFull => u.prompt + u.completion + 1 >= limit,
+        };
+        self.r.check(&format!("{}: finish agrees with the reply", what), ok && u.completion <= max_tokens, (d.finish, d.tool_calls.len(), u, max_tokens, limit));
     }
 }
 

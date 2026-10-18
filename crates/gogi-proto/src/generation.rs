@@ -3,13 +3,15 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
-use crate::context::{Context, SnapshotInfo};
-use crate::error::Invalid;
+use crate::context::{Context, SnapshotInfo, Usage};
+use crate::error::{ErrorBody, Invalid};
 use crate::identity::Class;
 use crate::ids::SnapshotId;
 use crate::required_nullable;
 
-/// Sampling settings. `temperature: 0` is greedy and reproducible.
+/// Sampling settings. `temperature: 0` is greedy and reproducible. With a `seed`, a server
+/// usually samples the same reply again, but not always: logits whose last bits depend on how the
+/// prompt was fed can change a sample.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sample {
@@ -42,12 +44,11 @@ impl Sample {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationRequest {
-    /// The served model: its `model` or an alias. May be absent only when the server serves one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
+    /// The served model: its `model` or an alias.
+    pub model: String,
     pub context: Context,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u32>,
+    /// The most tokens the reply may have, 1 to the served model's `context_tokens`.
+    pub max_tokens: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample: Option<Sample>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -94,7 +95,7 @@ impl GenerationRequest {
     /// Checks the context, a positive `max_tokens`, and the sample.
     pub fn validate(&self) -> Result<(), Invalid> {
         self.context.check()?;
-        if self.max_tokens == Some(0) {
+        if self.max_tokens == 0 {
             return Err(Invalid::param("max_tokens", "max_tokens is at least 1"));
         }
         if let Some(s) = &self.sample {
@@ -108,7 +109,7 @@ impl GenerationRequest {
 /// never dropped. The server names each call with the `id` a later `tool` message names.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ReplyToolCall {
-    Parsed { id: String, name: String, arguments: Map<String, Value>, stats: Option<TokenStats> },
+    Parsed { id: String, name: String, input: Map<String, Value>, stats: Option<TokenStats> },
     Unparsed { id: String, name: Option<String>, raw: String, error: String, stats: Option<TokenStats> },
 }
 
@@ -153,7 +154,7 @@ impl<'de> Deserialize<'de> for ReplyToolCall {
             id: String,
             #[serde(default)]
             name: Option<String>,
-            arguments: Option<Value>,
+            input: Option<Value>,
             raw: Option<String>,
             error: Option<String>,
             #[serde(default)]
@@ -163,14 +164,14 @@ impl<'de> Deserialize<'de> for ReplyToolCall {
         if r.id.is_empty() {
             return Err(D::Error::custom("a reply tool call has an empty id"));
         }
-        match (r.arguments, r.raw, r.error) {
-            (Some(Value::Object(arguments)), None, None) => match r.name {
-                Some(name) if !name.is_empty() => Ok(ReplyToolCall::Parsed { id: r.id, name, arguments, stats: r.stats }),
+        match (r.input, r.raw, r.error) {
+            (Some(Value::Object(input)), None, None) => match r.name {
+                Some(name) if !name.is_empty() => Ok(ReplyToolCall::Parsed { id: r.id, name, input, stats: r.stats }),
                 _ => Err(D::Error::custom("a parsed tool call has no name")),
             },
-            (Some(_), None, None) => Err(D::Error::custom("tool call arguments are not an object")),
+            (Some(_), None, None) => Err(D::Error::custom("a tool call's input is not an object")),
             (None, Some(raw), Some(error)) => Ok(ReplyToolCall::Unparsed { id: r.id, name: r.name, raw, error, stats: r.stats }),
-            _ => Err(D::Error::custom("a tool call has either `arguments` or both `raw` and `error`")),
+            _ => Err(D::Error::custom("a tool call has either `input` or both `raw` and `error`")),
         }
     }
 }
@@ -178,7 +179,7 @@ impl<'de> Deserialize<'de> for ReplyToolCall {
 impl Serialize for ReplyToolCall {
     fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
         let v = match self {
-            ReplyToolCall::Parsed { id, name, arguments, stats } => serde_json::json!({"id": id, "name": name, "arguments": arguments, "stats": stats}),
+            ReplyToolCall::Parsed { id, name, input, stats } => serde_json::json!({"id": id, "name": name, "input": input, "stats": stats}),
             ReplyToolCall::Unparsed { id, name, raw, error, stats } => serde_json::json!({"id": id, "name": name, "raw": raw, "error": error, "stats": stats}),
         };
         v.serialize(ser)
@@ -187,21 +188,16 @@ impl Serialize for ReplyToolCall {
 
 /// Why the reply ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum Finish {
-    Stop,
-    Length,
-    Cancelled,
-}
-
-/// A generation's token counts: `kept` came from held snapshots, `fed` is the prompt tokens this
-/// request ran, and the two make `prompt`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GenerationUsage {
-    pub prompt: u64,
-    pub kept: u64,
-    pub fed: u64,
-    pub completion: u64,
+    /// The model ended its turn with no tool call.
+    EndTurn,
+    /// The model ended its turn after one or more tool calls.
+    ToolUse,
+    /// The reply reached `max_tokens`.
+    MaxTokens,
+    /// The prompt and the reply reached the served model's `context_tokens`.
+    ContextFull,
 }
 
 /// The response to a generation: the reply, its token counts, and the head after it. The client
@@ -217,7 +213,8 @@ pub struct GenerationDone {
     #[serde(default)]
     pub tool_calls: Vec<ReplyToolCall>,
     pub finish: Finish,
-    pub usage: GenerationUsage,
+    /// `prompt` counts the prompt; `completion` the reply, with its thinking in `reasoning`.
+    pub usage: Usage,
     /// The snapshot after the reply when the server holds it, else `null`.
     #[serde(deserialize_with = "required_nullable")]
     pub head: Option<SnapshotId>,
@@ -229,6 +226,9 @@ pub struct GenerationDone {
     /// The answers of each riding decision, in request order.
     #[serde(default)]
     pub decisions: Vec<RideAnswers>,
+    /// The seed the server sampled with: the request's, or one it chose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
 }
 
 impl GenerationDone {
@@ -238,8 +238,8 @@ impl GenerationDone {
         let mut calls = Vec::new();
         for c in &self.tool_calls {
             match c {
-                ReplyToolCall::Parsed { id, name, arguments, .. } => {
-                    calls.push(crate::message::ToolCall { id: id.clone(), name: name.clone(), arguments: arguments.clone() })
+                ReplyToolCall::Parsed { id, name, input, .. } => {
+                    calls.push(crate::message::ToolCall { id: id.clone(), name: name.clone(), input: input.clone() })
                 }
                 ReplyToolCall::Unparsed { .. } => return None,
             }
@@ -250,8 +250,87 @@ impl GenerationDone {
             reasoning: Some(self.reasoning.clone()).filter(|r| !r.is_empty()),
             tool_calls: calls,
             tool_call_id: None,
+            is_error: false,
             snap: false,
         })
+    }
+}
+
+/// Which part of the reply a streamed token belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    Reasoning,
+    Content,
+    Call,
+    /// A phase this crate does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// A `token` event: one sampled token of the reply. `piece` is display text, which may be empty
+/// while a character is incomplete; the reply is `done`'s fields, never the joined pieces.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TokenEvent {
+    /// The token's id.
+    pub id: u32,
+    pub piece: String,
+    pub phase: Phase,
+    /// The token's untempered probability.
+    pub p: f64,
+    /// The entropy, in nats, of the distribution it came from.
+    pub h: f64,
+    /// The reply's tokens so far, this one included.
+    pub n: u64,
+    /// Reply tokens per second so far.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tps: Option<f64>,
+}
+
+/// One server-sent event of a streamed generation. The stream ends after `done` or `error`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StreamEvent {
+    Token(TokenEvent),
+    /// Sent while nothing else is; it carries `{}`.
+    Ping,
+    Done(Box<GenerationDone>),
+    /// A failure after the stream began, in an error response's shape.
+    Error(ErrorBody),
+}
+
+impl StreamEvent {
+    /// Decodes one event from its `event` name and `data`. `Ok(None)` is an event this crate does
+    /// not know, which a client ignores.
+    pub fn parse(name: &str, data: &str) -> Result<Option<StreamEvent>, String> {
+        let bad = |e: serde_json::Error| format!("a {} event does not decode: {}", name, e);
+        Ok(Some(match name {
+            "token" => StreamEvent::Token(serde_json::from_str(data).map_err(bad)?),
+            "ping" => StreamEvent::Ping,
+            "done" => StreamEvent::Done(Box::new(serde_json::from_str(data).map_err(bad)?)),
+            "error" => StreamEvent::Error(serde_json::from_str(data).map_err(bad)?),
+            _ => return Ok(None),
+        }))
+    }
+
+    /// The `event` name.
+    pub fn name(&self) -> &'static str {
+        match self {
+            StreamEvent::Token(_) => "token",
+            StreamEvent::Ping => "ping",
+            StreamEvent::Done(_) => "done",
+            StreamEvent::Error(_) => "error",
+        }
+    }
+
+    /// The `data`, as JSON text.
+    pub fn data(&self) -> String {
+        match self {
+            StreamEvent::Token(t) => serde_json::to_string(t),
+            StreamEvent::Ping => Ok("{}".to_string()),
+            StreamEvent::Done(d) => serde_json::to_string(d),
+            StreamEvent::Error(e) => serde_json::to_string(e),
+        }
+        .expect("event data encodes")
     }
 }
 
@@ -266,18 +345,18 @@ mod tests {
 
     fn done() -> Value {
         json!({"model": "m", "content": "", "reasoning": "list it",
-               "tool_calls": [{"id": "c2", "name": "ls", "arguments": {"path": "/tmp", "all": true}}],
-               "finish": "stop", "usage": {"prompt": 1852, "kept": 1840, "fed": 12, "completion": 30},
+               "tool_calls": [{"id": "c2", "name": "ls", "input": {"path": "/tmp", "all": true}}],
+               "finish": "tool_use", "usage": {"prompt": 1852, "kept": 1840, "fed": 12, "completion": 30, "reasoning": 4},
                "head": snap("77aa"), "snapshots": [{"id": snap("9a1e"), "message": 1, "tokens": 412}]})
     }
 
     #[test]
-    fn a_done_keeps_call_ids_and_argument_order() {
+    fn a_done_keeps_call_ids_and_input_order() {
         let text = done().to_string();
         let d: GenerationDone = serde_json::from_str(&text).unwrap();
-        let [ReplyToolCall::Parsed { id, arguments, .. }] = d.tool_calls.as_slice() else { panic!("{:?}", d.tool_calls) };
+        let [ReplyToolCall::Parsed { id, input, .. }] = d.tool_calls.as_slice() else { panic!("{:?}", d.tool_calls) };
         assert_eq!(id, "c2");
-        assert_eq!(serde_json::to_string(arguments).unwrap(), r#"{"path":"/tmp","all":true}"#);
+        assert_eq!(serde_json::to_string(input).unwrap(), r#"{"path":"/tmp","all":true}"#);
         let m = d.as_message().unwrap();
         assert_eq!((m.content.as_deref(), m.reasoning.as_deref(), m.tool_calls[0].id.as_str()), (None, Some("list it"), "c2"));
     }
@@ -292,6 +371,26 @@ mod tests {
         let mut v = done();
         v["head"] = json!(null);
         assert_eq!(serde_json::from_value::<GenerationDone>(v).unwrap().head, None);
+        for old in ["stop", "length", "cancelled"] {
+            let mut v = done();
+            v["finish"] = json!(old);
+            assert!(serde_json::from_value::<GenerationDone>(v).is_err(), "{old}");
+        }
+    }
+
+    #[test]
+    fn stream_events_decode_by_name_and_skip_unknown_ones() {
+        let t = r#"{"id": 42, "piece": "ls", "phase": "content", "p": 0.9, "h": 0.3, "n": 1, "tps": 50.0}"#;
+        let Some(StreamEvent::Token(e)) = StreamEvent::parse("token", t).unwrap() else { panic!() };
+        assert_eq!((e.id, e.phase, e.n), (42, Phase::Content, 1));
+        assert_eq!(StreamEvent::parse("ping", "{}").unwrap(), Some(StreamEvent::Ping));
+        assert_eq!(StreamEvent::parse("progress", "{}").unwrap(), None);
+        let err = r#"{"error": {"type": "internal", "message": "the engine failed; nothing more is sent"}, "request_id": "req_1"}"#;
+        let Some(StreamEvent::Error(b)) = StreamEvent::parse("error", err).unwrap() else { panic!() };
+        assert_eq!(b.request_id.as_deref(), Some("req_1"));
+        let d = StreamEvent::parse("done", &done().to_string()).unwrap().unwrap();
+        assert_eq!(StreamEvent::parse(d.name(), &d.data()).unwrap(), Some(d));
+        assert!(StreamEvent::parse("token", "{}").is_err());
     }
 
     #[test]
@@ -307,10 +406,10 @@ mod tests {
     #[test]
     fn malformed_reply_calls_are_refused() {
         for bad in [
-            json!({"name": "ls", "arguments": {}}),
-            json!({"id": "", "name": "ls", "arguments": {}}),
-            json!({"id": "c", "name": "ls", "arguments": "x"}),
-            json!({"id": "c", "arguments": {}}),
+            json!({"name": "ls", "input": {}}),
+            json!({"id": "", "name": "ls", "input": {}}),
+            json!({"id": "c", "name": "ls", "input": "x"}),
+            json!({"id": "c", "input": {}}),
             json!({"id": "c", "name": "ls", "raw": "x"}),
         ] {
             assert!(serde_json::from_value::<ReplyToolCall>(bad.clone()).is_err(), "{bad}");
@@ -320,9 +419,11 @@ mod tests {
     #[test]
     fn the_request_rules_each_refuse() {
         let ctx = Context { messages: vec![crate::message::Message::user("u")], ..Default::default() };
-        let r = GenerationRequest { model: None, context: ctx, max_tokens: Some(8), sample: Some(Sample { temperature: Some(0.0), ..Default::default() }), stream: None, decisions: Vec::new(), class: None, priority: None };
+        let r = GenerationRequest { model: "m".into(), context: ctx, max_tokens: 8, sample: Some(Sample { temperature: Some(0.0), ..Default::default() }), stream: None, decisions: Vec::new(), class: None, priority: None };
         r.validate().unwrap();
-        assert!(GenerationRequest { max_tokens: Some(0), ..r.clone() }.validate().is_err());
+        assert!(GenerationRequest { max_tokens: 0, ..r.clone() }.validate().is_err());
+        let v = json!({"model": "m", "context": {"messages": [{"role": "user", "content": "u"}]}});
+        assert!(serde_json::from_value::<GenerationRequest>(v).is_err(), "a generation sends max_tokens");
         assert!(GenerationRequest { context: Context::default(), ..r.clone() }.validate().is_err());
         for s in [Sample { temperature: Some(-1.0), ..Default::default() }, Sample { top_p: Some(0.0), ..Default::default() }, Sample { min_p: Some(1.0), ..Default::default() }] {
             assert!(GenerationRequest { sample: Some(s), ..r.clone() }.validate().is_err());

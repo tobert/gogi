@@ -32,6 +32,7 @@ impl Suite {
         self.r.check("each top token has an id", resp.reads.iter().all(|x| x.top.iter().all(|t| t.id.is_some())), &r["reads"][0]["top"]);
         self.r.check("a letter's logprob is no more than the top token's", resp.reads.iter().all(|x| x.logprobs.values().all(|v| *v <= x.top[0].logprob + 1e-12)), &r["reads"][0]);
         self.r.check("reads report signals", r["signals"]["control_text"].is_array() || r.get("signals").is_none(), &r["signals"]);
+        self.r.check("reads usage: kept and fed make prompt, and a read writes nothing", resp.usage.check().is_ok() && resp.usage.prompt > 0 && resp.usage.completion == 0, &r["usage"]);
 
         // A single context and suffix reads the same as the same pair inside a larger request.
         let single = json!({"contexts": [req["contexts"][1].clone()], "suffixes": ["\nVerdict: "], "letters": ["A", "B", "C"], "top": 4});

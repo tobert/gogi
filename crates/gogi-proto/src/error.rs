@@ -3,7 +3,6 @@
 use serde::{Deserialize, Serialize};
 
 use crate::identity::{ModelStatus, ServedModel};
-use crate::ids::SnapshotId;
 
 /// Why a request breaks the contract. A server responds with a `400`.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -28,15 +27,19 @@ impl Invalid {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorType {
+    /// `400`.
     InvalidRequest,
+    /// `404`.
     NotFound,
-    SnapshotGone,
-    HeadMismatch,
+    /// `413`: past a limit `param` names.
     TooLarge,
+    /// `429`.
     Busy,
+    /// `503`: the server is stopping or stopped.
     Unavailable,
+    /// `504`.
     Timeout,
-    PinBudget,
+    /// `500`.
     Internal,
     /// A generation's prompt leaves no room for a reply.
     ContextFull,
@@ -52,9 +55,6 @@ pub struct ErrorDetail {
     /// The request field or limit at fault.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub param: Option<String>,
-    /// For `snapshot_gone` and `head_mismatch`, v1's errors: the context record's current head.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub head: Option<SnapshotId>,
     /// For `context_full`: the prompt's tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_tokens: Option<u64>,
@@ -69,16 +69,20 @@ pub struct ErrorDetail {
     pub status: Option<ModelStatus>,
 }
 
-/// An error body: `{"error": {...}}`.
+/// An error body: `{"error": {...}, "request_id": ...}`. A server sends `request_id`, the same id
+/// as its `request-id` header, in every error body and `error` event.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorBody {
     pub error: ErrorDetail,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 impl ErrorBody {
     pub fn new(r#type: ErrorType, message: impl Into<String>) -> Self {
         ErrorBody {
-            error: ErrorDetail { r#type, message: message.into(), param: None, head: None, prompt_tokens: None, context_tokens: None, model: None, status: None },
+            error: ErrorDetail { r#type, message: message.into(), param: None, prompt_tokens: None, context_tokens: None, model: None, status: None },
+            request_id: None,
         }
     }
 
@@ -92,6 +96,11 @@ impl ErrorBody {
 
     pub fn with_param(mut self, param: impl Into<String>) -> Self {
         self.error.param = Some(param.into());
+        self
+    }
+
+    pub fn with_request_id(mut self, id: impl Into<String>) -> Self {
+        self.request_id = Some(id.into());
         self
     }
 }
@@ -108,7 +117,7 @@ fn status_word(s: ModelStatus) -> &'static str {
 
 impl From<Invalid> for ErrorBody {
     fn from(e: Invalid) -> Self {
-        ErrorBody { error: ErrorDetail { param: e.param, ..ErrorBody::new(ErrorType::InvalidRequest, e.message).error } }
+        ErrorBody { error: ErrorDetail { param: e.param, ..ErrorBody::new(ErrorType::InvalidRequest, e.message).error }, request_id: None }
     }
 }
 

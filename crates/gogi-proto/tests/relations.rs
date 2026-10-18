@@ -352,7 +352,8 @@ fn response(lps: &[Vec<f64>], method: PoolMethod, weights: PoolWeights, given: O
     }
     let echo = json!({"method": method, "weights": weights, "normalized": {"q": p.weights}});
     let v = json!({"model": "m", "answers": {"q": pooled}, "reads": reads, "pool": echo,
-        "identity": {"model": "m", "weight_hash": "w", "tokenizer_hash": "t", "template": "t", "engine": "e"}});
+        "identity": {"model": "m", "weight_hash": "w", "tokenizer_hash": "t", "template": "t", "engine": "e"},
+        "usage": {"prompt": 30, "kept": 20, "fed": 10, "completion": 0, "reasoning": 0}});
     (v, Expect { pool: Pool { method: Some(method), weights: Some(weights), values: given }, contexts: ids })
 }
 
@@ -367,6 +368,9 @@ fn verify_accepts_what_the_math_produces_and_rejects_a_changed_number() {
         let (v, expect) = response(&lps, method, weights, given);
         let resp: DecisionResponse = serde_json::from_value(v.clone()).unwrap();
         verify(&resp, &expect).unwrap_or_else(|m| panic!("case {case}: {m}"));
+        let mut bad_usage = resp.clone();
+        bad_usage.usage.fed += 1;
+        assert!(verify(&bad_usage, &expect).is_err(), "case {case}: usage.fed changed");
         let top = argmax(&rows(&lps[..1])[0].probs);
         let top_lp = format!("/reads/0/answers/q/logprobs/opt{top}");
         for ptr in [top_lp.as_str(), "/answers/q/probabilities/opt0", "/answers/q/confidence", "/answers/q/spread", "/reads/0/answers/q/mass", "/pool/normalized/q/0"] {

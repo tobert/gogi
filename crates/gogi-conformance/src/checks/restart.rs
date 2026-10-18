@@ -20,7 +20,7 @@ impl Suite {
         if pinned && self.expect("restart: pin succeeds", "PUT", &format!("/council/v2/pins/{}", owner), Some(json!({"snapshots": [head], "ttl_s": 600})), 200).is_none() {
             return;
         }
-        let req = json!({"spec_id": spec_id, "state": "git push origin main", "contexts": [ctx]});
+        let req = json!({"spec_id": spec_id, "case": "git push origin main", "contexts": [ctx]});
         let before = self.expect("restart: decision succeeds", "POST", "/council/v2/decisions", Some(req.clone()), 200);
         let identity_before = self.identity.as_ref().and_then(|i| serde_json::to_value(i).ok()).map(without_status);
         let model = self.model_name();
@@ -67,10 +67,10 @@ impl Suite {
                 self.r.check("an owner's pins survive a restart", ids == [head.as_str()] && num(&p["expires_in_s"]) > 0, &p);
             }
             if let Some(s) = self.expect("restart: snapshot info succeeds", "GET", &format!("/council/v2/snapshots/{}", head), None, 200) {
-                self.r.check("a pinned snapshot survives a restart", num(&s["tokens"]) == num(&b["tokens"]), &s);
+                self.r.check("a pinned snapshot survives a restart", num(&s["tokens"]) == num(&b["usage"]["prompt"]), &s);
             }
             if let Some(again) = self.build("restart: build again succeeds", &self.ctx(self.opening("restart")), false) {
-                self.r.check("a context whose head is pinned feeds 0 tokens after a restart", num(&again["fed"]) == 0 && again["head"] == b["head"], &again);
+                self.r.check("a context whose head is pinned feeds 0 tokens after a restart", num(&again["usage"]["fed"]) == 0 && again["head"] == b["head"], &again);
             }
         } else {
             self.r.skip("pins survive a restart", "the server does not declare the pins capability");

@@ -1,13 +1,29 @@
 //! A small HTTP/1.1 server: one thread per connection, `Connection: close`.
+//!
+//! Every response carries a `request-id` header, and every error body and `error` event carries
+//! the same id as `request_id`. A `traceparent` header is accepted and ignored.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use gogi_proto::generation::StreamEvent;
+use gogi_proto::ids::REQUEST_ID_HEADER;
+use serde_json::json;
 
 use crate::api::{self, Resp};
 use crate::state::Store;
+
+/// A new request id: the process's start time and a count, so ids differ across requests and
+/// across restarts.
+fn request_id() -> String {
+    static START: OnceLock<u64> = OnceLock::new();
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let start = *START.get_or_init(|| SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64));
+    format!("req_{:016x}_{}", start, NEXT.fetch_add(1, Ordering::SeqCst))
+}
 
 pub fn serve(listener: TcpListener, store: Arc<Mutex<Store>>, stop: Arc<AtomicBool>) {
     while !stop.load(Ordering::SeqCst) {
@@ -63,17 +79,25 @@ fn connection(conn: TcpStream, store: &Mutex<Store>) -> std::io::Result<()> {
     r.read_exact(&mut body)?;
     let path = target.split('?').next().unwrap_or("");
     let resp = api::handle(&mut store.lock().unwrap(), &method, path, &body);
+    let id = request_id();
     match resp {
-        Resp::Json(code, v) => {
+        Resp::Json(code, mut v) => {
+            if v.get("error").is_some() {
+                v["request_id"] = json!(id);
+            }
             let b = serde_json::to_vec(&v).unwrap();
-            write!(out, "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", status_line(code), b.len())?;
+            write!(out, "HTTP/1.1 {}\r\n{}: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", status_line(code), REQUEST_ID_HEADER, id, b.len())?;
             out.write_all(&b)?;
         }
-        Resp::Empty(code) => write!(out, "HTTP/1.1 {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", status_line(code))?,
+        Resp::Empty(code) => write!(out, "HTTP/1.1 {}\r\n{}: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", status_line(code), REQUEST_ID_HEADER, id)?,
         Resp::Sse(events) => {
-            write!(out, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n")?;
-            for (name, data) in events {
-                write!(out, "event: {}\ndata: {}\n\n", name, data)?;
+            write!(out, "HTTP/1.1 200 OK\r\n{}: {}\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", REQUEST_ID_HEADER, id)?;
+            for e in events {
+                let e = match e {
+                    StreamEvent::Error(b) => StreamEvent::Error(b.with_request_id(id.clone())),
+                    other => other,
+                };
+                write!(out, "event: {}\ndata: {}\n\n", e.name(), e.data())?;
             }
         }
     }
