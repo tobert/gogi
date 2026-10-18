@@ -137,8 +137,8 @@ impl Suite {
             self.r.skip("a prompt past context_tokens is refused", format!("context_tokens {} needs a body past 1 MiB", limit));
         } else if let Some(e) = self.refused("a prompt past context_tokens is refused", "POST", "/council/v2/generations", Some(json!({"context": big, "max_tokens": 8})), 413) {
             self.r.check(
-                "context_full names the prompt and a limit within 1 of identity context_tokens",
-                e["error"]["type"] == json!("context_full") && num(&e["error"]["prompt_tokens"]) > num(&e["error"]["context_tokens"]) && (num(&e["error"]["context_tokens"]) - limit as i64).abs() <= 1,
+                "context_full names the prompt and identity's context_tokens",
+                e["error"]["type"] == json!("context_full") && num(&e["error"]["prompt_tokens"]) > num(&e["error"]["context_tokens"]) && num(&e["error"]["context_tokens"]) == limit as i64,
                 &e,
             );
         }
@@ -164,7 +164,7 @@ impl Suite {
 
     /// `finish` agrees with the reply: `tool_use` when it ends after calls and `end_turn` when it
     /// ends without them; `max_tokens` when it wrote `max_tokens`; `context_full` when prompt and
-    /// reply reach `context_tokens`, within 1.
+    /// reply reach `context_tokens`.
     pub(crate) fn check_finish(&mut self, what: &str, d: &GenerationDone, max_tokens: u64) {
         let u = d.usage;
         let limit = self.limits().map_or(0, |l| l.context_tokens);
@@ -172,7 +172,7 @@ impl Suite {
             Finish::ToolUse => !d.tool_calls.is_empty(),
             Finish::EndTurn => d.tool_calls.is_empty(),
             Finish::MaxTokens => u.completion == max_tokens,
-            Finish::ContextFull => u.prompt + u.completion + 1 >= limit,
+            Finish::ContextFull => u.prompt + u.completion >= limit,
         };
         self.r.check(&format!("{}: finish agrees with the reply", what), ok && u.completion <= max_tokens, (d.finish, d.tool_calls.len(), u, max_tokens, limit));
     }
