@@ -118,6 +118,10 @@ impl Suite {
         if let Some(d2) = self.expect("decision again succeeds", "POST", "/council/v2/decisions", Some(req.clone()), 200) {
             let same = (0..2).all(|i| d["reads"][i]["answers"] == d2["reads"][i]["answers"] && d["reads"][i]["snapshot"] == d2["reads"][i]["snapshot"]);
             self.r.check("a decision replays bit for bit", same && d["answers"] == d2["answers"], "the reads or pooled answers changed");
+            let (u1, u2) = (&d["usage"], &d2["usage"]);
+            let fed = |u: &Value| u["fed"].as_u64().unwrap_or(u64::MAX);
+            self.r.check("a repeated decision prompts the same tokens", u1["prompt"] == u2["prompt"], (u1, u2));
+            self.r.check("a repeated decision feeds no more than the first and keeps held snapshots", fed(u2) <= fed(u1) && u2["kept"].as_u64().is_some_and(|k| k > 0), (u1, u2));
         }
 
         // Without a context, one read with no context.
