@@ -7,6 +7,7 @@ name = "gogi"
 version = "0.1.0"
 description = "The council API contract: validation, spec ids, and pooling math."
 requires-python = ">=3.9"
+license = "MIT OR Apache-2.0"
 
 [tool.maturin]
 python-source = "python"
