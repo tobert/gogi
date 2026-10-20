@@ -11,7 +11,6 @@
 
 mod api;
 mod http;
-pub mod model;
 mod state;
 
 use std::sync::atomic::{AtomicBool, Ordering};

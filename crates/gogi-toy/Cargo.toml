@@ -1,0 +1,11 @@
+[package]
+name = "gogi-toy"
+description = "The toy model of gogi-fake as a library: tokens, tokenizer, chat template, model state and logits, and a reply parser. No I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gogi-proto = { path = "../gogi-proto" }
+serde_json.workspace = true

@@ -1,4 +1,4 @@
-//! The toy model and its chat template.
+//! The toy model, its chat template, and its reply parser.
 //!
 //! Tokens are the 256 byte values plus 14 template markers (ids 256 and up). Text becomes
 //! its UTF-8 bytes, so content can never spell a marker: only a `reads` suffix, through

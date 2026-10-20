@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 gogi-proto = { path = "../gogi-proto" }
+gogi-toy = { path = "../gogi-toy" }
 serde.workspace = true
 serde_json.workspace = true
 indexmap.workspace = true

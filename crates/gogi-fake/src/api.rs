@@ -16,7 +16,7 @@ use gogi_proto::spec::{Question, QuestionKind, SpecRules, parse_spec};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
-use crate::model::{self, State, VOCAB};
+use gogi_toy::{self as model, State, VOCAB};
 use crate::state::{BYTES_PER_TOKEN, FakeModel, Pins, Store, snapshot_id};
 
 pub const TEMPLATE: &str = "gogi-toy-chat-2";

@@ -110,6 +110,7 @@ name = "gogi-fake"
 version = "0.1.0"
 dependencies = [
  "gogi-proto",
+ "gogi-toy",
  "indexmap",
  "serde",
  "serde_json",
@@ -134,6 +135,14 @@ dependencies = [
  "gogi-fake",
  "gogi-proto",
  "pyo3",
+ "serde_json",
+]
+
+[[package]]
+name = "gogi-toy"
+version = "0.1.0"
+dependencies = [
+ "gogi-proto",
  "serde_json",
 ]
 
