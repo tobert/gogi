@@ -27,6 +27,8 @@
 //! the tokens, and the logits are a deterministic function of that hash. The same served model and
 //! prefix give the same bits; two seeds are two models.
 
+pub mod reply;
+
 use gogi_proto::context::Tool;
 use gogi_proto::message::{Message, Role};
 
