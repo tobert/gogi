@@ -6,7 +6,8 @@ or from Python with `with gogi.FakeServer(state_dir=DIR) as fake:`, which serves
 
 The toy model lives in the `gogi-toy` crate, which does no I/O and has no HTTP: the tokens and
 markers, the tokenizer, the template with its boundaries and the thinking rule, the generation
-prompt, the model state and logits, and a reply parser. `gogi-fake` serves it over HTTP. Another
+prompt, the model state and logits, the tokens a decision or a raw read feeds (`gogi_toy::read`),
+and a reply parser. `gogi-fake` serves it over HTTP. Another
 engine can use `gogi-toy` alone to serve the same model.
 
 ## Served models

@@ -16,6 +16,7 @@ use gogi_proto::spec::{Question, QuestionKind, SpecRules, parse_spec};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
+use gogi_toy::read;
 use gogi_toy::reply::{Reply, ReplyParser, Step};
 use gogi_toy::{self as model, State, VOCAB};
 use crate::state::{BYTES_PER_TOKEN, FakeModel, Pins, Store, snapshot_id};
@@ -318,15 +319,7 @@ fn pins_put(store: &mut Store, owner: &str, body: &[u8]) -> Resp {
 // ---- reads
 
 fn letter_tokens(letters: &[String]) -> Result<Vec<u32>, Resp> {
-    let mut ids = Vec::new();
-    for l in letters {
-        let t = model::tokenize_suffix(l);
-        if t.len() != 1 || ids.contains(&t[0]) {
-            return Err(bad_param("letters", format!("letter {:?} is not one token of its own", l)));
-        }
-        ids.push(t[0]);
-    }
-    Ok(ids)
+    read::letter_tokens(letters).map_err(|e| bad_param("letters", e))
 }
 
 fn reads(store: &mut Store, body: &[u8]) -> Resp {
@@ -631,10 +624,7 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
         idx.sort();
         chosen[qi] = idx;
     }
-    let case_text = match &req.case {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    };
+    let case_text = read::case_text(&req.case);
     if case_text.len() > CASE_BYTES {
         return err(413, "too_large", format!("nothing was read: the case is {} bytes; case_bytes is {}", case_text.len(), CASE_BYTES), Some("case_bytes"));
     }
@@ -654,7 +644,7 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
     for c in contexts {
         // A read keeps what its build kept and feeds the rest of the context, then everything after it.
         let (head, base_tokens, queue, kept) = match c {
-            None => (None, vec![model::BOS], None, 0),
+            None => (None, read::empty_context(), None, 0),
             Some(c) => {
                 let n = model::render(&c.tools, c.thinks(), &c.messages, false).end;
                 if n > store.cfg.decision_context_tokens {
@@ -677,37 +667,28 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
             if let Err(e) = check_queue_schema(c, &asked_ids) {
                 return invalid(e);
             }
-            let mut messages = c.messages.clone();
-            messages.push(Message::tool(call_id, case_text.clone()));
-            let mut toks = model::render(&c.tools, c.thinks(), &messages, true).tokens;
-            model::push_text(&mut toks, &format!("call:{}{{answers:{{", c.queue.as_deref().unwrap_or("")));
+            let mut toks = read::queue_start(c, &call_id, &case_text);
             for &qi in &sorted {
                 let q = &ask.questions[qi];
-                model::push_text(&mut toks, &format!("{}:\"", q.id));
+                read::queue_question(&mut toks, &q.id);
                 let lp = model::log_softmax(&State::after(m.seed, &toks).logits());
-                let read: Vec<f64> = ask.chosen[qi].iter().map(|&j| lp[usize::from(b'A') + j]).collect();
+                let read: Vec<f64> = ask.chosen[qi].iter().map(|&j| lp[read::option_letter(j) as usize]).collect();
                 let best = (0..read.len()).fold(0, |b, i| if read[i] > read[b] { i } else { b });
-                model::push_text(&mut toks, &format!("{}\",", (b'A' + ask.chosen[qi][best] as u8) as char));
+                read::queue_letter(&mut toks, ask.chosen[qi][best]);
                 lps[qi] = Some(read);
             }
-            rendered = sha256_hex(toks.iter().flat_map(|t| t.to_le_bytes()).collect::<Vec<u8>>().as_slice());
+            rendered = read::rendered_sha256(&toks);
             fed += toks.len() - base_tokens.len();
         } else {
-            let mut spec_and_case = Vec::new();
-            model::push_text(&mut spec_and_case, &format!("{}\n{}: {}", instructions, label, case_text));
-            let mut text_all = base_tokens.clone();
-            text_all.push(model::USER);
-            text_all.extend(&spec_and_case);
-            text_all.extend([model::END, model::ASST]);
+            let text_all = read::plain_text(&base_tokens, &instructions, &label, &case_text);
             for &qi in &ask.asked {
                 let q = &ask.questions[qi];
-                let mut toks = text_all.clone();
-                model::push_text(&mut toks, &format!("{} {}:", q.id, q.instructions));
+                let toks = read::plain_question(&text_all, &q.id, &q.instructions);
                 let lp = model::log_softmax(&State::after(m.seed, &toks).logits());
-                lps[qi] = Some(ask.chosen[qi].iter().map(|&j| lp[usize::from(b'A') + j]).collect());
+                lps[qi] = Some(ask.chosen[qi].iter().map(|&j| lp[read::option_letter(j) as usize]).collect());
                 fed += toks.len() - base_tokens.len();
             }
-            rendered = sha256_hex(text_all.iter().flat_map(|t| t.to_le_bytes()).collect::<Vec<u8>>().as_slice());
+            rendered = read::rendered_sha256(&text_all);
         }
         usage.prompt += (kept + fed) as u64;
         usage.kept += kept as u64;
