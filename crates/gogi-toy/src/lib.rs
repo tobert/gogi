@@ -1,4 +1,4 @@
-//! The toy model and its chat template.
+//! The toy model, its chat template, and its reply parser.
 //!
 //! Tokens are the 256 byte values plus 14 template markers (ids 256 and up). Text becomes
 //! its UTF-8 bytes, so content can never spell a marker: only a `reads` suffix, through
@@ -26,6 +26,8 @@
 //! The model: its model state after a token prefix is a hash folded over a served model's seed and
 //! the tokens, and the logits are a deterministic function of that hash. The same served model and
 //! prefix give the same bits; two seeds are two models.
+
+pub mod reply;
 
 use gogi_proto::context::Tool;
 use gogi_proto::message::{Message, Role};
