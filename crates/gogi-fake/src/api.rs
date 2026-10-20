@@ -16,6 +16,7 @@ use gogi_proto::spec::{Question, QuestionKind, SpecRules, parse_spec};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
+use gogi_toy::reply::{Reply, ReplyParser, Step};
 use gogi_toy::{self as model, State, VOCAB};
 use crate::state::{BYTES_PER_TOKEN, FakeModel, Pins, Store, snapshot_id};
 
@@ -480,16 +481,14 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
     let mut toks = prompt.tokens.clone();
     let mut st = State::after(m.seed, &toks);
     let mut phase = if thinking { Phase::Think } else { Phase::Answer };
-    let (mut reasoning, mut content): (Vec<u8>, Vec<u8>) = (vec![], vec![]);
+    let mut parser = ReplyParser::new(thinking);
     let mut forced: VecDeque<u32> = VecDeque::new();
     let mut queued = false;
-    let mut in_call = false;
     let mut calls: Vec<(String, Map<String, Value>)> = Vec::new();
     let mut events = vec![StreamEvent::Ping];
     let mut ended = false;
     let mut n = 0;
     let mut thought = 0;
-    let mut shown = (0, 0);
     let letters: Vec<u32> = (b'a'..=b'z').map(u32::from).chain([u32::from(b' ')]).collect();
     while n < max_tokens && toks.len() + 1 < limit {
         if phase == Phase::Answer && trigger && !queued {
@@ -510,36 +509,10 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
         n += 1;
         toks.push(tok);
         st = st.step(tok);
-        let kind = match (phase, tok) {
-            (_, model::CALL) => {
-                in_call = true;
-                EventPhase::Call
-            }
-            (_, model::ENDCALL) => {
-                in_call = false;
-                EventPhase::Call
-            }
-            _ if in_call => EventPhase::Call,
-            (Phase::Think, _) => EventPhase::Reasoning,
-            _ => EventPhase::Content,
-        };
+        let Step { phase: kind, piece } = parser.push(tok);
         if kind == EventPhase::Reasoning {
             thought += 1;
         }
-        // A reasoning or content token shows the text it adds to its part, so a part's pieces join
-        // to that part in `done`; a marker in either shows nothing.
-        let piece = match (kind, tok) {
-            (EventPhase::Reasoning, t) if t < 256 => {
-                reasoning.push(t as u8);
-                next_piece(&reasoning, &mut shown.0)
-            }
-            (EventPhase::Content, t) if t < 256 => {
-                content.push(t as u8);
-                next_piece(&content, &mut shown.1)
-            }
-            (EventPhase::Call, t) => model::piece(t),
-            _ => String::new(),
-        };
         events.push(StreamEvent::Token(TokenEvent { id: tok, piece, phase: kind, p, h, n: n as u64, tps: None }));
         if fail && n == 2 {
             let e = ErrorBody::new(ErrorType::Internal, "the reply stopped: the fake fails a reply whose context ends with a message containing FAIL");
@@ -561,7 +534,7 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
         _ if toks.len() + 1 >= limit => "context_full",
         _ => "max_tokens",
     };
-    let (reasoning, content) = (String::from_utf8_lossy(&reasoning).into_owned(), String::from_utf8_lossy(&content).into_owned());
+    let Reply { reasoning, content, .. } = parser.finish();
     let tool_calls: Vec<ToolCall> = calls.into_iter().enumerate().map(|(k, (name, input))| ToolCall { id: format!("call_{}_{}", prompt.tokens.len(), k), name, input }).collect();
     let reply = Message {
         reasoning: Some(reasoning.clone()).filter(|r| !r.is_empty()),
@@ -804,17 +777,4 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
                "usage": usage,
                "queue_ms": 0.0, "ms": t0.elapsed().as_secs_f64() * 1000.0}),
     )
-}
-
-/// The text `buf` adds past the `shown` bytes of its decoding. An incomplete last character waits
-/// for a later piece.
-fn next_piece(buf: &[u8], shown: &mut usize) -> String {
-    let upto = match std::str::from_utf8(buf) {
-        Err(e) if e.error_len().is_none() => e.valid_up_to(),
-        _ => buf.len(),
-    };
-    let text = String::from_utf8_lossy(&buf[..upto]);
-    let piece = text.get(*shown..).unwrap_or("").to_string();
-    *shown = text.len();
-    piece
 }

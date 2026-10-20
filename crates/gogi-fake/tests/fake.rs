@@ -369,3 +369,21 @@ fn each_served_model_has_its_own_snapshots_and_numbers_and_keeps_them_across_an_
     let (_, b) = post(&s, "/council/v2/contexts", json!({"model": "night", "context": c}));
     assert_eq!(b["usage"]["fed"], 0, "the snapshot outlived the unload: {b}");
 }
+
+#[test]
+fn a_streamed_reply_labels_each_token_by_its_part_and_the_parts_join_in_done() {
+    let s = Server::start(Config::default()).unwrap();
+    let tool = json!({"name": "next", "input_schema": {"type": "object"}});
+    let body = json!({"model": "toy", "context": {"tools": [tool], "messages": [{"role": "user", "content": "CALL it"}]}, "max_tokens": 400, "sample": {"temperature": 1, "seed": 5}, "stream": true});
+    let events = stream(&s, body);
+    let Some(StreamEvent::Done(done)) = events.last() else { panic!("{events:?}") };
+    let tokens: Vec<_> = events.iter().filter_map(|e| if let StreamEvent::Token(t) = e { Some(t) } else { None }).collect();
+    let part = |p: Phase| tokens.iter().filter(|t| t.phase == p).map(|t| t.piece.as_str()).collect::<String>();
+    assert!(!done.reasoning.is_empty(), "the thought wrote text: {done:?}");
+    assert_eq!(part(Phase::Reasoning), done.reasoning);
+    assert_eq!(part(Phase::Content), done.content);
+    assert_eq!(part(Phase::Call), "<call>next({})<endcall>");
+    let order: Vec<Phase> = tokens.iter().map(|t| t.phase).collect();
+    let first_call = order.iter().position(|p| *p == Phase::Call).unwrap();
+    assert!(order[..first_call].iter().filter(|p| **p == Phase::Reasoning).count() as u64 == done.usage.reasoning, "reasoning comes before the call");
+}
