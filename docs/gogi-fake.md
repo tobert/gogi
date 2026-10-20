@@ -4,6 +4,11 @@
 with `cargo run -p gogi-fake -- --listen 127.0.0.1:8091 [--state-dir DIR] [--model NAME]...`,
 or from Python with `with gogi.FakeServer(state_dir=DIR) as fake:`, which serves at `fake.url`.
 
+The toy model lives in the `gogi-toy` crate, which does no I/O and has no HTTP: the tokens and
+markers, the tokenizer, the template with its boundaries and the thinking rule, the generation
+prompt, the model state and logits, and a reply parser. `gogi-fake` serves it over HTTP. Another
+engine can use `gogi-toy` alone to serve the same model.
+
 ## Served models
 
 By default the fake serves one model, `gogi-toy-1`, with the alias `toy`. Every request that
@@ -51,6 +56,21 @@ generation prompt   <asst> [<think>]
 - A marked message is a boundary only when its own rendering is a prefix of the whole
   context's. The context's end is always one. So an assistant message with reasoning and no tool
   calls, marked `snap`, stops being a boundary when a user message is added after it.
+
+## Reply parser
+
+`gogi_toy::reply::ReplyParser` reads a reply's token ids, one at a time, after the generation
+prompt. `ReplyParser::new(thinking)` takes `true` when the prompt ended with `<think>`. For each
+token, `push` returns its phase (`reasoning`, `content`, or `call`) and the text it adds. A marker
+in reasoning or content adds no text, and a byte that does not yet complete a character adds none.
+`<endthink>` ends the reasoning and belongs to it. `<call>`, `<endcall>`, and the tokens between
+them belong to `call`.
+
+`finish` returns the reply: `content`, `reasoning`, the calls, and `ended`, which is true when
+the reply wrote `<end>`. A call `<call> name(INPUT_JSON) <endcall>` parses to its name and its
+input, a JSON object with its members in the order written. A call that is not `name(INPUT_JSON)`,
+or has no `<endcall>` before the reply stops, is kept as written with an error. The parser makes
+no call ids; the server does. A token after `<end>`, or an id of 270 or more, panics.
 
 ## Model
 

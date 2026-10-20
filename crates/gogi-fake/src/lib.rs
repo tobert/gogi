@@ -7,7 +7,7 @@
 //! bit for bit, for one or more served models whose status a test sets. It is not a framework:
 //! nothing plugs into it.
 //!
-//! `docs/gogi-fake.md` documents the toy template.
+//! `docs/gogi-fake.md` documents the toy template. The toy model is the `gogi-toy` crate.
 
 mod api;
 mod http;

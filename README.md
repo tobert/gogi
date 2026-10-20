@@ -63,7 +63,8 @@ python examples/council_tour.py
 
 - `docs/` holds the contract. Start with `docs/council-api.md`.
 - `crates/gogi-proto` is the contract with no I/O.
-- `crates/gogi-fake` is a fake server over a toy model.
+- `crates/gogi-toy` is the toy model as a library, with no I/O.
+- `crates/gogi-fake` is a fake server over the toy model.
 - `crates/gogi-py` binds the validation, the math, and the fake server to
   Python (`cd crates/gogi-py && maturin develop && pytest tests`).
 - `examples/` walks through a council session: `walkthrough.sh` in curl, and
