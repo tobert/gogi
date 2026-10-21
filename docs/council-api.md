@@ -645,7 +645,8 @@ data: {"model": "gemma-4-26b-a4b", "content": "…", "finish": "end_turn", …}
 ### Continuations
 
 Proposed 2026-10-21. Amy agreed on the name, the shape, `done`, the
-tokenizer seam, the riding `before`, and the reserved `suffix`.
+tokenizer seam, the riding `before`, and the reserved `suffix`, and then
+on each rule below.
 
 A continuation lets a client write the start of a reply and have the
 model go on from it. Use it to:
