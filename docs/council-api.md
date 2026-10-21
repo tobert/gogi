@@ -73,9 +73,11 @@ thing, and each thing has one term.
 | answer | One question's result, either from one read or pooled over all of a decision's reads. |
 | pool | The answers combined over a decision's reads, `linear` or `loglinear`. |
 | generation | A request that samples a reply after a context. |
-| prompt | The rendered context a generation starts from, with the template's start of the reply. `usage.prompt` and `context_full` count it. |
+| prompt | The rendered context a generation starts from, with the template's start of the reply and a continuation's open text. `usage.prompt` and `context_full` count it. |
 | riding decision | A spec's questions asked during a generation, `before` or `after` the reply. Capability `ride`. |
 | reply | The assistant message a generation writes. |
+| continuation | A generation whose last message is an open assistant message: the model goes on from the open text. Capability `continuation`. |
+| open text | The `reasoning` and `content` of the open message, which the client wrote and the model continues. |
 | response | The HTTP body a server returns for any request. |
 | request id | The id a server gives one request, sent in the `request-id` header of its response and in every error body. |
 | trace context | The client's W3C `traceparent` header, which joins the server's spans to the client's trace. It travels only as a header. |
@@ -593,6 +595,9 @@ POST /council/v2/generations
   shape. A spec the server does not hold is a `404`. Like `stats`, the
   answers are the model's account of its own work; nothing means anything
   by them until they are calibrated against outcomes.
+- **A reply can go on from text the client wrote.** A last assistant
+  message with `continue: true` is open, and the model continues it (see
+  Continuations).
 - **A prompt that leaves no room is a `413`** with `error.type`
   `context_full`, `prompt_tokens`, and `context_tokens`, before anything
   runs. The client shortens the context.
@@ -630,11 +635,100 @@ data: {"model": "gemma-4-26b-a4b", "content": "…", "finish": "end_turn", …}
   whitespace is Unicode White_Space and U+001C to U+001F, the characters
   Python's `str.strip()` removes. A piece may be empty, such as while a
   character is not yet complete. A `call` piece is display text only; the
-  calls are `done.tool_calls`.
+  calls are `done.tool_calls`. In a continuation, the pieces join to the
+  text after the open text.
 - **A client ignores an event it does not know,** so a server can add one
   without breaking clients.
 - **Closing the stream cancels the reply.** The server sends nothing more
   and holds no head for it.
+
+### Continuations
+
+Proposed 2026-10-21. Amy agreed on the name, the shape, `done`, the
+tokenizer seam, the riding `before`, and the reserved `suffix`.
+
+A continuation lets a client write the start of a reply and have the
+model go on from it. Use it to:
+
+- resume a reply that ended with `max_tokens`, without feeding it again;
+- set the form of a reply, such as the start of a JSON object or a code
+  fence;
+- start the model's thinking with a plan, or close the thinking and start
+  the content.
+
+```json
+POST /council/v2/generations
+{"model": "qwen3.8-flash-next",
+ "context": {"thinking": true, "tools": […],
+   "messages": [
+     {"role": "system", "content": "You are a coding agent. …"},
+     {"role": "user", "content": "Write the config for the deploy.", "snap": true},
+     {"role": "assistant",
+      "reasoning": "The unit needs Type=notify and the 8090 address.",
+      "content": "```toml\n[http]\nbind = \"",
+      "continue": true}]},
+ "max_tokens": 512, "sample": {"temperature": 0.7},
+ "decisions": [{"spec_id": "self-check", "ask": ["on_track"], "when": "before"},
+               {"spec_id": "self-check", "when": "after"}],
+ "stream": true}
+-> done: {"content": "```toml\n[http]\nbind = \"100.83.138.103:8090\"\n```",
+          "reasoning": "The unit needs Type=notify and the 8090 address.",
+          "finish": "end_turn",
+          "usage": {"prompt": 412, "kept": 398, "fed": 14, "completion": 21, "reasoning": 0},
+          "decisions": [{"spec_id": "self-check", "when": "before", "answers": […]},
+                        {"spec_id": "self-check", "when": "after", "answers": […]}], …}
+```
+
+- **`continue: true` opens the last message.** Only the last message may
+  carry it, and only an assistant message. It carries `reasoning`,
+  `content`, or both, and at least one of them is not empty. It carries no
+  `tool_calls`. Any other use is a `400` naming `continue`.
+- **Only generations read an open message.** A context with `continue` in
+  `POST /contexts`, `/decisions`, or `/reads` is a `400` naming `continue`.
+- **The server renders the open message without its end.** The template
+  renders it as it renders a reply, up to the open text, and adds no end of
+  turn. With `content`, the thinking is closed and the model continues the
+  content. With only `reasoning`, the model continues inside its thinking.
+  `reasoning` in an open message with `thinking: false` is a `400` naming
+  `continue`.
+- **The open text is content, never control** (rule 2). Text in it that
+  spells a template token, such as `</think>` or the start of a call, is
+  text. The server reports each hit in `signals.control_text` as for any
+  message.
+- **The open text must tokenize on its own.** The server tokenizes the
+  rendering with and without the open text. When the open text's first
+  characters merge with the token before them, the request is a `400`
+  naming `continue`, and the message names the characters. A newline after
+  the template's last newline is a common case. The client starts the open
+  text with a character that does not merge.
+- **The model continues after the open text's last token.** The server does
+  not mend a last token that ends inside a word (see Open questions).
+- **`done` is the whole message,** the open text and the new text joined:
+  `done.content` starts with the open message's `content`, and
+  `done.reasoning` with its `reasoning`. The client puts `done` in place of
+  its open message. The server parses tool calls over the whole message.
+- **The open text is prompt, not reply.** `usage.prompt`, `kept`, and `fed`
+  count its tokens; `usage.completion` and `usage.reasoning` count only the
+  sampled tokens. `max_tokens` bounds the sampled tokens, and `stats`
+  describe only them.
+- **A stream sends only the sampled tokens.** `n` counts from 1 at the
+  first sampled token. The pieces join to `done`'s text after the open
+  text.
+- **A riding `before` reads just before the first sampled token,** after
+  the open text, as it reads after the prompt in any generation. It answers
+  whether the reply so far is on track. `after` reads after the whole
+  message.
+- **A cut reply resumes from its head.** When a reply ends with
+  `max_tokens`, the server holds `head` as the reply renders open, when it
+  can. A continuation that sends that reply back open then feeds only the
+  last sampled token. A client that instead sends the reply closed also
+  starts there, because the open rendering is a prefix of the closed one.
+- **`continue` is reserved as an object for infill.** `"continue":
+  {"suffix": "…"}` asks the model to write the text between the open text
+  and the suffix. This contract does not define infill yet. Without
+  capability `infill`, an object is a `400` naming `continue`.
+- **A server declares capability `continuation`.** Without it, an open
+  message is a `400` naming `continue`.
 
 ## Request ids and tracing
 
@@ -740,6 +834,7 @@ specs, which every served model shares.
 | `generate` | served model | `POST /council/v2/generations`. |
 | `think` | served model | Decisions accept `think` with `tokens` above 0. |
 | `ride` | served model | Generations accept `decisions`. |
+| `continuation` | served model | Generations accept an open last message, `continue: true`. |
 | `dry_run` | served model | Builds accept `dry_run`. |
 | `leave_one_out` | served model | Pooled answers carry `leave_one_out`. |
 | `describe` | served model | Specs may hold `text` questions. |
@@ -793,3 +888,14 @@ A server serves the model-specific rest under its own prefix and lists it in
 - **Tool-result size.** A tool result is written whole into a context,
   even when the context then has no room for another message. The client's
   preview and storage rules for large results are its own.
+- **Infill.** `continue: {"suffix"}` is reserved for text between a prefix
+  and a suffix, as code models with fill-in-the-middle tokens and diffusion
+  models write it. Infill is rarely a chat turn: it is a file's prefix and
+  suffix, closer to a raw generation than to a reply. A diffusion model
+  fills a span of a set length, so `max_tokens` and `finish` would need
+  new meanings. The section waits for a served model that can infill.
+- **Mending the last token.** An open text can end inside a word, such as
+  `hel`. Its last token is then one the model would not have written there.
+  The model can write `lo` oddly or not at all. A server could feed the open
+  text without its last token and allow only tokens that start with that
+  token's text. Whether it pays is not measured.
