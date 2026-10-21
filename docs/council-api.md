@@ -558,6 +558,11 @@ POST /council/v2/generations
   | `max_tokens` | The reply reached `max_tokens`: `usage.completion` is `max_tokens`. |
   | `context_full` | The prompt and the sampled tokens reached `context_tokens`. |
 
+  When more than one applies, `end_turn` and `tool_use` come first, then
+  `context_full`, then `max_tokens`. A `context_full` reply cannot be
+  continued, and it has no `phase`. Decided by senpai 2026-10-21
+  (vetoable).
+
 - **`usage`** counts the prompt in `prompt`, `kept`, and `fed`, and the
   reply in `completion`, with its thinking also in `reasoning`.
 - **`seed`** in `done` is the seed the server sampled with: the request's
@@ -755,12 +760,17 @@ POST /council/v2/generations
   `content` sends it back with a `content` member, even when it is empty,
   and `reasoning` without one. A reply whose `phase` is `call` cannot be
   continued. `content` and `reasoning` alone cannot tell a reply cut just
-  after its thinking from one cut inside it. A continuation that sends
-  it back open then feeds at most the last sampled token: a server whose
-  head holds the model state after that token feeds none. A client that
-  sends it back closed starts there too, when the closed rendering's
-  tokens begin with the open rendering's. Otherwise a build starts from the last
-  boundary, as always.
+  after its thinking from one cut inside it. The head may hold the model
+  state before or after the last sampled token, so a continuation that
+  sends the reply back open feeds at most that token. Decided by senpai
+  2026-10-21 (vetoable). A client that sends it back closed starts there
+  too, when the closed rendering's tokens begin with the open rendering's.
+  Otherwise a build starts from the last boundary, as always.
+- **A server may refuse its own cut reply at the seam.** The tokens a
+  model samples need not be the tokens its tokenizer gives for the same
+  text, so a cut reply sent back open can fail the seam check, a `400`
+  naming `continue`. The client then sends the reply back closed. Decided
+  by senpai 2026-10-21 (vetoable).
 - **`continue` is a boolean.** Any other value is a `400` naming
   `continue`. Infill, the text between a prefix and a suffix, gets its own
   top-level member of a generation later (see Open questions). It is not
