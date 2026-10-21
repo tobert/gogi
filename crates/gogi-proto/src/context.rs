@@ -71,12 +71,20 @@ pub struct Context {
 }
 
 impl Context {
-    /// Checks the messages, that each tool has a distinct name, and that `queue` names a tool.
+    /// Checks the messages, that each tool has a distinct name, and that `queue` names a tool. An
+    /// open message with reasoning needs `thinking: true` sent, so it does not depend on a server's
+    /// default.
     pub fn check(&self) -> Result<(), Invalid> {
         if self.messages.is_empty() {
             return Err(Invalid::new("a context has at least one message"));
         }
         message::validate(&[], &self.messages)?;
+        if let Some(m) = self.open()
+            && !m.reasoning.as_deref().unwrap_or("").is_empty()
+            && self.thinking != Some(true)
+        {
+            return Err(Invalid::param("continue", format!("messages[{}]: an open message with reasoning needs thinking: true in the context", self.messages.len() - 1)));
+        }
         let names = self.tool_names();
         for (i, n) in names.iter().enumerate() {
             if n.is_empty() || names[..i].contains(n) {
@@ -87,6 +95,24 @@ impl Context {
             && !self.tool_names().contains(&q.as_str())
         {
             return Err(Invalid::new(format!("queue {} names no tool in tools", q)));
+        }
+        Ok(())
+    }
+
+    /// The last message when it is open (`continue: true`): the assistant message a
+    /// generation continues.
+    pub fn open(&self) -> Option<&Message> {
+        self.messages.last().filter(|m| m.open)
+    }
+
+    /// Checks a context that a decision or a raw read reads, the `i`th of a request: an error
+    /// names `continue` when the context is open or breaks a rule of an open message, and
+    /// `contexts` otherwise. `what` names the request and its verb, such as "a decision reads".
+    pub fn check_read(&self, i: usize, what: &str) -> Result<(), Invalid> {
+        let named = |e: Invalid| Invalid::param(if e.param.as_deref() == Some("continue") { "continue" } else { "contexts" }, format!("contexts[{}]: {}", i, e.message));
+        self.check().map_err(named)?;
+        if self.open().is_some() {
+            return Err(Invalid::param("continue", format!("contexts[{}]: {} no open message; send continue: true only to a generation", i, what)));
         }
         Ok(())
     }
@@ -121,6 +147,17 @@ pub struct ContextBuild {
     /// Higher runs first within its class. Absent: 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
+}
+
+impl ContextBuild {
+    /// Checks the context. A build reads an open message only with `dry_run: true`.
+    pub fn validate(&self) -> Result<(), Invalid> {
+        self.context.check()?;
+        if self.context.open().is_some() && self.dry_run != Some(true) {
+            return Err(Invalid::param("continue", "nothing was built: a build reads an open message only with dry_run: true; send dry_run: true to test a continuation, or send it to a generation"));
+        }
+        Ok(())
+    }
 }
 
 /// Where a snapshot's model state is stored.
@@ -237,6 +274,43 @@ mod tests {
     fn thinking_is_on_unless_the_context_says_otherwise() {
         assert!(Context::default().thinks());
         assert!(!Context { thinking: Some(false), ..Default::default() }.thinks());
+    }
+
+    fn open_context(thinking: Option<bool>, open: Message) -> Context {
+        Context { thinking, messages: vec![Message::user("u"), open], ..Default::default() }
+    }
+
+    #[test]
+    fn an_open_message_with_reasoning_needs_thinking_sent_true() {
+        let thought = Message { reasoning: Some("I should".into()), content: None, ..Message::assistant("").opened() };
+        open_context(Some(true), thought.clone()).check().unwrap();
+        for thinking in [Some(false), None] {
+            let e = open_context(thinking, thought.clone()).check().unwrap_err();
+            assert_eq!((e.param.as_deref(), e.message.as_str()), (Some("continue"), "messages[1]: an open message with reasoning needs thinking: true in the context"), "{thinking:?}");
+        }
+        open_context(None, Message::assistant("The plan:").opened()).check().unwrap();
+        open_context(Some(false), Message { reasoning: Some(String::new()), ..Message::assistant("x").opened() }).check().unwrap();
+    }
+
+    #[test]
+    fn open_names_the_open_last_message() {
+        let c = open_context(None, Message::assistant("The plan:").opened());
+        assert_eq!(c.open().and_then(|m| m.content.as_deref()), Some("The plan:"));
+        assert_eq!(open_context(None, Message::assistant("done")).open(), None);
+    }
+
+    #[test]
+    fn a_build_reads_an_open_message_only_as_a_dry_run() {
+        let build = |dry_run| ContextBuild { model: "m".into(), context: open_context(None, Message::assistant("The plan:").opened()), dry_run, class: None, priority: None };
+        build(Some(true)).validate().unwrap();
+        for dry_run in [None, Some(false)] {
+            let e = build(dry_run).validate().unwrap_err();
+            assert_eq!(e.param.as_deref(), Some("continue"), "{dry_run:?}");
+            assert!(e.message.contains("dry_run: true"), "{}", e.message);
+        }
+        let closed = ContextBuild { context: open_context(None, Message::assistant("done")), ..build(None) };
+        closed.validate().unwrap();
+        assert!(ContextBuild { context: Context::default(), ..build(Some(true)) }.validate().is_err());
     }
 
     #[test]

@@ -106,7 +106,7 @@ impl DecisionRequest {
             return Err(Invalid::param("contexts", format!("at most {} contexts", MAX_CONTEXTS)));
         }
         for (i, c) in self.contexts.iter().enumerate() {
-            c.check().map_err(|e| Invalid::param("contexts", format!("contexts[{}]: {}", i, e.message)))?;
+            c.check_read(i, "a decision reads")?;
         }
         let queued = self.contexts.iter().filter(|c| queue_call(c).is_some()).count();
         if queued > 0 && queued != self.contexts.len() {
@@ -396,6 +396,17 @@ mod tests {
         assert_eq!(param(DecisionRequest { ask: Some(vec![]), ..req() }), "ask");
         assert_eq!(param(DecisionRequest { ask: Some(vec!["q".into(), "q".into()]), ..req() }), "ask");
         DecisionRequest { ask: Some(vec!["q".into()]), ..req() }.validate().unwrap();
+    }
+
+    #[test]
+    fn decisions_never_read_an_open_message() {
+        let open = Context { messages: vec![Message::user("u"), Message::assistant("The plan:").opened()], ..Default::default() };
+        let e = DecisionRequest { contexts: vec![chat(), open], ..req() }.validate().unwrap_err();
+        assert_eq!((e.param.as_deref(), e.message.as_str()), (Some("continue"), "contexts[1]: a decision reads no open message; send continue: true only to a generation"));
+        let broken = Context { messages: vec![Message::user("u").opened()], ..Default::default() };
+        assert_eq!(param(DecisionRequest { contexts: vec![broken], ..req() }), "continue");
+        let closed = Context { messages: vec![Message { open: false, ..Message::user("u") }], ..Default::default() };
+        DecisionRequest { contexts: vec![closed], ..req() }.validate().unwrap();
     }
 
     #[test]

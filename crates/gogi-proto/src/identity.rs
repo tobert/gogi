@@ -24,6 +24,10 @@ pub enum Capability {
     Tiers,
     /// Generations accept `decisions` that ride with them.
     Ride,
+    /// Generations accept an open last message, `continue: true`.
+    Continuation,
+    /// Reserved for a later top-level `infill` member of a generation. No server declares it yet.
+    Infill,
     /// Requests are scheduled by `class` and `priority`. Every client is trusted with
     /// `priority`.
     Classes,
@@ -177,6 +181,13 @@ mod tests {
         for bad in ["gpt-2", ""] {
             assert_eq!(two.route(bad).unwrap_err().param.as_deref(), Some("model"), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn continuation_and_infill_are_capabilities() {
+        let c: Vec<Capability> = serde_json::from_str(r#"["continuation","infill"]"#).unwrap();
+        assert_eq!(c, [Capability::Continuation, Capability::Infill]);
+        assert_eq!(serde_json::to_string(&c).unwrap(), r#"["continuation","infill"]"#);
     }
 
     #[test]

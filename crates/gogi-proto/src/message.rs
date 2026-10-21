@@ -57,11 +57,24 @@ pub struct Message {
     pub is_error: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub snap: bool,
+    /// `continue: true` opens the last message: an assistant message whose text the model
+    /// continues in a generation. `continue` is a Rust keyword, so the field is `open`.
+    #[serde(rename = "continue", default, skip_serializing_if = "is_false", deserialize_with = "continue_flag")]
+    pub open: bool,
+}
+
+/// Decodes `continue`, which is `true` or `false`. Any other value is an error that names
+/// `continue`.
+fn continue_flag<'de, D: serde::Deserializer<'de>>(de: D) -> Result<bool, D::Error> {
+    match Value::deserialize(de)? {
+        Value::Bool(b) => Ok(b),
+        other => Err(serde::de::Error::custom(format!("invalid field `continue`: continue is true or false, not {}; true opens the last message", other))),
+    }
 }
 
 impl Message {
     fn text(role: Role, content: impl Into<String>) -> Self {
-        Message { role, content: Some(content.into()), reasoning: None, tool_calls: Vec::new(), tool_call_id: None, is_error: false, snap: false }
+        Message { role, content: Some(content.into()), reasoning: None, tool_calls: Vec::new(), tool_call_id: None, is_error: false, snap: false, open: false }
     }
 
     pub fn system(content: impl Into<String>) -> Self {
@@ -90,6 +103,11 @@ impl Message {
     pub fn snapped(self) -> Self {
         Message { snap: true, ..self }
     }
+
+    /// The same message, open: `continue: true`.
+    pub fn opened(self) -> Self {
+        Message { open: true, ..self }
+    }
 }
 
 /// A call or tool-call id. Printable text of 1 to 256 bytes: the template matches ids and
@@ -101,7 +119,8 @@ pub fn is_id(s: &str) -> bool {
 /// Checks the rules for messages, and that each tool message names a call of the assistant
 /// message before its run of tool messages. `before` is the messages that precede `messages`,
 /// such as a context's messages when checking a generation's reply. A system message after the
-/// first is system text at that point in the context.
+/// first is system text at that point in the context. Only the last of `messages` may be open
+/// (`continue: true`); a broken rule of an open message is an error naming `continue`.
 pub fn validate(before: &[Message], messages: &[Message]) -> Result<(), Invalid> {
     let mut calls: Vec<&str> =
         before.iter().rev().find(|m| m.role == Role::Assistant).map(|m| m.tool_calls.iter().map(|c| c.id.as_str()).collect()).unwrap_or_default();
@@ -129,10 +148,31 @@ pub fn validate(before: &[Message], messages: &[Message]) -> Result<(), Invalid>
         if m.is_error && m.role != Role::Tool {
             return bad("only a tool message carries is_error");
         }
+        if m.open {
+            check_open(m, i + 1 == messages.len()).map_err(|s| Invalid::param("continue", format!("messages[{}]: {}", i, s)))?;
+        }
         if m.role == Role::Assistant {
             calls = m.tool_calls.iter().map(|c| c.id.as_str()).collect();
         }
         prev_role = m.role.as_str();
+    }
+    Ok(())
+}
+
+/// Checks an open message: the last message, an assistant message, no `tool_calls`, and
+/// `reasoning` or `content` that is not empty.
+fn check_open(m: &Message, last: bool) -> Result<(), &'static str> {
+    if !last {
+        return Err("only the last message may carry continue: true");
+    }
+    if m.role != Role::Assistant {
+        return Err("only an assistant message carries continue: true");
+    }
+    if !m.tool_calls.is_empty() {
+        return Err("an open message carries no tool_calls; send the reply back closed, or drop the call");
+    }
+    if m.reasoning.as_deref().unwrap_or("").is_empty() && m.content.as_deref().unwrap_or("").is_empty() {
+        return Err("an open message needs reasoning or content that is not empty");
     }
     Ok(())
 }
@@ -237,6 +277,47 @@ mod tests {
         assert!(serde_json::from_value::<Message>(json!({"role": "wizard", "content": "x"})).is_err());
         assert!(serde_json::from_value::<ToolCall>(json!({"id": "a", "name": "n", "input": "x"})).is_err());
         assert!(serde_json::from_value::<ToolCall>(json!({"id": "a", "name": "n", "arguments": {}})).is_err());
+    }
+
+    fn refused_open(messages: &[Message]) -> String {
+        let e = validate(&[], messages).expect_err("should be refused");
+        assert_eq!(e.param.as_deref(), Some("continue"), "{}", e.message);
+        e.message
+    }
+
+    #[test]
+    fn continue_opens_only_a_last_assistant_message_with_text_and_no_calls() {
+        validate(&[], &[Message::user("u"), Message::assistant("The plan:").opened()]).unwrap();
+        let thinking = Message { reasoning: Some("I should".into()), content: None, ..Message::assistant("").opened() };
+        validate(&[], &[Message::user("u"), thinking]).unwrap();
+        let closed_thinking = Message { reasoning: Some("I should".into()), ..Message::assistant("").opened() };
+        validate(&[], &[Message::user("u"), closed_thinking]).unwrap();
+        assert_eq!(refused_open(&[Message::user("u"), Message::assistant("a").opened(), Message::user("v")]), "messages[1]: only the last message may carry continue: true");
+        assert_eq!(refused_open(&[Message::user("u").opened()]), "messages[0]: only an assistant message carries continue: true");
+        assert_eq!(refused_open(&[Message::user("u"), asks(&["a"]).opened()]), "messages[1]: an open message carries no tool_calls; send the reply back closed, or drop the call");
+        let empty = "messages[1]: an open message needs reasoning or content that is not empty";
+        assert_eq!(refused_open(&[Message::user("u"), Message::assistant("").opened()]), empty);
+        assert_eq!(refused_open(&[Message::user("u"), Message { content: None, reasoning: Some(String::new()), ..Message::assistant("").opened() }]), empty);
+    }
+
+    #[test]
+    fn continue_false_is_allowed_on_any_message_and_changes_nothing() {
+        let v = json!([{"role": "user", "content": "u", "continue": false}, {"role": "assistant", "content": "a", "continue": false}, {"role": "user", "content": "v"}]);
+        let m: Vec<Message> = serde_json::from_value(v).unwrap();
+        validate(&[], &m).unwrap();
+        assert_eq!(m, [Message::user("u"), Message::assistant("a"), Message::user("v")]);
+        assert_eq!(serde_json::to_value(&m[1]).unwrap(), json!({"role": "assistant", "content": "a"}));
+    }
+
+    #[test]
+    fn continue_is_a_boolean_and_any_other_value_names_continue() {
+        let m: Message = serde_json::from_value(json!({"role": "assistant", "content": "a", "continue": true})).unwrap();
+        assert!(m.open);
+        assert_eq!(serde_json::to_value(&m).unwrap(), json!({"role": "assistant", "content": "a", "continue": true}));
+        for bad in [json!("yes"), json!(1), json!(null), json!({"suffix": "x"})] {
+            let e = serde_json::from_value::<Message>(json!({"role": "assistant", "content": "a", "continue": bad})).unwrap_err().to_string();
+            assert!(e.starts_with("invalid field `continue`"), "{e}");
+        }
     }
 
     #[test]

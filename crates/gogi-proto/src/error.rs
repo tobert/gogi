@@ -23,6 +23,13 @@ impl Invalid {
     }
 }
 
+/// The member a body's decode error names, for `error.param`: from serde's "missing field `x`"
+/// and "unknown field `x`", and from "invalid field `x`", which this crate's own decoders write,
+/// such as for a `continue` that is not a boolean.
+pub fn decode_param(text: &str) -> Option<String> {
+    ["missing field `", "unknown field `", "invalid field `"].iter().find_map(|p| text.split_once(p).and_then(|(_, rest)| rest.split_once('`')).map(|(f, _)| f.to_string()))
+}
+
 /// The `type` of an error body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -141,6 +148,20 @@ mod tests {
         let e: ErrorBody = serde_json::from_value(v.clone()).unwrap();
         assert_eq!((e.error.model.as_deref(), e.error.status), (Some("qwen-3.8-mutant-636"), Some(ModelStatus::Loading)));
         assert_eq!(serde_json::to_value(&e).unwrap(), v);
+    }
+
+    #[test]
+    fn a_decode_error_names_the_member_at_fault() {
+        for (text, want) in [
+            ("missing field `model` at line 1 column 2", Some("model")),
+            ("unknown field `persist`, expected one of `model`, `context` at line 1 column 9", Some("persist")),
+            ("invalid field `continue`: continue is true or false, not \"yes\"", Some("continue")),
+            ("expected value at line 1 column 1", None),
+        ] {
+            assert_eq!(decode_param(text).as_deref(), want, "{text}");
+        }
+        let e = serde_json::from_value::<crate::Message>(json!({"role": "assistant", "content": "a", "continue": "yes"})).unwrap_err();
+        assert_eq!(decode_param(&e.to_string()).as_deref(), Some("continue"));
     }
 
     #[test]

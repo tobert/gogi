@@ -257,6 +257,7 @@ impl GenerationDone {
             tool_call_id: None,
             is_error: false,
             snap: false,
+            open: false,
         })
     }
 }
