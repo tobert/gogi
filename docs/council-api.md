@@ -75,7 +75,7 @@ thing, and each thing has one term.
 | generation | A request that samples a reply after a context. |
 | prompt | The rendered context a generation starts from, with the template's start of the reply and a continuation's open text. `usage.prompt` and `context_full` count it. |
 | riding decision | A spec's questions asked during a generation, `before` or `after` the reply. Capability `ride`. |
-| reply | The assistant message a generation writes. |
+| reply | The assistant message a generation writes, with a continuation's open text at its start. |
 | continuation | A generation whose last message is an open assistant message: the model goes on from the open text. Capability `continuation`. |
 | open text | The `reasoning` and `content` of the open message, which the client wrote and the model continues. |
 | response | The HTTP body a server returns for any request. |
@@ -554,7 +554,7 @@ POST /council/v2/generations
   | `end_turn` | The model ended its turn with no tool call. |
   | `tool_use` | The model ended its turn after one or more tool calls. |
   | `max_tokens` | The reply reached `max_tokens`: `usage.completion` is `max_tokens`. |
-  | `context_full` | The prompt and the reply reached `context_tokens`. |
+  | `context_full` | The prompt and the sampled tokens reached `context_tokens`. |
 
 - **`usage`** counts the prompt in `prompt`, `kept`, and `fed`, and the
   reply in `completion`, with its thinking also in `reasoning`.
@@ -571,7 +571,8 @@ POST /council/v2/generations
   renders, when the server holds it. The server holds it when that costs at
   most a few tokens of feeding, so the next request, which sends the reply
   and what follows, starts there. Otherwise `head` is `null` and the next
-  request starts from the last boundary.
+  request starts from the last boundary. A reply that ends with
+  `max_tokens` has the head of its open rendering (see Continuations).
 - **`stats`** in `done`, when a server reports them, describe how the
   sampled tokens looked to the model: for the reply's `reasoning` and
   `content`, and for each tool call as its own `stats`,
@@ -617,7 +618,7 @@ data: {"model": "gemma-4-26b-a4b", "content": "…", "finish": "end_turn", …}
 
 | Event | `data` |
 |---|---|
-| `token` | One sampled token: its `id`; `piece`, the text it adds; `phase`, `reasoning`, `content`, or `call`; `p`, its untempered probability; `h`, the entropy in nats of the distribution it came from; `n`, the reply's tokens so far, this one included; and `tps`, reply tokens per second so far, when the server reports it. |
+| `token` | One sampled token: its `id`; `piece`, the text it adds; `phase`, `reasoning`, `content`, or `call`; `p`, its untempered probability; `h`, the entropy in nats of the distribution it came from; `n`, the reply's sampled tokens so far, this one included, without a continuation's open text; and `tps`, reply tokens per second so far, when the server reports it. |
 | `ping` | `{}`. A server may send it at any time, such as while it feeds a long prompt. |
 | `done` | The reply, as above. The last event of a stream that succeeds. |
 | `error` | An error body, as a status response's: `{error, request_id}`. The last event of a stream that fails; no `done` follows it. |
@@ -646,7 +647,8 @@ data: {"model": "gemma-4-26b-a4b", "content": "…", "finish": "end_turn", …}
 
 Proposed 2026-10-21. Amy agreed on the name, the shape, `done`, the
 tokenizer seam, the riding `before`, and the reserved `suffix`, and then
-on each rule below.
+on each rule. A kaibo review (deepseek) then changed several rules, and
+Amy has not read those changes yet.
 
 A continuation lets a client write the start of a reply and have the
 model go on from it. Use it to:
@@ -683,31 +685,43 @@ POST /council/v2/generations
 - **`continue: true` opens the last message.** Only the last message may
   carry it, and only an assistant message. It carries `reasoning`,
   `content`, or both, and at least one of them is not empty. It carries no
-  `tool_calls`. Any other use is a `400` naming `continue`.
+  `tool_calls`. Any other use is a `400` naming `continue`. `continue:
+  false` is allowed on any message and changes nothing.
 - **Only generations read an open message.** A context with `continue` in
   `POST /contexts`, `/decisions`, or `/reads` is a `400` naming `continue`.
 - **The server renders the open message without its end.** The template
   renders it as it renders a reply, up to the open text, and adds no end of
-  turn. With `content`, the thinking is closed and the model continues the
-  content. With only `reasoning`, the model continues inside its thinking.
-  `reasoning` in an open message with `thinking: false` is a `400` naming
-  `continue`.
+  turn. A `content` member closes the thinking, even when it is empty, and
+  the model continues the content. Thus a reply cut just after its thinking
+  resumes with `content: ""`. Without a `content` member, the model
+  continues inside its thinking.
+- **An open message with `reasoning` needs `thinking: true`** in the
+  context. With `thinking` false or absent, it is a `400` naming
+  `continue`, so a request does not depend on a server's default.
+- **`snap: true` on the open message is allowed.** The end of a context is
+  always a boundary, so the mark changes nothing.
 - **The open text is content, never control** (rule 2). Text in it that
   spells a template token, such as `</think>` or the start of a call, is
-  text. The server reports each hit in `signals.control_text` as for any
-  message.
-- **The open text must tokenize on its own.** The server tokenizes the
-  rendering with and without the open text. When the open text's first
-  characters merge with the token before them, the request is a `400`
-  naming `continue`, and the message names the characters. A newline after
-  the template's last newline is a common case. The client starts the open
-  text with a character that does not merge.
+  text to the model. As in any generation, the server reports no hits.
+- **Each open field must tokenize on its own.** For each open field, the
+  server renders the context up to the start of that field, and then with
+  the field. The shorter rendering's tokens must begin the longer one's.
+  This is the check of mk's `prefill`. Otherwise the request is a `400`
+  naming `continue`, and the message names the field and the characters
+  that merge. A newline after the template's last newline is a common case.
+  The client starts the field with a character that does not merge.
 - **The model continues after the open text's last token.** The server does
   not mend a last token that ends inside a word (see Open questions).
-- **`done` is the whole message,** the open text and the new text joined:
-  `done.content` starts with the open message's `content`, and
-  `done.reasoning` with its `reasoning`. The client puts `done` in place of
-  its open message. The server parses tool calls over the whole message.
+- **The server parses only the sampled tokens.** The parse starts in the
+  phase that the open message sets: `reasoning` without a `content` member,
+  else `content`. A `</think>` written in the open text never closes the
+  thinking. The open text holds no calls, so a reply cut inside a tool call
+  cannot be continued. The client sends it back closed or drops the call.
+- **`done` is the whole message,** the open text as sent and the new text
+  joined: `done.content` starts with the open message's `content`, and
+  `done.reasoning` with its `reasoning`. The server trims nothing at the
+  seam, and it trims the ends only as for any reply. The client puts
+  `done` in place of its open message.
 - **The open text is prompt, not reply.** `usage.prompt`, `kept`, and `fed`
   count its tokens; `usage.completion` and `usage.reasoning` count only the
   sampled tokens. `max_tokens` bounds the sampled tokens, and `stats`
@@ -716,18 +730,25 @@ POST /council/v2/generations
   first sampled token. The pieces join to `done`'s text after the open
   text.
 - **A riding `before` reads just before the first sampled token,** after
-  the open text, as it reads after the prompt in any generation. It answers
-  whether the reply so far is on track. `after` reads after the whole
-  message.
+  the open text. It answers whether the reply so far is on track. To ask,
+  the server ends the open message as the template ends a message, and
+  then adds the spec's system message. It discards these tokens, as for
+  any riding decision. How it ends the message is part of `template`.
+  `after` reads after the whole message.
 - **A cut reply resumes from its head.** When a reply ends with
-  `max_tokens`, the server holds `head` as the reply renders open, when it
-  can. A continuation that sends that reply back open then feeds only the
-  last sampled token. A client that instead sends the reply closed also
-  starts there, because the open rendering is a prefix of the closed one.
+  `max_tokens`, `head` is the snapshot of the reply as an open message
+  renders it, when the server holds it. `snapshots` lists it last. A
+  reply that ends with `max_tokens` keeps its trailing whitespace in
+  `done`, so the client can send it back exactly. A continuation that sends
+  it back open then feeds only the last sampled token. A client that sends
+  it back closed starts there too, when the closed rendering's tokens begin
+  with the open rendering's. Otherwise a build starts from the last
+  boundary, as always.
 - **`continue` is reserved as an object for infill.** `"continue":
   {"suffix": "…"}` asks the model to write the text between the open text
-  and the suffix. This contract does not define infill yet. Without
-  capability `infill`, an object is a `400` naming `continue`.
+  and the suffix. This contract does not define infill yet, nor how the
+  suffix is tokenized. No server declares capability `infill` yet, so an
+  object is a `400` naming `continue`.
 - **A server declares capability `continuation`.** Without it, an open
   message is a `400` naming `continue`.
 
@@ -836,6 +857,7 @@ specs, which every served model shares.
 | `think` | served model | Decisions accept `think` with `tokens` above 0. |
 | `ride` | served model | Generations accept `decisions`. |
 | `continuation` | served model | Generations accept an open last message, `continue: true`. |
+| `infill` | served model | Reserved: `continue` as an object, with a `suffix`. No server declares it yet. |
 | `dry_run` | served model | Builds accept `dry_run`. |
 | `leave_one_out` | served model | Pooled answers carry `leave_one_out`. |
 | `describe` | served model | Specs may hold `text` questions. |
