@@ -234,6 +234,11 @@ pub struct GenerationDone {
     /// The seed the server sampled with: the request's, or one it chose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
+    /// For a reply that ends with `max_tokens`: the phase its next token would have. A client
+    /// sends the reply back open without a `content` member for `reasoning`, and with one, even
+    /// when it is empty, for `content`. A reply cut in a `call` cannot be continued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<Phase>,
 }
 
 impl GenerationDone {
@@ -259,6 +264,37 @@ impl GenerationDone {
             snap: false,
             open: false,
         })
+    }
+
+    /// A reply that ended with `max_tokens` as the open message a continuation sends back:
+    /// `content` is present when `phase` is `content`, even when it is empty, and absent when
+    /// `phase` is `reasoning`. `None` for any other reply, a reply without `phase` or with tool
+    /// calls, and a reply with no text.
+    pub fn as_open_message(&self) -> Option<crate::message::Message> {
+        if self.finish != Finish::MaxTokens || !self.tool_calls.is_empty() {
+            return None;
+        }
+        let content = match self.phase? {
+            Phase::Content => Some(self.content.clone()),
+            Phase::Reasoning if self.content.is_empty() => None,
+            _ => return None,
+        };
+        if self.reasoning.is_empty() && self.content.is_empty() {
+            return None;
+        }
+        Some(crate::message::Message { content, reasoning: Some(self.reasoning.clone()).filter(|r| !r.is_empty()), ..crate::message::Message::assistant("").opened() })
+    }
+
+    /// Checks that a continuation's reply is the whole message: `content` starts with the open
+    /// message's `content` and `reasoning` with its `reasoning`.
+    pub fn continues(&self, open: &crate::message::Message) -> Result<(), String> {
+        for (name, done, sent) in [("reasoning", &self.reasoning, &open.reasoning), ("content", &self.content, &open.content)] {
+            let sent = sent.as_deref().unwrap_or("");
+            if !done.starts_with(sent) {
+                return Err(format!("done.{} {:?} does not start with the open {} {:?}", name, done, name, sent));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -286,7 +322,7 @@ pub struct TokenEvent {
     pub p: f64,
     /// The entropy, in nats, of the distribution it came from.
     pub h: f64,
-    /// The reply's tokens so far, this one included.
+    /// The reply's sampled tokens so far, this one included, without a continuation's open text.
     pub n: u64,
     /// Reply tokens per second so far.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -308,10 +344,23 @@ pub fn trim_edges(s: &str) -> &str {
 /// `content` pieces `done.content`, each up to edge whitespace at either end. `call` pieces are
 /// display text only; the calls are `done.tool_calls`.
 pub fn check_pieces(tokens: &[TokenEvent], done: &GenerationDone) -> Result<(), String> {
-    for (phase, name, text) in [(Phase::Reasoning, "reasoning", &done.reasoning), (Phase::Content, "content", &done.content)] {
+    join_pieces(tokens, &done.reasoning, &done.content, "")
+}
+
+/// Checks a continuation's stream: the pieces join to `done`'s text after the open text of
+/// `open`, each part up to edge whitespace at either end, and `done` starts with the open text.
+pub fn check_pieces_after(tokens: &[TokenEvent], done: &GenerationDone, open: &crate::message::Message) -> Result<(), String> {
+    done.continues(open)?;
+    let after = |text: &str, sent: &Option<String>| text[sent.as_deref().unwrap_or("").len()..].to_string();
+    join_pieces(tokens, &after(&done.reasoning, &open.reasoning), &after(&done.content, &open.content), " after the open text")
+}
+
+/// Checks that each part's pieces join to its text; `where_` follows `done.<part>` in an error.
+fn join_pieces(tokens: &[TokenEvent], reasoning: &str, content: &str, where_: &str) -> Result<(), String> {
+    for (phase, name, text) in [(Phase::Reasoning, "reasoning", reasoning), (Phase::Content, "content", content)] {
         let joined: String = tokens.iter().filter(|t| t.phase == phase).map(|t| t.piece.as_str()).collect();
         if trim_edges(&joined) != trim_edges(text) {
-            return Err(format!("the {} pieces join to {:?}, but done.{} is {:?}", name, joined, name, text));
+            return Err(format!("the {} pieces join to {:?}, but done.{}{} is {:?}", name, joined, name, where_, text));
         }
     }
     Ok(())
@@ -367,6 +416,7 @@ impl StreamEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message::Message;
     use serde_json::json;
 
     fn snap(p: &str) -> String {
@@ -436,6 +486,57 @@ mod tests {
         let d = StreamEvent::parse("done", &done().to_string()).unwrap().unwrap();
         assert_eq!(StreamEvent::parse(d.name(), &d.data()).unwrap(), Some(d));
         assert!(StreamEvent::parse("token", "{}").is_err());
+    }
+
+    fn cut(phase: Option<&str>, reasoning: &str, content: &str) -> GenerationDone {
+        let mut v = done();
+        v["finish"] = json!("max_tokens");
+        v["tool_calls"] = json!([]);
+        v["reasoning"] = json!(reasoning);
+        v["content"] = json!(content);
+        if let Some(p) = phase {
+            v["phase"] = json!(p);
+        }
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn a_cut_reply_names_its_phase_and_goes_back_open_by_it() {
+        let d = cut(Some("content"), "plan", "");
+        assert_eq!(d.phase, Some(Phase::Content));
+        assert_eq!(serde_json::to_value(&d).unwrap()["phase"], json!("content"));
+        let m = d.as_open_message().unwrap();
+        assert_eq!((m.reasoning.as_deref(), m.content.as_deref(), m.open), (Some("plan"), Some(""), true), "a reply cut just after its thinking resumes with content \"\"");
+        let m = cut(Some("reasoning"), "pla", "").as_open_message().unwrap();
+        assert_eq!((m.reasoning.as_deref(), m.content.as_deref()), (Some("pla"), None), "a reply cut inside its thinking resumes without content");
+        let m = cut(Some("content"), "", "fn main() ").as_open_message().unwrap();
+        assert_eq!((m.reasoning, m.content.as_deref()), (None, Some("fn main() ")), "the trailing whitespace stays");
+        assert_eq!(cut(Some("call"), "plan", "").as_open_message(), None, "a reply cut inside a call cannot be continued");
+        assert_eq!(cut(None, "plan", "x").as_open_message(), None, "without phase the open form is not known");
+        assert_eq!(cut(Some("reasoning"), "", "").as_open_message(), None, "an open message needs text");
+        let mut ended = cut(Some("content"), "plan", "x");
+        ended.finish = Finish::EndTurn;
+        assert_eq!(ended.as_open_message(), None);
+        let v = serde_json::to_value(cut(None, "", "x")).unwrap();
+        assert!(v.get("phase").is_none(), "{v}");
+    }
+
+    #[test]
+    fn a_continuations_done_starts_with_the_open_text_and_its_pieces_join_to_the_rest() {
+        let open = Message { reasoning: Some("plan".into()), ..Message::assistant("fn ").opened() };
+        let tok = |piece: &str, phase: Phase| TokenEvent { id: 1, piece: piece.into(), phase, p: 1.0, h: 0.0, n: 1, tps: None };
+        let mut d: GenerationDone = serde_json::from_value(done()).unwrap();
+        (d.reasoning, d.content) = ("plan".into(), "fn main() {}".into());
+        d.continues(&open).unwrap();
+        check_pieces_after(&[tok("main", Phase::Content), tok("() {}", Phase::Content)], &d, &open).unwrap();
+        assert!(check_pieces(&[tok("main", Phase::Content), tok("() {}", Phase::Content)], &d).is_err(), "without the open text the pieces fall short");
+        let shown = check_pieces_after(&[tok("fn main() {}", Phase::Content)], &d, &open).unwrap_err();
+        assert!(shown.starts_with("the content pieces join"), "{shown}");
+        d.content = "fnmain".into();
+        assert_eq!(d.continues(&open).unwrap_err(), r#"done.content "fnmain" does not start with the open content "fn ""#);
+        assert!(check_pieces_after(&[], &d, &open).is_err());
+        (d.reasoning, d.content) = ("pla".into(), "fn x".into());
+        assert!(d.continues(&open).unwrap_err().starts_with("done.reasoning"));
     }
 
     #[test]

@@ -82,7 +82,7 @@ thing, and each thing has one term.
 | request id | The id a server gives one request, sent in the `request-id` header of its response and in every error body. |
 | trace context | The client's W3C `traceparent` header, which joins the server's spans to the client's trace. It travels only as a header. |
 | usage | The token counts a response reports: `prompt`, `kept`, `fed`, `completion`, and `reasoning`. |
-| phase | The part of a reply a streamed token belongs to: `reasoning`, `content`, or `call`. |
+| phase | The part of a reply a token belongs to: `reasoning`, `content`, or `call`. |
 | identity | The model, weights, tokenizer, template, and engine that produced a number. Each served model has one. A threshold fitted under one identity does not carry to another. |
 | served model | One identity a server serves, with its own limits, capabilities, and status. A request names it with `model`. |
 | status | Whether a served model takes requests now: `ready`, `loading`, `draining`, or `unloaded`. |
@@ -546,7 +546,9 @@ POST /council/v2/generations
   default.
 - **`done` is the reply.** It has `model`, the reply's `content`,
   `reasoning`, and `tool_calls`, `finish`, `usage`, `head`, the context's
-  `snapshots`, and `seed`. Without `stream`, `done` is the JSON response.
+  `snapshots`, and `seed`. A reply that ends with `max_tokens` also has
+  `phase`, the phase its next token would have (see Continuations).
+  Without `stream`, `done` is the JSON response.
 - **`finish`** says why the reply ended:
 
   | `finish` | When |
@@ -701,8 +703,9 @@ POST /council/v2/generations
   resumes with `content: ""`. Without a `content` member, the model
   continues inside its thinking.
 - **An open message with `reasoning` needs `thinking: true`** in the
-  context. With `thinking` false or absent, it is a `400` naming
-  `continue`, so a request does not depend on a server's default.
+  context, when the `reasoning` is not empty. With `thinking` false or
+  absent, it is a `400` naming `continue`, so a request does not depend on
+  a server's default.
 - **`snap: true` on the open message is allowed.** The end of a context is
   always a boundary, so the mark changes nothing.
 - **The open text is content, never control** (rule 2). Text in it that
@@ -744,7 +747,11 @@ POST /council/v2/generations
   `max_tokens`, `head` is the snapshot of the reply as an open message
   renders it, when the server holds it. `snapshots` lists it last. A
   reply that ends with `max_tokens` keeps its trailing whitespace in
-  `done`, so the client can send it back exactly. A continuation that sends
+  `done`, so the client can send it back exactly. Its `phase` says how:
+  `content` sends it back with a `content` member, even when it is empty,
+  and `reasoning` without one. A reply whose `phase` is `call` cannot be
+  continued. `content` and `reasoning` alone cannot tell a reply cut just
+  after its thinking from one cut inside it. A continuation that sends
   it back open then feeds only the last sampled token. A client that sends
   it back closed starts there too, when the closed rendering's tokens begin
   with the open rendering's. Otherwise a build starts from the last
