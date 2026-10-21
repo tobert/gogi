@@ -647,8 +647,9 @@ data: {"model": "gemma-4-26b-a4b", "content": "…", "finish": "end_turn", …}
 
 Proposed 2026-10-21. Amy agreed on the name, the shape, `done`, the
 tokenizer seam, the riding `before`, and the reserved `suffix`, and then
-on each rule. A kaibo review (deepseek) then changed several rules, and
-Amy has not read those changes yet.
+on each rule. A kaibo review (deepseek) then changed several rules. Amy
+then chose a later top-level `infill` field and dry runs of an open
+message, and agreed to merge the section.
 
 A continuation lets a client write the start of a reply and have the
 model go on from it. Use it to:
@@ -688,7 +689,11 @@ POST /council/v2/generations
   `tool_calls`. Any other use is a `400` naming `continue`. `continue:
   false` is allowed on any message and changes nothing.
 - **Only generations read an open message.** A context with `continue` in
-  `POST /contexts`, `/decisions`, or `/reads` is a `400` naming `continue`.
+  `/decisions` or `/reads` is a `400` naming `continue`. `POST /contexts`
+  accepts it only with `dry_run: true`, so a client can test a
+  continuation before it sends one. The dry run renders the open message,
+  makes the seam check below, and reports `usage` and `from`. Without
+  `dry_run`, it is a `400` naming `continue`.
 - **The server renders the open message without its end.** The template
   renders it as it renders a reply, up to the open text, and adds no end of
   turn. A `content` member closes the thinking, even when it is empty, and
@@ -744,11 +749,11 @@ POST /council/v2/generations
   it back closed starts there too, when the closed rendering's tokens begin
   with the open rendering's. Otherwise a build starts from the last
   boundary, as always.
-- **`continue` is reserved as an object for infill.** `"continue":
-  {"suffix": "…"}` asks the model to write the text between the open text
-  and the suffix. This contract does not define infill yet, nor how the
-  suffix is tokenized. No server declares capability `infill` yet, so an
-  object is a `400` naming `continue`.
+- **`continue` is a boolean.** Any other value is a `400` naming
+  `continue`. Infill, the text between a prefix and a suffix, gets its own
+  top-level member of a generation later (see Open questions). It is not
+  part of a message, because a fill-in-the-middle suffix is usually
+  control tokens, which rule 2 does not allow in a message.
 - **A server declares capability `continuation`.** Without it, an open
   message is a `400` naming `continue`.
 
@@ -857,7 +862,7 @@ specs, which every served model shares.
 | `think` | served model | Decisions accept `think` with `tokens` above 0. |
 | `ride` | served model | Generations accept `decisions`. |
 | `continuation` | served model | Generations accept an open last message, `continue: true`. |
-| `infill` | served model | Reserved: `continue` as an object, with a `suffix`. No server declares it yet. |
+| `infill` | served model | Reserved for a later top-level `infill` member of a generation. No server declares it yet. |
 | `dry_run` | served model | Builds accept `dry_run`. |
 | `leave_one_out` | served model | Pooled answers carry `leave_one_out`. |
 | `describe` | served model | Specs may hold `text` questions. |
@@ -911,12 +916,14 @@ A server serves the model-specific rest under its own prefix and lists it in
 - **Tool-result size.** A tool result is written whole into a context,
   even when the context then has no room for another message. The client's
   preview and storage rules for large results are its own.
-- **Infill.** `continue: {"suffix"}` is reserved for text between a prefix
-  and a suffix, as code models with fill-in-the-middle tokens and diffusion
-  models write it. Infill is rarely a chat turn: it is a file's prefix and
-  suffix, closer to a raw generation than to a reply. A diffusion model
-  fills a span of a set length, so `max_tokens` and `finish` would need
-  new meanings. The section waits for a served model that can infill.
+- **Infill.** A later top-level `infill` member of a generation would ask
+  for text between a prefix and a suffix. Code models with
+  fill-in-the-middle tokens and diffusion models write such text. Its suffix
+  is control, like a raw read's suffix. Infill is rarely a chat turn: it is
+  a file's prefix and suffix, closer to a raw generation than to a reply. A
+  diffusion model fills a span of a set length, so `max_tokens` and `finish`
+  would need new meanings. The section waits for a served model that can
+  infill.
 - **Mending the last token.** An open text can end inside a word, such as
   `hel`. Its last token is then one the model would not have written there.
   The model can write `lo` oddly or not at all. A server could feed the open
