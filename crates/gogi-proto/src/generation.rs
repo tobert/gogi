@@ -344,22 +344,27 @@ pub fn trim_edges(s: &str) -> &str {
 /// `content` pieces `done.content`, each up to edge whitespace at either end. `call` pieces are
 /// display text only; the calls are `done.tool_calls`.
 pub fn check_pieces(tokens: &[TokenEvent], done: &GenerationDone) -> Result<(), String> {
-    join_pieces(tokens, &done.reasoning, &done.content, "")
+    join_pieces(tokens, [(&done.reasoning, false), (&done.content, false)], "")
 }
 
 /// Checks a continuation's stream: the pieces join to `done`'s text after the open text of
-/// `open`, each part up to edge whitespace at either end, and `done` starts with the open text.
+/// `open`, and `done` starts with the open text. Nothing is trimmed at the seam: a part the open
+/// message holds is compared up to edge whitespace at its end only, and any other part up to edge
+/// whitespace at either end, as in any reply.
 pub fn check_pieces_after(tokens: &[TokenEvent], done: &GenerationDone, open: &crate::message::Message) -> Result<(), String> {
     done.continues(open)?;
-    let after = |text: &str, sent: &Option<String>| text[sent.as_deref().unwrap_or("").len()..].to_string();
-    join_pieces(tokens, &after(&done.reasoning, &open.reasoning), &after(&done.content, &open.content), " after the open text")
+    let after = |text: &str, sent: &Option<String>| (text[sent.as_deref().unwrap_or("").len()..].to_string(), sent.is_some());
+    let (reasoning, content) = (after(&done.reasoning, &open.reasoning), after(&done.content, &open.content));
+    join_pieces(tokens, [(&reasoning.0, reasoning.1), (&content.0, content.1)], " after the open text")
 }
 
-/// Checks that each part's pieces join to its text; `where_` follows `done.<part>` in an error.
-fn join_pieces(tokens: &[TokenEvent], reasoning: &str, content: &str, where_: &str) -> Result<(), String> {
-    for (phase, name, text) in [(Phase::Reasoning, "reasoning", reasoning), (Phase::Content, "content", content)] {
+/// Checks that each part's pieces join to its text, `reasoning` then `content`, each with whether
+/// it starts at a seam, where nothing is trimmed. `where_` follows `done.<part>` in an error.
+fn join_pieces(tokens: &[TokenEvent], parts: [(&str, bool); 2], where_: &str) -> Result<(), String> {
+    for ((phase, name), (text, seam)) in [(Phase::Reasoning, "reasoning"), (Phase::Content, "content")].into_iter().zip(parts) {
         let joined: String = tokens.iter().filter(|t| t.phase == phase).map(|t| t.piece.as_str()).collect();
-        if trim_edges(&joined) != trim_edges(text) {
+        let trim = |s: &str| if seam { s.trim_end_matches(is_edge_space).to_string() } else { trim_edges(s).to_string() };
+        if trim(&joined) != trim(text) {
             return Err(format!("the {} pieces join to {:?}, but done.{}{} is {:?}", name, joined, name, where_, text));
         }
     }
@@ -539,6 +544,14 @@ mod tests {
         assert!(check_pieces_after(&[], &d, &open).is_err());
         (d.reasoning, d.content) = ("pla".into(), "fn x".into());
         assert!(d.continues(&open).unwrap_err().starts_with("done.reasoning"));
+        // Nothing is trimmed at the seam: a space the server added after the open text shows.
+        (d.reasoning, d.content) = ("plan".into(), "fn  main".into());
+        assert!(check_pieces_after(&[tok("main", Phase::Content)], &d, &open).is_err());
+        check_pieces_after(&[tok(" main\n", Phase::Content)], &d, &open).unwrap();
+        // A part the open message did not hold has no seam, so it is compared as in any reply.
+        let thought = Message { reasoning: Some("plan".into()), content: None, ..Message::assistant("").opened() };
+        (d.reasoning, d.content) = ("plan more".into(), "\nok".into());
+        check_pieces_after(&[tok(" more", Phase::Reasoning), tok("ok", Phase::Content)], &d, &thought).unwrap();
     }
 
     #[test]
