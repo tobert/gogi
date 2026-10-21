@@ -36,6 +36,24 @@ def test_context_rules():
         gogi.check_context({**ok, "queue": "nope"})
 
 
+def test_continue_opens_only_a_last_assistant_message():
+    u = {"role": "user", "content": "u"}
+    gogi.check_context({"thinking": True, "messages": [u, {"role": "assistant", "reasoning": "First I", "continue": True}]})
+    gogi.check_context({"messages": [{**u, "continue": False}, {"role": "assistant", "content": "Plan:", "continue": True}]})
+    for bad in [
+        [u, {"role": "assistant", "content": "a", "continue": True}, u],
+        [{**u, "continue": True}],
+        [u, {"role": "assistant", "content": "", "continue": True}],
+        [u, {"role": "assistant", "content": "a", "tool_calls": [{"id": "c0", "name": "shell", "input": {}}], "continue": True}],
+    ]:
+        with pytest.raises(ValueError, match="continue: true|open message"):
+            gogi.check_context({"messages": bad})
+    with pytest.raises(ValueError, match="needs thinking: true"):
+        gogi.check_context({"messages": [u, {"role": "assistant", "reasoning": "First I", "continue": True}]})
+    with pytest.raises(ValueError, match="invalid field `continue`"):
+        gogi.check_context({"messages": [u, {"role": "assistant", "content": "a", "continue": "yes"}]})
+
+
 def test_tools_calls_and_results_take_the_anthropic_shape():
     tool = {"name": "shell", "description": "Runs a command.", "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}}}
     call = {"role": "assistant", "tool_calls": [{"id": "c0", "name": "shell", "input": {"command": "ls"}}]}
