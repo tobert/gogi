@@ -86,12 +86,12 @@ fn unescape(s: &str) -> String {
     let mut out = Vec::new();
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' {
-            if let Some(v) = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok()) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
+        if b[i] == b'%'
+            && let Some(v) = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(v);
+            i += 3;
+            continue;
         }
         out.push(b[i]);
         i += 1;
@@ -564,6 +564,10 @@ struct Asked<'a> {
     chosen: Vec<Vec<usize>>,
 }
 
+/// One read of a decision: the head it read after, each asked question's option log
+/// probabilities, its index, and its `rendered_sha256`.
+type ReadOut = (Option<String>, Vec<Vec<f64>>, usize, String);
+
 fn decisions(store: &mut Store, body: &[u8]) -> Resp {
     let t0 = std::time::Instant::now();
     let req: DecisionRequest = match parse(body, "decision") {
@@ -574,10 +578,10 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
         Ok(m) => m,
         Err(r) => return r,
     };
-    if let Some(t) = &req.think {
-        if t.tokens > 0 {
-            return bad_param("think", "think above 0 tokens needs the think capability, which this model does not have");
-        }
+    if let Some(t) = &req.think
+        && t.tokens > 0
+    {
+        return bad_param("think", "think above 0 tokens needs the think capability, which this model does not have");
     }
     if let Err(e) = req.validate() {
         return invalid(e);
@@ -638,7 +642,7 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
     }
 
     // Each read: the context's head, then the answers' log probabilities by asked question.
-    let mut reads: Vec<(Option<String>, Vec<Vec<f64>>, usize, String)> = Vec::new();
+    let mut reads: Vec<ReadOut> = Vec::new();
     let mut usage = Usage::default();
     let contexts: Vec<Option<&Context>> = if req.contexts.is_empty() { vec![None] } else { req.contexts.iter().map(Some).collect() };
     for c in contexts {

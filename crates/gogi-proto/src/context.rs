@@ -83,10 +83,10 @@ impl Context {
                 return Err(Invalid::new(format!("tools[{}]: a tool needs a name no other tool has", i)));
             }
         }
-        if let Some(q) = &self.queue {
-            if !self.tool_names().contains(&q.as_str()) {
-                return Err(Invalid::new(format!("queue {} names no tool in tools", q)));
-            }
+        if let Some(q) = &self.queue
+            && !self.tool_names().contains(&q.as_str())
+        {
+            return Err(Invalid::new(format!("queue {} names no tool in tools", q)));
         }
         Ok(())
     }

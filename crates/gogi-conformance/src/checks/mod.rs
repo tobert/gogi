@@ -199,7 +199,7 @@ impl Suite {
                 l,
             );
             self.r.check(&format!("{}: decision_context_tokens is at most context_tokens", m.model), l.decision_context_tokens <= l.context_tokens, l);
-            self.r.check(&format!("{}: its status is one the contract names", m.model), m.status != ModelStatus::Unknown, &m.status);
+            self.r.check(&format!("{}: its status is one the contract names", m.model), m.status != ModelStatus::Unknown, m.status);
         }
         let caps: Vec<&Capability> = id.capabilities.iter().chain(id.models.iter().flat_map(|m| &m.capabilities)).collect();
         let unknown = caps.iter().filter(|c| ***c == Capability::Unknown).count();

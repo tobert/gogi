@@ -1,5 +1,8 @@
 //! Property-style checks of the pooling relations over seeded random reads, a differential
 //! check against mkviolet's own algorithm, and `verify` over responses built from the math.
+// The reference pooling follows mkviolet's algorithm line for line, its index loops and its
+// `!(x > 0.0)` included, so a difference from mkviolet is easy to see.
+#![allow(clippy::needless_range_loop, clippy::neg_cmp_op_on_partial_ord)]
 
 use gogi_proto::decision::{DecisionResponse, Expect, Pool, PoolMethod, PoolWeights};
 use gogi_proto::math::{self, Row, WeightSpec, argmax, verify};

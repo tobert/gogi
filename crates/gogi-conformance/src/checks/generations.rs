@@ -156,11 +156,11 @@ impl Suite {
         self.refused("a generation refuses an unknown member", "POST", "/council/v2/generations", Some(json!({"context": ctx, "max_tokens": 8, "from": {}})), 400);
 
         // A reply cut off by max_tokens says so.
-        if let Some(short) = self.generate("a generation of 1 token succeeds", &ctx, 1) {
-            if let Some(d) = self.decode::<GenerationDone>("a generation of 1 token decodes", &short) {
-                self.check_finish("a generation of 1 token", &d, 1);
-                self.r.check("a generation of 1 token ends at max_tokens or with its turn", d.usage.completion <= 1 && matches!(d.finish, Finish::MaxTokens | Finish::EndTurn | Finish::ToolUse), &short);
-            }
+        if let Some(short) = self.generate("a generation of 1 token succeeds", &ctx, 1)
+            && let Some(d) = self.decode::<GenerationDone>("a generation of 1 token decodes", &short)
+        {
+            self.check_finish("a generation of 1 token", &d, 1);
+            self.r.check("a generation of 1 token ends at max_tokens or with its turn", d.usage.completion <= 1 && matches!(d.finish, Finish::MaxTokens | Finish::EndTurn | Finish::ToolUse), &short);
         }
     }
 

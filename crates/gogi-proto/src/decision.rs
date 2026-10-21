@@ -122,7 +122,7 @@ impl DecisionRequest {
                 if v.len() != reads {
                     return Err(Invalid::param("pool.values", format!("{} values for {} reads", v.len(), reads)));
                 }
-                if v.iter().any(|x| !x.is_finite() || *x < 0.0) || !(v.iter().sum::<f64>() > 0.0) {
+                if v.iter().any(|x| !x.is_finite() || *x < 0.0) || v.iter().sum::<f64>().partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
                     return Err(Invalid::param("pool.values", "values must be finite, at least 0, and sum above 0"));
                 }
             }
