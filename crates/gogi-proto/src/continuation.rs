@@ -35,13 +35,14 @@ pub fn seams(open: &Message) -> Vec<Seam> {
 
 /// Checks that an open field tokenizes on its own: the tokens of the rendering before the field,
 /// `before`, begin the tokens of the rendering with it, `with`. Otherwise the error names
-/// `continue`, the field, and the characters that merge, which `text` gives for a run of tokens.
+/// `continue`, the field, the text of the last token before the field, and the text of the first
+/// token that differs, which `text` gives as characters for a run of tokens.
 pub fn check_seam(field: &str, before: &[u32], with: &[u32], text: impl Fn(&[u32]) -> String) -> Result<(), Invalid> {
     if with.starts_with(before) {
         return Ok(());
     }
     let i = before.iter().zip(with).take_while(|(a, b)| a == b).count();
-    let end = text(&before[i..]);
+    let end = text(&before[before.len().saturating_sub(1)..]);
     let merged = text(&with[i..with.len().min(i + 1)]);
     Err(Invalid::param(
         "continue",
@@ -54,7 +55,11 @@ mod tests {
     use super::*;
 
     fn text(tokens: &[u32]) -> String {
-        tokens.iter().map(|&t| if t == 300 { "\n\n".to_string() } else { char::from_u32(t).unwrap().to_string() }).collect()
+        tokens.iter().map(|&t| match t {
+            300 => "\n\n".to_string(),
+            301 => "B\n".to_string(),
+            _ => char::from_u32(t).unwrap().to_string(),
+        }).collect()
     }
 
     #[test]
@@ -65,6 +70,10 @@ mod tests {
         assert_eq!(e.param.as_deref(), Some("continue"));
         assert_eq!(e.message, r#"nothing ran: the open content does not tokenize on its own: the text before it ends with "\n", which merges with its start into "\n\n"; start the content with a character that does not merge"#);
         assert!(check_seam("reasoning", &[65, 10], &[65], text).unwrap_err().message.contains("open reasoning"));
+        // Token 301 is "B\n": the merge reaches back past the last token, and the error names only
+        // that last token.
+        let e = check_seam("content", &[65, 66, 10], &[65, 301, 10, 67], text).unwrap_err();
+        assert!(e.message.contains(r#"ends with "\n", which merges with its start into "B\n""#), "{}", e.message);
     }
 
     #[test]

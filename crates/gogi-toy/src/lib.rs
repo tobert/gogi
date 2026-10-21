@@ -102,6 +102,24 @@ pub fn tokenize_suffix(s: &str) -> Vec<u32> {
     out
 }
 
+/// The text of tokens as characters: bytes decode as UTF-8, with U+FFFD for a byte that is not
+/// part of a whole character, and a marker is its text, such as `<endthink>`.
+pub fn detokenize(tokens: &[u32]) -> String {
+    let mut out = String::new();
+    let mut bytes = Vec::new();
+    for &t in tokens {
+        if t < 256 {
+            bytes.push(t as u8);
+        } else {
+            out.push_str(&String::from_utf8_lossy(&bytes));
+            bytes.clear();
+            out.push_str(&piece(t));
+        }
+    }
+    out.push_str(&String::from_utf8_lossy(&bytes));
+    out
+}
+
 /// The text of one token, for `top` lists and stream pieces.
 pub fn piece(id: u32) -> String {
     if let Some((m, _)) = MARKERS.iter().find(|(_, i)| *i == id) {
@@ -217,7 +235,7 @@ pub fn open_seams(tools: &[Tool], thinking: bool, messages: &[Message]) -> Vec<(
 /// merges with the text before it; the check is the one every server makes.
 pub fn check_open(tools: &[Tool], thinking: bool, messages: &[Message]) -> Result<(), gogi_proto::Invalid> {
     for (field, before, with) in open_seams(tools, thinking, messages) {
-        gogi_proto::continuation::check_seam(field, &before, &with, |t| t.iter().map(|&x| piece(x)).collect())?;
+        gogi_proto::continuation::check_seam(field, &before, &with, detokenize)?;
     }
     Ok(())
 }
@@ -410,6 +428,15 @@ mod tests {
         assert!(!starts_in_reasoning(true, &[u.clone(), open(Some("plan"), Some(""))]), "a content member closes the thinking, even when it is empty");
         assert!(!starts_in_reasoning(true, &[u.clone(), open(None, Some("fn "))]));
         assert!(!starts_in_reasoning(false, &[u, open(None, Some("fn "))]));
+    }
+
+    #[test]
+    fn detokenize_gives_characters_and_marker_text() {
+        let mut t = vec![BOS];
+        push_text(&mut t, "é\n");
+        t.push(ENDTHINK);
+        assert_eq!(detokenize(&t), "<bos>é\n<endthink>");
+        assert_eq!(detokenize(&[0xC3]), "\u{fffd}", "a byte that is not a whole character");
     }
 
     #[test]
