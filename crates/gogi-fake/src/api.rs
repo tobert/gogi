@@ -447,6 +447,9 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
     if let Err(e) = req.validate() {
         return invalid(e);
     }
+    if !req.decisions.is_empty() {
+        return bad_param("decisions", "nothing ran: riding decisions need the ride capability, which this model does not have; send the generation without decisions");
+    }
     let limit = store.cfg.context_tokens;
     let max_tokens = req.max_tokens as usize;
     if max_tokens > limit {

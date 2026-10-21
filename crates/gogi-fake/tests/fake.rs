@@ -387,3 +387,14 @@ fn a_streamed_reply_labels_each_token_by_its_part_and_the_parts_join_in_done() {
     let first_call = order.iter().position(|p| *p == Phase::Call).unwrap();
     assert!(order[..first_call].iter().filter(|p| **p == Phase::Reasoning).count() as u64 == done.usage.reasoning, "reasoning comes before the call");
 }
+
+#[test]
+fn riding_decisions_are_a_400_naming_decisions_because_the_fake_does_not_declare_ride() {
+    let s = Server::start(Config::default()).unwrap();
+    let (_, id) = call(&s, "GET", "/council/v2/identity", None);
+    assert!(!id["models"][0]["capabilities"].as_array().unwrap().contains(&json!("ride")));
+    let body = json!({"model": "toy", "context": ctx(json!([{"role": "user", "content": "hi"}])), "max_tokens": 4,
+        "decisions": [{"spec_id": format!("sha256:{}", "a".repeat(64)), "when": "after"}]});
+    let (code, e) = post(&s, "/council/v2/generations", body);
+    assert_eq!((code, &e["error"]["param"]), (400, &json!("decisions")), "{e}");
+}

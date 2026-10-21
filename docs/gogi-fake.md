@@ -113,6 +113,8 @@ function of that hash, between -6 and 6, so the same prefix gives the same bits.
   and `error` event repeats it as `request_id`. A `traceparent` header is accepted and ignored.
 - A body that does not decode is a `400`. When a member is missing or unknown, `error.param`
   names it, such as `model` or `state`.
+- The fake does not declare `ride`, so a generation with `decisions` is a `400` naming
+  `decisions`.
 
 ## Limits
 
