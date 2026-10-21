@@ -1,5 +1,6 @@
 //! The checks, grouped by what they test.
 
+mod continuation;
 mod decisions;
 mod generations;
 mod headers;
