@@ -103,6 +103,8 @@ fn the_fake_passes_the_continuation_checks() {
         "a decision with an open context is a 400 naming continue",
         "raw reads of an open context are a 400 naming continue",
         "continue: false on earlier messages changes nothing",
+        "a build past context_tokens is a 413 too_large naming context_tokens",
+        "raw reads past context_tokens are a 413 too_large naming context_tokens",
     ] {
         assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name}: {:?}", r.checks.iter().find(|c| c.name == name));
     }
