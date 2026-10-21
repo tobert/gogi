@@ -6,12 +6,14 @@
 //!   `generation`, `decision`, `identity`, `error`);
 //! - the rules a request must meet, checked the way mkviolet checks them
 //!   (`message::validate`, `Context::check`, `spec::parse_spec`);
+//! - what a server checks of an open message, the seams of a continuation (`continuation`);
 //! - canonical JSON and `spec_id` (`canon`);
 //! - the pooling math in `f64` and the check that a decision's numbers obey it
 //!   (`math::pool`, `math::verify`).
 
 pub mod canon;
 pub mod context;
+pub mod continuation;
 pub mod decision;
 pub mod error;
 pub mod generation;

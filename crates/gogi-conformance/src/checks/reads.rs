@@ -55,7 +55,9 @@ impl Suite {
         let limit = self.limits().map_or(0, |l| l.context_tokens) as usize;
         if limit * 7 <= 900_000 {
             let big = self.ctx(vec![json!({"role": "user", "content": super::generations::filler_text(limit * 6, &self.nonce)})]);
-            self.refused("reads past context_tokens are refused", "POST", "/council/v2/reads", Some(json!({"contexts": [big], "suffixes": ["x"], "letters": ["A", "B"]})), 413);
+            if let Some(e) = self.refused("reads past context_tokens are refused", "POST", "/council/v2/reads", Some(json!({"contexts": [big], "suffixes": ["x"], "letters": ["A", "B"]})), 413) {
+                self.r.check("raw reads past context_tokens are a 413 too_large naming context_tokens", e["error"]["type"] == json!("too_large") && e["error"]["param"] == json!("context_tokens"), &e);
+            }
         }
     }
 
@@ -68,7 +70,7 @@ impl Suite {
         let msgs = self.opening("replay");
         let Some(g) = self.generate("replay: the first generation succeeds", &self.ctx(msgs.clone()), 300) else { return };
         let mut m2 = msgs;
-        m2.extend(self.continue_after(&g, "Now list what is left."));
+        m2.extend(super::continue_after(&g, "Now list what is left."));
         let rq = json!({"contexts": [self.ctx(m2)], "suffixes": [SUFFIX], "letters": ["A", "B"], "top": 20});
         let Some(a) = self.expect("replay: the first read succeeds", "POST", "/council/v2/reads", Some(rq.clone()), 200) else { return };
         let other = json!({"messages": [{"role": "system", "content": format!("Unrelated {}.", self.nonce)}, {"role": "user", "content": "Say hi.", "snap": true}]});

@@ -46,6 +46,7 @@ assistant  <asst> [<think> reasoning <endthink>] content (<call> name(INPUT_JSON
 tool       <tool> [<error>] content <end>
 
 generation prompt   <asst> [<think>]
+open message        <asst> [<think> reasoning [<endthink>]] [content]
 ```
 
 - `<nothink>` renders when the context sets `thinking: false`. With thinking on, every
@@ -57,11 +58,22 @@ generation prompt   <asst> [<think>]
 - A marked message is a boundary only when its own rendering is a prefix of the whole
   context's. The context's end is always one. So an assistant message with reasoning and no tool
   calls, marked `snap`, stops being a boundary when a user message is added after it.
+- An open message (`continue: true`) renders as a reply up to its open text, without `<end>`,
+  in place of the generation prompt. With thinking on, a `content` member writes `<endthink>`,
+  even when it is empty; without one, the rendering ends inside the thinking. So a reply cut by
+  `max_tokens` renders open as exactly its prompt and its sampled tokens. `gogi_toy::end_open`
+  gives the tokens that end an open message as the template ends a message: `<endthink>` when
+  it is open inside its thinking, then `<end>`.
+- Each open field tokenizes on its own, because a token is a byte, so the seam check
+  (`gogi_toy::check_open`) never refuses a toy context.
 
 ## Reply parser
 
 `gogi_toy::reply::ReplyParser` reads a reply's token ids, one at a time, after the generation
-prompt. `ReplyParser::new(thinking)` takes `true` when the prompt ended with `<think>`. For each
+prompt or an open message. `ReplyParser::new(thinking)` takes `true` when the reply starts in
+its reasoning, which `gogi_toy::starts_in_reasoning` says: the prompt ended with `<think>`, or an
+open message has no `content` member. The parser reads only sampled tokens, so `<endthink>`
+written as open text never closes the thinking. `phase` is the phase the next token would have. For each
 token, `push` returns its phase (`reasoning`, `content`, or `call`) and the text it adds. A marker
 in reasoning or content adds no text, and a byte that does not yet complete a character adds none.
 `<endthink>` ends the reasoning and belongs to it. `<call>`, `<endcall>`, and the tokens between
@@ -85,10 +97,16 @@ function of that hash, between -6 and 6, so the same prefix gives the same bits.
   thinking on it first writes its thought, ending at `<endthink>`. At temperature 0 it takes the
   largest logit. Without `sample.seed` the seed comes from the prompt, so a reply replays.
 - A context with tools whose last message contains the text `CALL` gets a reply that calls its
-  first tool with the input `{}`. Call ids are `call_{prompt tokens}_{k}`.
-- `finish` is `end_turn` or `tool_use` when the reply wrote `<end>`, `max_tokens` when it wrote
-  `max_tokens` tokens, and `context_full` when the prompt and the reply reached
-  `context_tokens`. `usage.reasoning` counts the tokens of the thought, `<endthink>` included.
+  first tool with the input `{}`. Call ids are `call_{prompt tokens}_{k}`. `done.tool_calls`
+  are the calls the reply parser read, so a call cut before `<endcall>` is kept as written,
+  `{id, name, raw, error}`.
+- `finish` is `end_turn` or `tool_use` when the reply wrote `<end>`, then `context_full` when the
+  prompt and the reply reached `context_tokens`, then `max_tokens` when it wrote `max_tokens`
+  tokens. A reply fills the context up to its last token. `usage.reasoning` counts the tokens of the thought, `<endthink>` included.
+- The fake declares `continuation`. A continuation's `done` is the open text as sent followed by
+  the sampled text, with nothing trimmed. `usage.prompt` counts the open text, and
+  `usage.completion`, `usage.reasoning`, and the stream's `n` count only the sampled tokens. A
+  reply cut by `max_tokens` keeps its trailing whitespace and reports `phase`.
 - A context whose last message contains the text `FAIL` gets no reply: without `stream`, a `500`
   with `error.type` `internal`; with `stream`, two `token` events and then an `error` event,
   so a client can test how it handles a failure after the stream began.
@@ -102,6 +120,10 @@ function of that hash, between -6 and 6, so the same prefix gives the same bits.
 - A build starts from the longest held snapshot whose tokens begin the context, and reports
   `kept`, `fed`, and `from`. A generation holds the head after its reply, so the next request
   starts there even though the reply is not marked `snap`.
+- A reply cut by `max_tokens` holds the head of its open rendering, listed last in `snapshots`,
+  so sending it back open feeds nothing. A reply cut inside a call, or after one, has `head`
+  `null`, because an open message holds no calls.
+- `POST /contexts` reads an open message only with `dry_run: true`.
 - Pins keep a snapshot and its parents. `pin_bytes` caps the bytes they keep together.
   `max_snapshots` drops the oldest unpinned snapshots first.
 - With `--state-dir`, specs, pins, and the snapshots pins keep survive a restart. Other
@@ -113,10 +135,14 @@ function of that hash, between -6 and 6, so the same prefix gives the same bits.
   and `error` event repeats it as `request_id`. A `traceparent` header is accepted and ignored.
 - A body that does not decode is a `400`. When a member is missing or unknown, `error.param`
   names it, such as `model` or `state`.
+- The fake does not declare `ride`, so a generation with `decisions` is a `400` naming
+  `decisions`.
 
 ## Limits
 
 `context_tokens` defaults to 4096, `decision_context_tokens` to 3072, `pin_bytes` to 1 MiB,
 and `max_snapshots` to 10,000. Each is a field of `Config` in Rust and an argument of
-`gogi.FakeServer` in Python. A prompt past
-`context_tokens` is a `413` with `error.type` `context_full`.
+`gogi.FakeServer` in Python. A context of exactly `context_tokens` builds; a longer one, or a
+raw read whose context and longest suffix are longer, is a `413` with `error.type` `too_large`
+naming `context_tokens`. A generation's prompt of `context_tokens` or more leaves no room for a
+reply: a `413` with `error.type` `context_full`.

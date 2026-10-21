@@ -60,6 +60,7 @@ pub fn run(mut opts: Opts, print: bool) -> Report {
         s.models();
         s.builds();
         s.generations();
+        s.continuations();
         s.boundaries();
         s.pins();
         s.specs();

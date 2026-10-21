@@ -82,7 +82,7 @@ thing, and each thing has one term.
 | request id | The id a server gives one request, sent in the `request-id` header of its response and in every error body. |
 | trace context | The client's W3C `traceparent` header, which joins the server's spans to the client's trace. It travels only as a header. |
 | usage | The token counts a response reports: `prompt`, `kept`, `fed`, `completion`, and `reasoning`. |
-| phase | The part of a reply a streamed token belongs to: `reasoning`, `content`, or `call`. |
+| phase | The part of a reply a token belongs to: `reasoning`, `content`, or `call`. |
 | identity | The model, weights, tokenizer, template, and engine that produced a number. Each served model has one. A threshold fitted under one identity does not carry to another. |
 | served model | One identity a server serves, with its own limits, capabilities, and status. A request names it with `model`. |
 | status | Whether a served model takes requests now: `ready`, `loading`, `draining`, or `unloaded`. |
@@ -546,7 +546,9 @@ POST /council/v2/generations
   default.
 - **`done` is the reply.** It has `model`, the reply's `content`,
   `reasoning`, and `tool_calls`, `finish`, `usage`, `head`, the context's
-  `snapshots`, and `seed`. Without `stream`, `done` is the JSON response.
+  `snapshots`, and `seed`. A reply that ends with `max_tokens` also has
+  `phase`, the phase its next token would have (see Continuations).
+  Without `stream`, `done` is the JSON response.
 - **`finish`** says why the reply ended:
 
   | `finish` | When |
@@ -555,6 +557,11 @@ POST /council/v2/generations
   | `tool_use` | The model ended its turn after one or more tool calls. |
   | `max_tokens` | The reply reached `max_tokens`: `usage.completion` is `max_tokens`. |
   | `context_full` | The prompt and the sampled tokens reached `context_tokens`. |
+
+  When more than one applies, `end_turn` and `tool_use` come first, then
+  `context_full`, then `max_tokens`. A `context_full` reply cannot be
+  continued, and it has no `phase`. Decided by senpai 2026-10-21
+  (vetoable).
 
 - **`usage`** counts the prompt in `prompt`, `kept`, and `fed`, and the
   reply in `completion`, with its thinking also in `reasoning`.
@@ -684,9 +691,11 @@ POST /council/v2/generations
 ```
 
 - **`continue: true` opens the last message.** Only the last message may
-  carry it, and only an assistant message. It carries `reasoning`,
-  `content`, or both, and at least one of them is not empty. It carries no
-  `tool_calls`. Any other use is a `400` naming `continue`. `continue:
+  carry it, and only an assistant message. It carries a `content` member,
+  even an empty one, or a `reasoning` that is not empty, or both. Thus a
+  reply cut just after an empty thinking resumes as `{"content": "",
+  "continue": true}`, with its `reasoning: ""` when it has one. Decided
+  by senpai 2026-10-21 (vetoable). It carries no `tool_calls`. Any other use is a `400` naming `continue`. `continue:
   false` is allowed on any message and changes nothing.
 - **Only generations read an open message.** A context with `continue` in
   `/decisions` or `/reads` is a `400` naming `continue`. `POST /contexts`
@@ -701,16 +710,19 @@ POST /council/v2/generations
   resumes with `content: ""`. Without a `content` member, the model
   continues inside its thinking.
 - **An open message with `reasoning` needs `thinking: true`** in the
-  context. With `thinking` false or absent, it is a `400` naming
-  `continue`, so a request does not depend on a server's default.
+  context, when the `reasoning` is not empty. With `thinking` false or
+  absent, it is a `400` naming `continue`, so a request does not depend on
+  a server's default.
 - **`snap: true` on the open message is allowed.** The end of a context is
   always a boundary, so the mark changes nothing.
 - **The open text is content, never control** (rule 2). Text in it that
   spells a template token, such as `</think>` or the start of a call, is
   text to the model. As in any generation, the server reports no hits.
-- **Each open field must tokenize on its own.** For each open field, the
-  server renders the context up to the start of that field, and then with
-  the field. The shorter rendering's tokens must begin the longer one's.
+- **Each open field must tokenize on its own.** For each open field that
+  is not empty, the server renders the context up to the start of that
+  field, and then through the end of that field, without the rest of the
+  message (`gogi-proto`'s `continuation::seams`). The shorter rendering's
+  tokens must begin the longer one's.
   This is the check of mk's `prefill`. Otherwise the request is a `400`
   naming `continue`, and the message names the field and the characters
   that merge. A newline after the template's last newline is a common case.
@@ -744,11 +756,21 @@ POST /council/v2/generations
   `max_tokens`, `head` is the snapshot of the reply as an open message
   renders it, when the server holds it. `snapshots` lists it last. A
   reply that ends with `max_tokens` keeps its trailing whitespace in
-  `done`, so the client can send it back exactly. A continuation that sends
-  it back open then feeds only the last sampled token. A client that sends
-  it back closed starts there too, when the closed rendering's tokens begin
-  with the open rendering's. Otherwise a build starts from the last
-  boundary, as always.
+  `done`, so the client can send it back exactly. Its `phase` says how:
+  `content` sends it back with a `content` member, even when it is empty,
+  and `reasoning` without one. A reply whose `phase` is `call` cannot be
+  continued. `content` and `reasoning` alone cannot tell a reply cut just
+  after its thinking from one cut inside it. The head may hold the model
+  state before or after the last sampled token, so a continuation that
+  sends the reply back open feeds at most that token. Decided by senpai
+  2026-10-21 (vetoable). A client that sends it back closed starts there
+  too, when the closed rendering's tokens begin with the open rendering's.
+  Otherwise a build starts from the last boundary, as always.
+- **A server may refuse its own cut reply at the seam.** The tokens a
+  model samples need not be the tokens its tokenizer gives for the same
+  text, so a cut reply sent back open can fail the seam check, a `400`
+  naming `continue`. The client then sends the reply back closed. Decided
+  by senpai 2026-10-21 (vetoable).
 - **`continue` is a boolean.** Any other value is a `400` naming
   `continue`. Infill, the text between a prefix and a suffix, gets its own
   top-level member of a generation later (see Open questions). It is not

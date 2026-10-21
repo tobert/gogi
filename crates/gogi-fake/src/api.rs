@@ -17,7 +17,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
 use gogi_toy::read;
-use gogi_toy::reply::{Reply, ReplyParser, Step};
+use gogi_toy::reply::{Call, Reply, ReplyParser, Step};
 use gogi_toy::{self as model, State, VOCAB};
 use crate::state::{BYTES_PER_TOKEN, FakeModel, Pins, Store, snapshot_id};
 
@@ -68,11 +68,17 @@ fn context_full(prompt: usize, limit: usize) -> Resp {
     )
 }
 
-/// Decodes a request body. A missing or unknown member is a `400` that names it in `param`.
+/// The `413` for a context, or a context and a raw read's suffix, past `context_tokens`.
+fn too_long(what: &str, n: usize, limit: usize) -> Resp {
+    err(413, "too_large", format!("nothing ran: the {} is {} tokens; context_tokens is {}; shorten the context", what, n, limit), Some("context_tokens"))
+}
+
+/// Decodes a request body. A missing or unknown member, or a `continue` that is not a boolean, is
+/// a `400` that names it in `param`.
 fn parse<T: DeserializeOwned>(body: &[u8], what: &str) -> Result<T, Resp> {
     serde_json::from_slice(body).map_err(|e| {
         let text = e.to_string();
-        let field = ["missing field `", "unknown field `"].iter().find_map(|p| text.split_once(p).and_then(|(_, rest)| rest.split_once('`')).map(|(f, _)| f.to_string()));
+        let field = gogi_proto::error::decode_param(&text);
         let message = format!("nothing ran: the {} body does not decode: {}", what, text);
         match field {
             Some(f) => bad_param(&f, message),
@@ -86,12 +92,12 @@ fn unescape(s: &str) -> String {
     let mut out = Vec::new();
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' {
-            if let Some(v) = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok()) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
+        if b[i] == b'%'
+            && let Some(v) = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(v);
+            i += 3;
+            continue;
         }
         out.push(b[i]);
         i += 1;
@@ -117,7 +123,7 @@ pub fn identity(store: &Store) -> Value {
             v["device"] = json!("cpu");
             v["limits"] = json!({"context_tokens": store.cfg.context_tokens, "decision_context_tokens": store.cfg.decision_context_tokens,
                                  "snapshot_bytes": BYTES_PER_TOKEN, "contexts_per_decision": 8, "default_timeout_ms": 30000});
-            v["capabilities"] = json!(["reads", "generate", "dry_run", "leave_one_out"]);
+            v["capabilities"] = json!(["reads", "generate", "continuation", "dry_run", "leave_one_out"]);
             v
         })
         .collect();
@@ -261,14 +267,14 @@ fn build_route(store: &mut Store, body: &[u8]) -> Resp {
         Ok(m) => m,
         Err(r) => return r,
     };
-    if let Err(e) = req.context.check() {
+    if let Err(e) = req.validate().and_then(|_| model::check_open(&req.context.tools, req.context.thinks(), &req.context.messages)) {
         return invalid(e);
     }
     let dry_run = req.dry_run.unwrap_or(false);
     let limit = store.cfg.context_tokens;
     let n = model::render(&req.context.tools, req.context.thinks(), &req.context.messages, false).end;
-    if n >= limit {
-        return context_full(n, limit);
+    if n > limit {
+        return too_long("context", n, limit);
     }
     let b = build(store, &m, &req.context, dry_run);
     let snapshots = if dry_run { vec![] } else { b.infos(store) };
@@ -351,8 +357,8 @@ fn reads(store: &mut Store, body: &[u8]) -> Resp {
     let mut usage = Usage::default();
     for (ci, c) in req.contexts.iter().enumerate() {
         let n = model::render(&c.tools, c.thinks(), &c.messages, false).end;
-        if n + longest >= store.cfg.context_tokens {
-            return context_full(n + longest, store.cfg.context_tokens);
+        if n + longest > store.cfg.context_tokens {
+            return too_long("context and its longest suffix", n + longest, store.cfg.context_tokens);
         }
         let b = build(store, &m, c, false);
         let base = State::after(m.seed, &b.tokens);
@@ -447,6 +453,9 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
     if let Err(e) = req.validate() {
         return invalid(e);
     }
+    if !req.decisions.is_empty() {
+        return bad_param("decisions", "nothing ran: riding decisions need the ride capability, which this model does not have; send the generation without decisions");
+    }
     let limit = store.cfg.context_tokens;
     let max_tokens = req.max_tokens as usize;
     if max_tokens > limit {
@@ -454,8 +463,15 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
     }
     let c = &req.context;
     let thinking = c.thinks();
+    if let Err(e) = model::check_open(&c.tools, thinking, &c.messages) {
+        return invalid(e);
+    }
+    // An open message takes the place of the generation prompt, and the reply starts in the
+    // phase it sets.
+    let open = c.open();
+    let starts_thinking = model::starts_in_reasoning(thinking, &c.messages);
     let prompt = model::render(&c.tools, thinking, &c.messages, true);
-    if prompt.tokens.len() + 1 >= limit {
+    if prompt.tokens.len() >= limit {
         return context_full(prompt.tokens.len(), limit);
     }
     let stream = req.stream.unwrap_or(false);
@@ -473,24 +489,22 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
 
     let mut toks = prompt.tokens.clone();
     let mut st = State::after(m.seed, &toks);
-    let mut phase = if thinking { Phase::Think } else { Phase::Answer };
-    let mut parser = ReplyParser::new(thinking);
+    let mut phase = if starts_thinking { Phase::Think } else { Phase::Answer };
+    let mut parser = ReplyParser::new(starts_thinking);
     let mut forced: VecDeque<u32> = VecDeque::new();
     let mut queued = false;
-    let mut calls: Vec<(String, Map<String, Value>)> = Vec::new();
     let mut events = vec![StreamEvent::Ping];
     let mut ended = false;
     let mut n = 0;
     let mut thought = 0;
     let letters: Vec<u32> = (b'a'..=b'z').map(u32::from).chain([u32::from(b' ')]).collect();
-    while n < max_tokens && toks.len() + 1 < limit {
+    while n < max_tokens && toks.len() < limit {
         if phase == Phase::Answer && trigger && !queued {
             queued = true;
             let name = c.tool_names().first().copied().unwrap_or("tool").to_string();
             forced.push_back(model::CALL);
             forced.extend(format!("{}({{}})", name).bytes().map(u32::from));
             forced.extend([model::ENDCALL, model::END]);
-            calls.push((name, Map::new()));
         }
         let (tok, p, h) = if let Some(f) = forced.pop_front() {
             (f, 1.0, 0.0)
@@ -521,32 +535,73 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
             _ => {}
         }
     }
-    let finish = match (ended, calls.is_empty()) {
+    let next = parser.phase();
+    let Reply { reasoning, content, calls: written, .. } = parser.finish();
+    // The reply's turn ending comes first, then a full context, then max_tokens.
+    let finish = match (ended, written.is_empty()) {
         (true, true) => "end_turn",
         (true, false) => "tool_use",
-        _ if toks.len() + 1 >= limit => "context_full",
+        _ if toks.len() >= limit => "context_full",
         _ => "max_tokens",
     };
-    let Reply { reasoning, content, .. } = parser.finish();
-    let tool_calls: Vec<ToolCall> = calls.into_iter().enumerate().map(|(k, (name, input))| ToolCall { id: format!("call_{}_{}", prompt.tokens.len(), k), name, input }).collect();
+    // `done` is the whole message: the open text as sent, then the sampled text.
+    let reasoning = format!("{}{}", open.and_then(|m| m.reasoning.as_deref()).unwrap_or(""), reasoning);
+    let content = format!("{}{}", open.and_then(|m| m.content.as_deref()).unwrap_or(""), content);
+    // The calls as the parser read them: a call that does not parse is kept as written.
+    let call_id = |k: usize| format!("call_{}_{}", prompt.tokens.len(), k);
+    let tool_calls: Vec<ToolCall> = written.iter().enumerate().filter_map(|(k, w)| match w {
+        Call::Parsed { name, input } => Some(ToolCall { id: call_id(k), name: name.clone(), input: input.clone() }),
+        Call::Malformed { .. } => None,
+    }).collect();
+    let wire_calls: Vec<Value> = written.iter().enumerate().map(|(k, w)| match w {
+        Call::Parsed { name, input } => json!({"id": call_id(k), "name": name, "input": input}),
+        Call::Malformed { text, error } => {
+            let name = text.split_once('(').map(|(n, _)| n).filter(|n| !n.is_empty());
+            json!({"id": call_id(k), "name": name, "raw": text, "error": error})
+        }
+    }).collect();
+    let unparsed = tool_calls.len() != written.len();
     let reply = Message {
         reasoning: Some(reasoning.clone()).filter(|r| !r.is_empty()),
         tool_calls: tool_calls.clone(),
         ..Message::assistant(content.clone())
     };
     let reply = Message { content: Some(content.clone()).filter(|c| !c.is_empty()), ..reply };
-    let mut messages = c.messages.clone();
-    messages.push(reply);
-    let after = Context { messages, ..c.clone() };
-    let held = build(store, &m, &after, false);
+    let mut messages: Vec<Message> = c.messages.clone();
+    if open.is_some() {
+        messages.pop();
+    }
+    // A reply cut by max_tokens holds the head of its open rendering, which is the prompt and the
+    // sampled tokens; one cut inside a call has none, because an open message holds no calls.
+    let (head, snapshots) = if finish == "max_tokens" {
+        let cut = Message { content: (next == EventPhase::Content).then(|| content.clone()), tool_calls: Vec::new(), ..reply.clone().opened() };
+        messages.push(cut);
+        let after = Context { messages, ..c.clone() };
+        if next != EventPhase::Call && written.is_empty() && after.check().is_ok() {
+            let held = build(store, &m, &after, false);
+            (json!(held.head), held.infos(store))
+        } else {
+            (Value::Null, b.infos(store))
+        }
+    } else if unparsed {
+        // A call that does not parse goes back as text, so the server cannot know its rendering.
+        (Value::Null, b.infos(store))
+    } else {
+        messages.push(reply);
+        let held = build(store, &m, &Context { messages, ..c.clone() }, false);
+        (json!(held.head), held.infos(store))
+    };
     let usage = Usage { prompt: prompt.tokens.len() as u64, kept: b.kept as u64, fed: (prompt.tokens.len() - b.kept) as u64, completion: n as u64, reasoning: thought };
-    let done = json!({
+    let mut done = json!({
         "content": content, "reasoning": reasoning,
-        "tool_calls": tool_calls.iter().map(|t| json!({"id": t.id, "name": t.name, "input": t.input})).collect::<Vec<_>>(),
+        "tool_calls": wire_calls,
         "finish": finish,
         "usage": usage,
-        "head": held.head, "snapshots": held.infos(store), "seed": seed, "ms": {"prefill": 0.0, "decode": 0.0}, "model": m.name,
+        "head": head, "snapshots": snapshots, "seed": seed, "ms": {"prefill": 0.0, "decode": 0.0}, "model": m.name,
     });
+    if finish == "max_tokens" {
+        done["phase"] = json!(next);
+    }
     if stream {
         events.push(StreamEvent::Done(Box::new(serde_json::from_value(done).expect("the fake's done decodes"))));
         Resp::Sse(events)
@@ -564,6 +619,10 @@ struct Asked<'a> {
     chosen: Vec<Vec<usize>>,
 }
 
+/// One read of a decision: the head it read after, each asked question's option log
+/// probabilities, its index, and its `rendered_sha256`.
+type ReadOut = (Option<String>, Vec<Vec<f64>>, usize, String);
+
 fn decisions(store: &mut Store, body: &[u8]) -> Resp {
     let t0 = std::time::Instant::now();
     let req: DecisionRequest = match parse(body, "decision") {
@@ -574,10 +633,10 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
         Ok(m) => m,
         Err(r) => return r,
     };
-    if let Some(t) = &req.think {
-        if t.tokens > 0 {
-            return bad_param("think", "think above 0 tokens needs the think capability, which this model does not have");
-        }
+    if let Some(t) = &req.think
+        && t.tokens > 0
+    {
+        return bad_param("think", "think above 0 tokens needs the think capability, which this model does not have");
     }
     if let Err(e) = req.validate() {
         return invalid(e);
@@ -638,7 +697,7 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
     }
 
     // Each read: the context's head, then the answers' log probabilities by asked question.
-    let mut reads: Vec<(Option<String>, Vec<Vec<f64>>, usize, String)> = Vec::new();
+    let mut reads: Vec<ReadOut> = Vec::new();
     let mut usage = Usage::default();
     let contexts: Vec<Option<&Context>> = if req.contexts.is_empty() { vec![None] } else { req.contexts.iter().map(Some).collect() };
     for c in contexts {

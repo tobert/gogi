@@ -36,6 +36,24 @@ def test_context_rules():
         gogi.check_context({**ok, "queue": "nope"})
 
 
+def test_continue_opens_only_a_last_assistant_message():
+    u = {"role": "user", "content": "u"}
+    gogi.check_context({"thinking": True, "messages": [u, {"role": "assistant", "reasoning": "First I", "continue": True}]})
+    gogi.check_context({"messages": [{**u, "continue": False}, {"role": "assistant", "content": "Plan:", "continue": True}]})
+    for bad in [
+        [u, {"role": "assistant", "content": "a", "continue": True}, u],
+        [{**u, "continue": True}],
+        [u, {"role": "assistant", "reasoning": "", "continue": True}],
+        [u, {"role": "assistant", "content": "a", "tool_calls": [{"id": "c0", "name": "shell", "input": {}}], "continue": True}],
+    ]:
+        with pytest.raises(ValueError, match="continue: true|open message"):
+            gogi.check_context({"messages": bad})
+    with pytest.raises(ValueError, match="needs thinking: true"):
+        gogi.check_context({"messages": [u, {"role": "assistant", "reasoning": "First I", "continue": True}]})
+    with pytest.raises(ValueError, match="invalid field `continue`"):
+        gogi.check_context({"messages": [u, {"role": "assistant", "content": "a", "continue": "yes"}]})
+
+
 def test_tools_calls_and_results_take_the_anthropic_shape():
     tool = {"name": "shell", "description": "Runs a command.", "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}}}
     call = {"role": "assistant", "tool_calls": [{"id": "c0", "name": "shell", "input": {"command": "ls"}}]}
@@ -212,7 +230,7 @@ def test_the_fake_reports_and_keeps_the_limits_it_is_given():
         limits = ident["models"][0]["limits"]
         assert (limits["context_tokens"], limits["decision_context_tokens"], ident["limits"]["pin_bytes"]) == (512, 256, 4096)
         status, e = _call(fake.url, "POST", "/council/v2/contexts", {"model": "toy", "context": {"messages": [{"role": "user", "content": "x" * 600}]}})
-        assert (status, e["error"]["type"]) == (413, "context_full")
+        assert (status, e["error"]["type"], e["error"]["param"]) == (413, "too_large", "context_tokens")
         heads = [_call(fake.url, "POST", "/council/v2/contexts", {"model": "toy", "context": {"messages": [{"role": "user", "content": f"u{i}"}]}})[1]["head"] for i in range(3)]
         assert _call(fake.url, "GET", "/council/v2/snapshots/" + heads[0])[0] == 404, "past max_snapshots the oldest is evicted"
         assert _call(fake.url, "GET", "/council/v2/snapshots/" + heads[2])[0] == 200

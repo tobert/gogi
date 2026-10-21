@@ -187,11 +187,11 @@ impl Suite {
         // given weights.
         let (c0, c1) = (self.ctx(self.opening("decision")), self.ctx(vec![json!({"role": "user", "content": "Be brief.", "snap": true})]));
         let given = json!({"spec_id": spec_id, "case": "ls", "contexts": [c0, c1], "pool": {"method": "linear", "weights": "given", "values": [3.0, 1.0]}});
-        if let Some(gv) = self.expect("a decision with given weights succeeds", "POST", "/council/v2/decisions", Some(given.clone()), 200) {
-            if let (Some(resp), Some(req)) = (self.decode::<DecisionResponse>("a given-weight decision decodes", &gv), self.as_sent("given weights are normalized and pooled in request order", &given)) {
-                let v = math::verify(&resp, &req.expect());
-                self.r.check("given weights are normalized and pooled in request order", v.is_ok() && gv["pool"]["normalized"]["verdict"] == json!([0.75, 0.25]), v.err().map(|m| m.to_string()));
-            }
+        if let Some(gv) = self.expect("a decision with given weights succeeds", "POST", "/council/v2/decisions", Some(given.clone()), 200)
+            && let (Some(resp), Some(req)) = (self.decode::<DecisionResponse>("a given-weight decision decodes", &gv), self.as_sent("given weights are normalized and pooled in request order", &given))
+        {
+            let v = math::verify(&resp, &req.expect());
+            self.r.check("given weights are normalized and pooled in request order", v.is_ok() && gv["pool"]["normalized"]["verdict"] == json!([0.75, 0.25]), v.err().map(|m| m.to_string()));
         }
         self.expect("spec cleanup", "DELETE", &format!("/council/v2/specs/{}", spec_id), None, 204);
     }

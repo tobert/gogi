@@ -199,11 +199,11 @@ fn a_failed_tool_result_changes_the_rendering() {
 fn a_prompt_with_no_room_is_a_413_context_full_and_a_bad_context_a_400() {
     let s = Server::start(Config { context_tokens: 64, ..Config::default() }).unwrap();
     let long = json!([{"role": "user", "content": "x".repeat(200)}]);
-    for (path, body) in [("/council/v2/contexts", json!({"model": "toy", "context": ctx(long.clone())})), ("/council/v2/generations", json!({"model": "toy", "context": ctx(long), "max_tokens": 8}))] {
-        let (code, e) = post(&s, path, body);
-        assert_eq!((code, e["error"]["type"].clone()), (413, json!("context_full")), "{path}");
-        assert!(e["error"]["prompt_tokens"].as_u64().unwrap() > e["error"]["context_tokens"].as_u64().unwrap());
-    }
+    let (code, e) = post(&s, "/council/v2/generations", json!({"model": "toy", "context": ctx(long.clone()), "max_tokens": 8}));
+    assert_eq!((code, e["error"]["type"].clone()), (413, json!("context_full")));
+    assert!(e["error"]["prompt_tokens"].as_u64().unwrap() > e["error"]["context_tokens"].as_u64().unwrap());
+    let (code, e) = post(&s, "/council/v2/contexts", json!({"model": "toy", "context": ctx(long)}));
+    assert_eq!((code, &e["error"]["type"], &e["error"]["param"]), (413, &json!("too_large"), &json!("context_tokens")), "a context past the limit is too large, not a prompt with no room: {e}");
     let (code, _) = post(&s, "/council/v2/generations", json!({"model": "toy", "context": ctx(json!([{"role": "tool", "tool_call_id": "nope", "content": "x"}])), "max_tokens": 8}));
     assert_eq!(code, 400);
     let (code, e) = post(&s, "/council/v2/generations", json!({"model": "toy", "context": ctx(json!([{"role": "user", "content": "x"}]))}));
@@ -386,4 +386,211 @@ fn a_streamed_reply_labels_each_token_by_its_part_and_the_parts_join_in_done() {
     let order: Vec<Phase> = tokens.iter().map(|t| t.phase).collect();
     let first_call = order.iter().position(|p| *p == Phase::Call).unwrap();
     assert!(order[..first_call].iter().filter(|p| **p == Phase::Reasoning).count() as u64 == done.usage.reasoning, "reasoning comes before the call");
+}
+
+#[test]
+fn riding_decisions_are_a_400_naming_decisions_because_the_fake_does_not_declare_ride() {
+    let s = Server::start(Config::default()).unwrap();
+    let (_, id) = call(&s, "GET", "/council/v2/identity", None);
+    assert!(!id["models"][0]["capabilities"].as_array().unwrap().contains(&json!("ride")));
+    let body = json!({"model": "toy", "context": ctx(json!([{"role": "user", "content": "hi"}])), "max_tokens": 4,
+        "decisions": [{"spec_id": format!("sha256:{}", "a".repeat(64)), "when": "after"}]});
+    let (code, e) = post(&s, "/council/v2/generations", body);
+    assert_eq!((code, &e["error"]["param"]), (400, &json!("decisions")), "{e}");
+}
+
+// ---- continuations
+
+fn generate(s: &Server, context: Value, max_tokens: u64) -> GenerationDone {
+    let (code, d) = post(s, "/council/v2/generations", json!({"model": "toy", "context": context, "max_tokens": max_tokens, "sample": {"temperature": 0}}));
+    assert_eq!(code, 200, "{d}");
+    serde_json::from_value(d).unwrap()
+}
+
+fn thinking(messages: Vec<Value>) -> Value {
+    json!({"thinking": true, "messages": messages})
+}
+
+fn opening() -> Vec<Value> {
+    vec![json!({"role": "system", "content": "s"}), json!({"role": "user", "content": "go on", "snap": true})]
+}
+
+fn refused_param(s: &Server, path: &str, body: Value) -> Value {
+    let (code, e) = post(s, path, body);
+    assert_eq!(code, 400, "{e}");
+    e["error"]["param"].clone()
+}
+
+#[test]
+fn the_fake_declares_continuation() {
+    let s = Server::start(Config::default()).unwrap();
+    let (_, id) = call(&s, "GET", "/council/v2/identity", None);
+    assert!(id["models"][0]["capabilities"].as_array().unwrap().contains(&json!("continuation")), "{id}");
+}
+
+#[test]
+fn a_cut_reply_sent_back_open_resumes_from_its_head_and_writes_what_the_whole_reply_would() {
+    let s = Server::start(Config::default()).unwrap();
+    let whole = generate(&s, thinking(opening()), 300);
+    assert!(whole.usage.completion > 4 && whole.phase.is_none(), "{whole:?}");
+    let mut phases = Vec::new();
+    for k in 1..whole.usage.completion.min(30) {
+        let cut = generate(&s, thinking(opening()), k);
+        assert_eq!(cut.finish, gogi_proto::generation::Finish::MaxTokens);
+        let head = cut.head.clone().expect("a cut reply holds the head of its open rendering");
+        let last = cut.snapshots.last().unwrap();
+        assert_eq!((&last.id, last.tokens), (&head, cut.usage.prompt + k), "the head is listed last and holds the prompt and the sampled tokens");
+        phases.push(cut.phase.unwrap());
+        let open = cut.as_open_message().unwrap();
+        let mut messages = opening();
+        messages.push(serde_json::to_value(&open).unwrap());
+        let (code, dry) = post(&s, "/council/v2/contexts", json!({"model": "toy", "context": thinking(messages.clone()), "dry_run": true}));
+        assert_eq!(code, 200, "{dry}");
+        assert_eq!((&dry["from"], &dry["usage"]["fed"], &dry["dry_run"]), (&json!(head), &json!(0), &json!(true)), "k {k}: {dry}");
+        let rest = generate(&s, thinking(messages), 300 - k);
+        rest.continues(&open).unwrap();
+        assert_eq!((&rest.reasoning, &rest.content, rest.finish), (&whole.reasoning, &whole.content, whole.finish), "k {k}: the reply goes on as the whole reply did");
+        assert_eq!((rest.usage.prompt, rest.usage.kept, rest.usage.fed), (cut.usage.prompt + k, cut.usage.prompt + k, 0), "k {k}: the open text is prompt, kept from the head");
+        assert_eq!(rest.usage.completion + k, whole.usage.completion, "k {k}: completion counts only the sampled tokens");
+        assert_eq!(rest.usage.reasoning + cut.usage.reasoning, whole.usage.reasoning, "k {k}");
+    }
+    assert!(phases.contains(&Phase::Reasoning) && phases.contains(&Phase::Content), "both phases were cut: {phases:?}");
+}
+
+#[test]
+fn a_continuations_stream_sends_only_the_sampled_tokens() {
+    let s = Server::start(Config::default()).unwrap();
+    let mut messages = opening();
+    messages.push(json!({"role": "assistant", "reasoning": "pl", "continue": true}));
+    let body = json!({"model": "toy", "context": thinking(messages), "max_tokens": 40, "sample": {"temperature": 0}});
+    let events = stream(&s, body);
+    let Some(StreamEvent::Done(done)) = events.last() else { panic!("{events:?}") };
+    let tokens: Vec<_> = events.iter().filter_map(|e| if let StreamEvent::Token(t) = e { Some(t.clone()) } else { None }).collect();
+    assert_eq!(tokens.iter().map(|t| t.n).collect::<Vec<_>>(), (1..=done.usage.completion).collect::<Vec<_>>());
+    assert_eq!(tokens.iter().filter(|t| t.phase == Phase::Reasoning).count() as u64, done.usage.reasoning);
+    assert!(done.usage.reasoning >= 1, "the reply starts inside the open thinking: {done:?}");
+    let open: gogi_proto::Message = serde_json::from_value(json!({"role": "assistant", "reasoning": "pl", "continue": true})).unwrap();
+    gogi_proto::generation::check_pieces_after(&tokens, done, &open).unwrap();
+}
+
+#[test]
+fn a_content_member_closes_the_thinking_even_when_empty() {
+    let s = Server::start(Config::default()).unwrap();
+    let mut messages = opening();
+    messages.push(json!({"role": "assistant", "reasoning": "plan", "content": "", "continue": true}));
+    let d = generate(&s, thinking(messages), 20);
+    assert_eq!((d.reasoning.as_str(), d.usage.reasoning), ("plan", 0), "{d:?}");
+    let mut written = opening();
+    written.push(json!({"role": "assistant", "reasoning": "a<endthink>b", "continue": true}));
+    let d = generate(&s, thinking(written), 20);
+    assert!(d.reasoning.starts_with("a<endthink>b") && d.usage.reasoning >= 1, "<endthink> in open text is text: {d:?}");
+    let mut content = opening();
+    content.push(json!({"role": "assistant", "content": "fn ", "continue": true}));
+    let d = generate(&s, json!({"thinking": false, "messages": content}), 20);
+    assert!(d.content.starts_with("fn ") && d.reasoning.is_empty() && d.usage.reasoning == 0, "{d:?}");
+}
+
+#[test]
+fn a_cut_reply_keeps_its_trailing_whitespace() {
+    let s = Server::start(Config::default()).unwrap();
+    let whole = generate(&s, json!({"thinking": false, "messages": opening()}), 300);
+    let at = whole.content.find(' ').expect("the toy writes spaces") as u64 + 1;
+    let cut = generate(&s, json!({"thinking": false, "messages": opening()}), at);
+    assert!(cut.content.ends_with(' '), "{cut:?}");
+    let mut messages = opening();
+    messages.push(serde_json::to_value(cut.as_open_message().unwrap()).unwrap());
+    let rest = generate(&s, json!({"thinking": false, "messages": messages}), 300 - at);
+    assert_eq!((rest.content, rest.usage.fed), (whole.content, 0));
+}
+
+#[test]
+fn each_misuse_of_continue_is_a_400_naming_continue() {
+    let s = Server::start(Config::default()).unwrap();
+    let with = |last: Value| {
+        let mut m = opening();
+        m.push(last);
+        m
+    };
+    let gen_body = |context: Value| json!({"model": "toy", "context": context, "max_tokens": 4});
+    let bad = [
+        thinking({ let mut m = with(json!({"role": "assistant", "content": "a", "continue": true})); m.push(json!({"role": "user", "content": "v"})); m }),
+        thinking(with(json!({"role": "user", "content": "u", "continue": true}))),
+        thinking(with(json!({"role": "assistant", "content": "a", "tool_calls": [{"id": "c", "name": "sh", "input": {}}], "continue": true}))),
+        thinking(with(json!({"role": "assistant", "reasoning": "", "continue": true}))),
+        json!({"thinking": false, "messages": with(json!({"role": "assistant", "reasoning": "r", "continue": true}))}),
+        json!({"messages": with(json!({"role": "assistant", "reasoning": "r", "continue": true}))}),
+        thinking(with(json!({"role": "assistant", "content": "a", "continue": "yes"}))),
+        thinking(with(json!({"role": "assistant", "content": "a", "continue": null}))),
+    ];
+    for c in bad {
+        assert_eq!(refused_param(&s, "/council/v2/generations", gen_body(c.clone())), json!("continue"), "{c}");
+    }
+    let open = thinking(with(json!({"role": "assistant", "content": "a", "continue": true})));
+    assert_eq!(refused_param(&s, "/council/v2/contexts", json!({"model": "toy", "context": open})), json!("continue"));
+    assert_eq!(refused_param(&s, "/council/v2/contexts", json!({"model": "toy", "context": open, "dry_run": false})), json!("continue"));
+    let (code, dry) = post(&s, "/council/v2/contexts", json!({"model": "toy", "context": open, "dry_run": true}));
+    assert_eq!((code, &dry["dry_run"], &dry["snapshots"]), (200, &json!(true), &json!([])), "{dry}");
+    assert_eq!(refused_param(&s, "/council/v2/reads", json!({"model": "toy", "contexts": [open], "suffixes": ["x"], "letters": ["A", "B"]})), json!("continue"));
+    let (_, spec) = post(&s, "/council/v2/specs", json!({"name": "g", "instructions": "i", "input_label": "l", "questions": [{"id": "v", "type": "noul", "instructions": "ok?"}]}));
+    assert_eq!(refused_param(&s, "/council/v2/decisions", json!({"model": "toy", "spec_id": spec["spec_id"], "case": "x", "contexts": [open]})), json!("continue"));
+}
+
+#[test]
+fn continue_false_on_earlier_messages_changes_nothing() {
+    let s = Server::start(Config::default()).unwrap();
+    let plain = json!([{"role": "user", "content": "u"}, {"role": "assistant", "content": "a"}, {"role": "user", "content": "v"}]);
+    let marked = json!([{"role": "user", "content": "u", "continue": false}, {"role": "assistant", "content": "a", "continue": false}, {"role": "user", "content": "v", "continue": false}]);
+    let (_, a) = post(&s, "/council/v2/contexts", json!({"model": "toy", "context": ctx(plain)}));
+    let (code, b) = post(&s, "/council/v2/contexts", json!({"model": "toy", "context": ctx(marked)}));
+    assert_eq!((code, &b["head"], &b["usage"]["fed"]), (200, &a["head"], &json!(0)), "{b}");
+}
+
+// ---- context_tokens is the longest context, or a generation's prompt and reply
+
+/// A user message whose context renders to exactly `n` tokens with thinking on.
+fn user_of(n: usize) -> Value {
+    json!([{"role": "user", "content": "x".repeat(n - 3)}])
+}
+
+#[test]
+fn a_context_of_exactly_context_tokens_builds_and_one_more_is_too_large() {
+    let s = Server::start(Config { context_tokens: 64, ..Config::default() }).unwrap();
+    let (code, b) = post(&s, "/council/v2/contexts", json!({"model": "toy", "context": ctx(user_of(64))}));
+    assert_eq!((code, &b["usage"]["prompt"]), (200, &json!(64)), "{b}");
+    let (code, e) = post(&s, "/council/v2/contexts", json!({"model": "toy", "context": ctx(user_of(65))}));
+    assert_eq!((code, &e["error"]["type"], &e["error"]["param"]), (413, &json!("too_large"), &json!("context_tokens")), "{e}");
+    let read = |n: usize, suffix: &str| post(&s, "/council/v2/reads", json!({"model": "toy", "contexts": [ctx(user_of(n))], "suffixes": [suffix], "letters": ["A", "B"]}));
+    assert_eq!(read(62, "ab").0, 200, "a read of exactly context_tokens");
+    let (code, e) = read(63, "ab");
+    assert_eq!((code, &e["error"]["type"], &e["error"]["param"]), (413, &json!("too_large"), &json!("context_tokens")), "{e}");
+}
+
+#[test]
+fn a_prompt_with_one_token_of_room_gets_a_reply_that_fills_it() {
+    let s = Server::start(Config { context_tokens: 64, ..Config::default() }).unwrap();
+    // The generation prompt adds <asst> <think>: 62 + 2 = 64 is no room, 61 + 2 = 63 leaves one.
+    let (code, e) = post(&s, "/council/v2/generations", json!({"model": "toy", "context": ctx(user_of(62)), "max_tokens": 8}));
+    assert_eq!((code, &e["error"]["type"], &e["error"]["prompt_tokens"]), (413, &json!("context_full"), &json!(64)), "{e}");
+    let d = generate(&s, ctx(user_of(61)), 8);
+    assert_eq!((d.usage.prompt, d.usage.completion, d.finish), (63, 1, gogi_proto::generation::Finish::ContextFull), "{d:?}");
+    assert_eq!(d.phase, None, "a context_full reply cannot be continued");
+    let d = generate(&s, ctx(user_of(51)), 40);
+    assert_eq!((d.usage.prompt + d.usage.completion, d.finish), (64, gogi_proto::generation::Finish::ContextFull), "the reply fills the last token: {d:?}");
+}
+
+#[test]
+fn a_call_cut_by_max_tokens_is_kept_as_written_with_no_head() {
+    let s = Server::start(Config::default()).unwrap();
+    let tool = json!({"name": "next", "input_schema": {"type": "object"}});
+    let context = json!({"thinking": false, "tools": [tool], "messages": [{"role": "user", "content": "CALL it"}]});
+    let (code, v) = post(&s, "/council/v2/generations", json!({"model": "toy", "context": context, "max_tokens": 3, "sample": {"temperature": 0}}));
+    assert_eq!(code, 200, "{v}");
+    let d: GenerationDone = serde_json::from_value(v.clone()).unwrap();
+    assert_eq!((d.finish, d.phase, d.head.clone()), (gogi_proto::generation::Finish::MaxTokens, Some(Phase::Call), None), "{v}");
+    let [gogi_proto::generation::ReplyToolCall::Unparsed { id, raw, error, .. }] = d.tool_calls.as_slice() else { panic!("one call kept as written: {v}") };
+    assert_eq!((raw.as_str(), id.is_empty()), ("ne", false));
+    assert!(error.contains("endcall"), "{error}");
+    assert_eq!(d.as_open_message(), None);
+    let whole = generate(&s, context, 64);
+    assert_eq!((whole.finish, whole.tool_calls.len()), (gogi_proto::generation::Finish::ToolUse, 1));
 }

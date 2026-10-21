@@ -39,7 +39,7 @@ impl ReadsRequest {
             return Err(Invalid::param("contexts", "reads name 1 to 8 contexts"));
         }
         for (i, c) in self.contexts.iter().enumerate() {
-            c.check().map_err(|e| Invalid::param("contexts", format!("contexts[{}]: {}", i, e.message)))?;
+            c.check_read(i, "raw reads read")?;
         }
         if self.suffixes.is_empty() {
             return Err(Invalid::param("suffixes", "reads need a suffix"));
@@ -127,6 +127,15 @@ mod tests {
             assert_eq!(r.validate().unwrap_err().param.as_deref(), Some(param), "{r:?}");
         }
         ReadsRequest { contexts: vec![req().contexts[0].clone(); 8], ..req() }.validate().unwrap();
+    }
+
+    #[test]
+    fn reads_never_read_an_open_message() {
+        let open = Context { messages: vec![Message::user("u"), Message::assistant("The plan:").opened()], ..Default::default() };
+        let e = ReadsRequest { contexts: vec![req().contexts[0].clone(), open], ..req() }.validate().unwrap_err();
+        assert_eq!((e.param.as_deref(), e.message.as_str()), (Some("continue"), "contexts[1]: raw reads read no open message; send continue: true only to a generation"));
+        let broken = Context { messages: vec![Message::user("u").opened()], ..Default::default() };
+        assert_eq!(ReadsRequest { contexts: vec![broken], ..req() }.validate().unwrap_err().param.as_deref(), Some("continue"));
     }
 
     #[test]

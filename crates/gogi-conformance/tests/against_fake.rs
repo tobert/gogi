@@ -72,3 +72,54 @@ fn a_model_that_is_not_ready_cannot_be_checked() {
     assert_eq!(failures(&r).len(), 1, "{:#?}", failures(&r));
     assert!(failures(&r)[0].starts_with("a served model to check is ready"));
 }
+
+#[test]
+fn the_fake_passes_the_continuation_checks() {
+    let server = Server::start(Config::default()).unwrap();
+    let r = run(Opts { url: server.url(), restart: None, model: None }, false);
+    assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
+    for name in [
+        "a cut reply names the phase of its next token",
+        "a cut reply's head is listed last in snapshots",
+        "a dry run of a cut reply sent back open keeps its head",
+        "a cut reply is the start of the whole reply",
+        "a cut reply's phase agrees with its text and the whole reply",
+        "a continuation writes what the whole reply wrote",
+        "a continuation's usage relations hold",
+        "a continuation starts in the phase its open message sets",
+        "a continuation's stream returns an event stream",
+        "a continuation's stream events decode as the contract's events",
+        "a continuation's stream ends with exactly one done",
+        "a continuation's stream done equals the response without stream",
+        "a continuation's stream usage relations hold",
+        "snap: true on the open message is allowed",
+        "open content with thinking absent is allowed",
+        "continue: false on the last message is a closed message",
+        "a build without dry_run refuses an open message, naming continue",
+        "a continuation's done starts with the open text",
+        "a continuation resumed from the head feeds at most the last sampled token",
+        "a continuation's completion counts only the sampled tokens",
+        "a continuation's stream counts n from 1 over the sampled tokens",
+        "a continuation's stream sends one token event for each completion token",
+        "a continuation's pieces join to done's text after the open text",
+        "an empty content after reasoning closes the thinking",
+        "a continuation of open content the client wrote starts with it",
+        "a dry run of an open message the client wrote reports what it would feed",
+        "an open message that is not last is a 400 naming continue",
+        "an open user message is a 400 naming continue",
+        "an open message with tool_calls is a 400 naming continue",
+        "an open message with no text is a 400 naming continue",
+        "an open message with reasoning and thinking false is a 400 naming continue",
+        "an open message with reasoning and thinking absent is a 400 naming continue",
+        "continue that is a string is a 400 naming continue",
+        "continue that is null is a 400 naming continue",
+        "a decision with an open context is a 400 naming continue",
+        "raw reads of an open context are a 400 naming continue",
+        "continue: false on earlier messages changes nothing",
+        "a build past context_tokens is a 413 too_large naming context_tokens",
+        "raw reads past context_tokens are a 413 too_large naming context_tokens",
+    ] {
+        assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name}: {:?}", r.checks.iter().find(|c| c.name == name));
+    }
+    assert!(r.checks.iter().any(|c| c.name == "a riding decision rides with a continuation" && c.status == Status::Skip), "the fake does not declare ride");
+}

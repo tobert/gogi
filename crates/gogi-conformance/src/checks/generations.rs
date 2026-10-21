@@ -1,6 +1,7 @@
 use gogi_proto::generation::{check_pieces, Finish, GenerationDone, Phase, StreamEvent};
 use serde_json::{Value, json};
 
+use super::continue_after;
 use crate::http::sse_events;
 use crate::{Suite, num};
 
@@ -26,7 +27,11 @@ impl Suite {
         } else {
             self.r.skip("reply stats are well formed where reported", "the server reports no stats");
         }
-        self.r.check("generation holds its head", g["head"].is_string(), &g["head"]);
+        if g["head"].is_null() {
+            self.r.skip("generation holds its head", "the server held no head; head may be null");
+        } else {
+            self.r.check("generation holds its head", g["head"].is_string(), &g["head"]);
+        }
         let ids: Vec<&str> = done.tool_calls.iter().map(|c| c.id()).collect();
         let mut unique = ids.clone();
         unique.sort();
@@ -37,7 +42,7 @@ impl Suite {
         // The context with the reply appended builds to the head the generation reported.
         if g["head"].is_string() {
             let mut with_reply = msgs.clone();
-            let cont = self.continue_after(&g, "unused");
+            let cont = continue_after(&g, "unused");
             with_reply.push(cont[0].clone());
             let rctx = self.ctx(with_reply);
             if let Some(r) = self.build("the reply appended to its context builds", &rctx, false) {
@@ -47,7 +52,7 @@ impl Suite {
 
         // A reply and a new user message start from the held head.
         let mut m2 = msgs.clone();
-        m2.extend(self.continue_after(&g, "Now list what is left."));
+        m2.extend(continue_after(&g, "Now list what is left."));
         let c2 = self.ctx(m2);
         if let Some(g2) = self.generate("a reply and a new user message succeed", &c2, 200) {
             let held = g["head"].is_string();
@@ -67,7 +72,7 @@ impl Suite {
         if let Some(q) = self.generate("generation with thinking off succeeds", &quiet, 100) {
             if q["head"].is_string() && q["reasoning"].as_str().is_none_or(str::is_empty) {
                 let mut m3 = msgs.clone();
-                m3.extend(self.continue_after(&q, "Now list what is left."));
+                m3.extend(continue_after(&q, "Now list what is left."));
                 let mut c3 = self.ctx(m3);
                 c3["thinking"] = json!(false);
                 if let Some(q2) = self.generate("with thinking off, a reply and a new user message succeed", &c3, 50) {
@@ -80,7 +85,7 @@ impl Suite {
 
         // Greedy decoding replays.
         if let Some(g3) = self.generate("greedy generation again succeeds", &ctx, 300) {
-            let same = ["content", "reasoning", "tool_calls", "finish"].iter().all(|k| g3[*k] == g[*k]);
+            let same = ["content", "reasoning", "finish"].iter().all(|k| g3[*k] == g[*k]) && call_shape(&g3["tool_calls"]) == call_shape(&g["tool_calls"]);
             self.r.check("temperature 0 replays the reply", same, (&g3, &g));
         }
 
@@ -118,7 +123,7 @@ impl Suite {
                         let joined = check_pieces(&tokens.iter().map(|t| (*t).clone()).collect::<Vec<_>>(), d);
                         self.r.check("stream reasoning and content pieces join to done's text", joined.is_ok(), joined.err());
                         let dv = serde_json::to_value(d).unwrap_or_default();
-                        self.r.check("the stream's done event equals the response without stream", ["content", "reasoning", "finish"].iter().all(|k| dv[*k] == g[*k]) && without_stats(&dv["tool_calls"]) == without_stats(&g["tool_calls"]) && d.usage.completion == u.completion, (&dv, &g));
+                        self.r.check("the stream's done event equals the response without stream", ["content", "reasoning", "finish"].iter().all(|k| dv[*k] == g[*k]) && call_shape(&dv["tool_calls"]) == call_shape(&g["tool_calls"]) && d.usage.completion == u.completion, (&dv, &g));
                         self.r.check("stream stats match the call without stream within 1e-4", stats_close(&dv, &g, 1e-4), (&dv["stats"], &g["stats"]));
                     }
                     Some(StreamEvent::Error(e)) => {
@@ -156,11 +161,11 @@ impl Suite {
         self.refused("a generation refuses an unknown member", "POST", "/council/v2/generations", Some(json!({"context": ctx, "max_tokens": 8, "from": {}})), 400);
 
         // A reply cut off by max_tokens says so.
-        if let Some(short) = self.generate("a generation of 1 token succeeds", &ctx, 1) {
-            if let Some(d) = self.decode::<GenerationDone>("a generation of 1 token decodes", &short) {
-                self.check_finish("a generation of 1 token", &d, 1);
-                self.r.check("a generation of 1 token ends at max_tokens or with its turn", d.usage.completion <= 1 && matches!(d.finish, Finish::MaxTokens | Finish::EndTurn | Finish::ToolUse), &short);
-            }
+        if let Some(short) = self.generate("a generation of 1 token succeeds", &ctx, 1)
+            && let Some(d) = self.decode::<GenerationDone>("a generation of 1 token decodes", &short)
+        {
+            self.check_finish("a generation of 1 token", &d, 1);
+            self.r.check("a generation of 1 token ends at max_tokens or with its turn", d.usage.completion <= 1 && matches!(d.finish, Finish::MaxTokens | Finish::EndTurn | Finish::ToolUse), &short);
         }
     }
 
@@ -203,14 +208,16 @@ fn head_tokens(g: &Value) -> i64 {
     g["snapshots"].as_array().and_then(|s| s.iter().find(|x| x["id"] == g["head"])).map_or(i64::MAX, |x| num(&x["tokens"]))
 }
 
-/// A reply's tool calls without their `stats`, which are diagnostics: a server may compute them
-/// from logits whose last bits depend on how the prompt was fed.
-fn without_stats(calls: &Value) -> Value {
+/// A reply's tool calls without their `id`, which the server chooses for each request, and their
+/// `stats`, which are diagnostics: a server may compute them from logits whose last bits depend on
+/// how the prompt was fed.
+pub(crate) fn call_shape(calls: &Value) -> Value {
     let mut c = calls.clone();
     if let Some(a) = c.as_array_mut() {
         for call in a {
             if let Some(o) = call.as_object_mut() {
                 o.remove("stats");
+                o.remove("id");
             }
         }
     }
@@ -252,6 +259,15 @@ mod tests {
 
     /// Null stats pass; stats with no tokens, a minimum above the mean, a positive mean log
     /// probability, or a mean entropy above the maximum fail.
+    #[test]
+    fn calls_compare_without_their_ids_and_stats() {
+        let a = json!([{"id": "call_1", "name": "shell", "input": {"command": "ls"}, "stats": {"tokens": 3}}]);
+        let b = json!([{"id": "c9", "name": "shell", "input": {"command": "ls"}}]);
+        assert_eq!(call_shape(&a), call_shape(&b));
+        let c = json!([{"id": "c9", "name": "shell", "input": {"command": "pwd"}}]);
+        assert_ne!(call_shape(&a), call_shape(&c));
+    }
+
     #[test]
     fn stats_checks_can_fail() {
         let ok = json!({"tokens": 3, "mean_logprob": -0.1, "min_logprob": -0.5, "mean_entropy": 0.2, "max_entropy": 0.9});
