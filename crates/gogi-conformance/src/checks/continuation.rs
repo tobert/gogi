@@ -11,8 +11,10 @@ use serde_json::{Value, json};
 use crate::http::sse_events;
 use crate::{Suite, num};
 
-/// The `max_tokens` of the reply the checks cut and resume.
-const CUT: u32 = 8;
+/// The most tokens of the reply the checks cut and resume.
+const CUT: u64 = 8;
+/// The `max_tokens` of the whole reply the checks cut.
+const WHOLE: u32 = 300;
 /// The `max_tokens` of a continuation.
 const RESUME: u32 = 40;
 
@@ -51,15 +53,24 @@ impl Suite {
         c
     }
 
-    /// Cuts a reply with a small `max_tokens`, sends it back open, and checks the continuation.
+    /// Cuts a greedy reply before its end, sends it back open, and checks the continuation.
     /// Returns the open message it sent, when the reply could be continued.
     fn resume_a_cut_reply(&mut self) -> Option<Message> {
         let opening = self.opening("continuation");
         let ctx = self.ctx(opening.clone());
-        let g = self.generate("a cut reply succeeds", &ctx, CUT)?;
+        let w = self.generate("a reply to cut succeeds", &ctx, WHOLE)?;
+        let whole = self.decode::<GenerationDone>("a reply to cut decodes", &w)?;
+        self.close_the_thinking(&opening, &whole);
+        if whole.usage.completion < 2 {
+            self.r.skip("a cut reply resumes", format!("the whole reply has {} token, too few to cut", whole.usage.completion));
+            return None;
+        }
+        // Greedy replays, so the same request with a smaller max_tokens is cut before the end.
+        let k = CUT.min(whole.usage.completion - 1) as u32;
+        let g = self.generate("a cut reply succeeds", &ctx, k)?;
         let cut = self.decode::<GenerationDone>("a cut reply decodes", &g)?;
         if cut.finish != Finish::MaxTokens {
-            self.r.skip("a cut reply resumes", format!("the reply ended with {:?} within {} tokens", cut.finish, CUT));
+            self.r.fail("a cut reply resumes", format!("the reply ended with {:?} within {} tokens, though the same request wrote {} tokens with a larger max_tokens", cut.finish, k, whole.usage.completion));
             return None;
         }
         self.r.check("a cut reply names the phase of its next token", cut.phase.is_some_and(|p| p != Phase::Unknown), &g["phase"]);
@@ -107,7 +118,6 @@ impl Suite {
         self.r.check("a continuation's completion counts only the sampled tokens", u.completion <= RESUME as u64 && u.reasoning <= u.completion && u.prompt > cut.usage.prompt, (u, cut.usage));
         self.check_finish("a continuation", &d2, RESUME as u64);
         self.stream_a_continuation(&octx, &open, &d2);
-        self.close_the_thinking(&opening, &cut);
         Some(open)
     }
 
@@ -132,17 +142,17 @@ impl Suite {
         self.r.check("a continuation's stream ends with the reply without stream", (&done.content, &done.reasoning, done.finish) == (&unstreamed.content, &unstreamed.reasoning, unstreamed.finish), (&done.content, &unstreamed.content));
     }
 
-    /// Sends the cut reply's reasoning back with `content: ""`, which closes the thinking.
-    fn close_the_thinking(&mut self, opening: &[Value], cut: &GenerationDone) {
-        if cut.reasoning.is_empty() || !cut.content.is_empty() {
-            self.r.skip("an empty content after reasoning closes the thinking", "the cut reply has no reasoning alone to close");
+    /// Sends a reply's reasoning back open with `content: ""`, which closes the thinking.
+    fn close_the_thinking(&mut self, opening: &[Value], reply: &GenerationDone) {
+        if reply.reasoning.is_empty() {
+            self.r.skip("an empty content after reasoning closes the thinking", "the reply wrote no reasoning");
             return;
         }
-        let open = json!({"role": "assistant", "reasoning": cut.reasoning, "content": "", "continue": true});
+        let open = json!({"role": "assistant", "reasoning": reply.reasoning, "content": "", "continue": true});
         let mut messages = opening.to_vec();
         messages.push(open);
         let Some(g) = self.generate("a continuation with an empty content succeeds", &self.ctx(messages), RESUME) else { return };
-        self.r.check("an empty content after reasoning closes the thinking", g["reasoning"] == json!(cut.reasoning) && num(&g["usage"]["reasoning"]) == 0, &g);
+        self.r.check("an empty content after reasoning closes the thinking", g["reasoning"] == json!(reply.reasoning) && num(&g["usage"]["reasoning"]) == 0, &g);
     }
 
     /// Open text the suite writes: the server continues it, or refuses it at its seam, naming
