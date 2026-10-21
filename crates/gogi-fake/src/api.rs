@@ -17,7 +17,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
 use gogi_toy::read;
-use gogi_toy::reply::{Reply, ReplyParser, Step};
+use gogi_toy::reply::{Call, Reply, ReplyParser, Step};
 use gogi_toy::{self as model, State, VOCAB};
 use crate::state::{BYTES_PER_TOKEN, FakeModel, Pins, Store, snapshot_id};
 
@@ -66,6 +66,11 @@ fn context_full(prompt: usize, limit: usize) -> Resp {
         json!({"error": {"type": "context_full", "message": format!("the prompt is {} tokens; context_tokens is {}", prompt, limit),
                          "prompt_tokens": prompt, "context_tokens": limit}}),
     )
+}
+
+/// The `413` for a context, or a context and a raw read's suffix, past `context_tokens`.
+fn too_long(what: &str, n: usize, limit: usize) -> Resp {
+    err(413, "too_large", format!("nothing ran: the {} is {} tokens; context_tokens is {}; shorten the context", what, n, limit), Some("context_tokens"))
 }
 
 /// Decodes a request body. A missing or unknown member, or a `continue` that is not a boolean, is
@@ -268,8 +273,8 @@ fn build_route(store: &mut Store, body: &[u8]) -> Resp {
     let dry_run = req.dry_run.unwrap_or(false);
     let limit = store.cfg.context_tokens;
     let n = model::render(&req.context.tools, req.context.thinks(), &req.context.messages, false).end;
-    if n >= limit {
-        return context_full(n, limit);
+    if n > limit {
+        return too_long("context", n, limit);
     }
     let b = build(store, &m, &req.context, dry_run);
     let snapshots = if dry_run { vec![] } else { b.infos(store) };
@@ -352,8 +357,8 @@ fn reads(store: &mut Store, body: &[u8]) -> Resp {
     let mut usage = Usage::default();
     for (ci, c) in req.contexts.iter().enumerate() {
         let n = model::render(&c.tools, c.thinks(), &c.messages, false).end;
-        if n + longest >= store.cfg.context_tokens {
-            return context_full(n + longest, store.cfg.context_tokens);
+        if n + longest > store.cfg.context_tokens {
+            return too_long("context and its longest suffix", n + longest, store.cfg.context_tokens);
         }
         let b = build(store, &m, c, false);
         let base = State::after(m.seed, &b.tokens);
@@ -466,7 +471,7 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
     let open = c.open();
     let starts_thinking = model::starts_in_reasoning(thinking, &c.messages);
     let prompt = model::render(&c.tools, thinking, &c.messages, true);
-    if prompt.tokens.len() + 1 >= limit {
+    if prompt.tokens.len() >= limit {
         return context_full(prompt.tokens.len(), limit);
     }
     let stream = req.stream.unwrap_or(false);
@@ -488,20 +493,18 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
     let mut parser = ReplyParser::new(starts_thinking);
     let mut forced: VecDeque<u32> = VecDeque::new();
     let mut queued = false;
-    let mut calls: Vec<(String, Map<String, Value>)> = Vec::new();
     let mut events = vec![StreamEvent::Ping];
     let mut ended = false;
     let mut n = 0;
     let mut thought = 0;
     let letters: Vec<u32> = (b'a'..=b'z').map(u32::from).chain([u32::from(b' ')]).collect();
-    while n < max_tokens && toks.len() + 1 < limit {
+    while n < max_tokens && toks.len() < limit {
         if phase == Phase::Answer && trigger && !queued {
             queued = true;
             let name = c.tool_names().first().copied().unwrap_or("tool").to_string();
             forced.push_back(model::CALL);
             forced.extend(format!("{}({{}})", name).bytes().map(u32::from));
             forced.extend([model::ENDCALL, model::END]);
-            calls.push((name, Map::new()));
         }
         let (tok, p, h) = if let Some(f) = forced.pop_front() {
             (f, 1.0, 0.0)
@@ -532,18 +535,32 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
             _ => {}
         }
     }
-    let finish = match (ended, calls.is_empty()) {
-        (true, true) => "end_turn",
-        (true, false) => "tool_use",
-        _ if toks.len() + 1 >= limit => "context_full",
-        _ => "max_tokens",
-    };
     let next = parser.phase();
     let Reply { reasoning, content, calls: written, .. } = parser.finish();
+    // The reply's turn ending comes first, then a full context, then max_tokens.
+    let finish = match (ended, written.is_empty()) {
+        (true, true) => "end_turn",
+        (true, false) => "tool_use",
+        _ if toks.len() >= limit => "context_full",
+        _ => "max_tokens",
+    };
     // `done` is the whole message: the open text as sent, then the sampled text.
     let reasoning = format!("{}{}", open.and_then(|m| m.reasoning.as_deref()).unwrap_or(""), reasoning);
     let content = format!("{}{}", open.and_then(|m| m.content.as_deref()).unwrap_or(""), content);
-    let tool_calls: Vec<ToolCall> = calls.into_iter().enumerate().map(|(k, (name, input))| ToolCall { id: format!("call_{}_{}", prompt.tokens.len(), k), name, input }).collect();
+    // The calls as the parser read them: a call that does not parse is kept as written.
+    let call_id = |k: usize| format!("call_{}_{}", prompt.tokens.len(), k);
+    let tool_calls: Vec<ToolCall> = written.iter().enumerate().filter_map(|(k, w)| match w {
+        Call::Parsed { name, input } => Some(ToolCall { id: call_id(k), name: name.clone(), input: input.clone() }),
+        Call::Malformed { .. } => None,
+    }).collect();
+    let wire_calls: Vec<Value> = written.iter().enumerate().map(|(k, w)| match w {
+        Call::Parsed { name, input } => json!({"id": call_id(k), "name": name, "input": input}),
+        Call::Malformed { text, error } => {
+            let name = text.split_once('(').map(|(n, _)| n).filter(|n| !n.is_empty());
+            json!({"id": call_id(k), "name": name, "raw": text, "error": error})
+        }
+    }).collect();
+    let unparsed = tool_calls.len() != written.len();
     let reply = Message {
         reasoning: Some(reasoning.clone()).filter(|r| !r.is_empty()),
         tool_calls: tool_calls.clone(),
@@ -566,6 +583,9 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
         } else {
             (Value::Null, b.infos(store))
         }
+    } else if unparsed {
+        // A call that does not parse goes back as text, so the server cannot know its rendering.
+        (Value::Null, b.infos(store))
     } else {
         messages.push(reply);
         let held = build(store, &m, &Context { messages, ..c.clone() }, false);
@@ -574,7 +594,7 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
     let usage = Usage { prompt: prompt.tokens.len() as u64, kept: b.kept as u64, fed: (prompt.tokens.len() - b.kept) as u64, completion: n as u64, reasoning: thought };
     let mut done = json!({
         "content": content, "reasoning": reasoning,
-        "tool_calls": tool_calls.iter().map(|t| json!({"id": t.id, "name": t.name, "input": t.input})).collect::<Vec<_>>(),
+        "tool_calls": wire_calls,
         "finish": finish,
         "usage": usage,
         "head": head, "snapshots": snapshots, "seed": seed, "ms": {"prefill": 0.0, "decode": 0.0}, "model": m.name,

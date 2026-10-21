@@ -97,10 +97,12 @@ function of that hash, between -6 and 6, so the same prefix gives the same bits.
   thinking on it first writes its thought, ending at `<endthink>`. At temperature 0 it takes the
   largest logit. Without `sample.seed` the seed comes from the prompt, so a reply replays.
 - A context with tools whose last message contains the text `CALL` gets a reply that calls its
-  first tool with the input `{}`. Call ids are `call_{prompt tokens}_{k}`.
-- `finish` is `end_turn` or `tool_use` when the reply wrote `<end>`, `max_tokens` when it wrote
-  `max_tokens` tokens, and `context_full` when the prompt and the reply reached
-  `context_tokens`. `usage.reasoning` counts the tokens of the thought, `<endthink>` included.
+  first tool with the input `{}`. Call ids are `call_{prompt tokens}_{k}`. `done.tool_calls`
+  are the calls the reply parser read, so a call cut before `<endcall>` is kept as written,
+  `{id, name, raw, error}`.
+- `finish` is `end_turn` or `tool_use` when the reply wrote `<end>`, then `context_full` when the
+  prompt and the reply reached `context_tokens`, then `max_tokens` when it wrote `max_tokens`
+  tokens. A reply fills the context up to its last token. `usage.reasoning` counts the tokens of the thought, `<endthink>` included.
 - The fake declares `continuation`. A continuation's `done` is the open text as sent followed by
   the sampled text, with nothing trimmed. `usage.prompt` counts the open text, and
   `usage.completion`, `usage.reasoning`, and the stream's `n` count only the sampled tokens. A
@@ -140,5 +142,7 @@ function of that hash, between -6 and 6, so the same prefix gives the same bits.
 
 `context_tokens` defaults to 4096, `decision_context_tokens` to 3072, `pin_bytes` to 1 MiB,
 and `max_snapshots` to 10,000. Each is a field of `Config` in Rust and an argument of
-`gogi.FakeServer` in Python. A prompt past
-`context_tokens` is a `413` with `error.type` `context_full`.
+`gogi.FakeServer` in Python. A context of exactly `context_tokens` builds; a longer one, or a
+raw read whose context and longest suffix are longer, is a `413` with `error.type` `too_large`
+naming `context_tokens`. A generation's prompt of `context_tokens` or more leaves no room for a
+reply: a `413` with `error.type` `context_full`.
