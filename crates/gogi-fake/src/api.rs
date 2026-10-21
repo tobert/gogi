@@ -488,7 +488,11 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
     let trigger = !c.tools.is_empty() && last.contains("CALL");
 
     let mut toks = prompt.tokens.clone();
-    let mut st = State::after(m.seed, &toks);
+    // A build from a sealed snapshot reads its model state rounded, then feeds the rest.
+    let mut st = match &b.from {
+        Some(id) if store.sealed(id) => toks[b.kept..].iter().fold(State::after(m.seed, &toks[..b.kept]).rounded(), |s, &t| s.step(t)),
+        _ => State::after(m.seed, &toks),
+    };
     let mut phase = if starts_thinking { Phase::Think } else { Phase::Answer };
     let mut parser = ReplyParser::new(starts_thinking);
     let mut forced: VecDeque<u32> = VecDeque::new();
@@ -579,6 +583,9 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
         let after = Context { messages, ..c.clone() };
         if next != EventPhase::Call && written.is_empty() && after.check().is_ok() {
             let held = build(store, &m, &after, false);
+            if store.cfg.seal_cut_heads {
+                store.seal(&held.head);
+            }
             (json!(held.head), held.infos(store))
         } else {
             (Value::Null, b.infos(store))

@@ -124,6 +124,12 @@ function of that hash, between -6 and 6, so the same prefix gives the same bits.
   so sending it back open feeds nothing. A reply cut inside a call, or after one, has `head`
   `null`, because an open message holds no calls.
 - `POST /contexts` reads an open message only with `dry_run: true`.
+- With `Config::seal_cut_heads` (`--seal-cut-heads`), the fake holds a cut reply's head sealed,
+  as a server that rounds model state at a boundary does: a generation that starts from a sealed
+  snapshot reads `gogi_toy::State::rounded` there and feeds the rest. Its continuation still
+  starts with the open text and replays from the same head, but can differ from the uncut reply.
+  The fake's simplification: only a build whose `from` is the sealed snapshot reads it rounded,
+  and the sealed head keeps the id of the same tokens unsealed. Off by default.
 - Pins keep a snapshot and its parents. `pin_bytes` caps the bytes they keep together.
   `max_snapshots` drops the oldest unpinned snapshots first.
 - With `--state-dir`, specs, pins, and the snapshots pins keep survive a restart. Other

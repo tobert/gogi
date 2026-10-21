@@ -44,12 +44,15 @@ pub struct Config {
     pub pin_bytes: u64,
     /// Past this many held snapshots, the oldest unpinned snapshots are evicted first.
     pub max_snapshots: usize,
+    /// Hold a cut reply's head sealed: a build that starts from it reads a rounded model state, as
+    /// a server that rounds model state at a boundary does.
+    pub seal_cut_heads: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         let toy = FakeModel { aliases: vec!["toy".into()], ..FakeModel::ready("gogi-toy-1", 0) };
-        Config { addr: "127.0.0.1:0".into(), models: vec![toy], state_dir: None, context_tokens: 4096, decision_context_tokens: 3072, pin_bytes: 1 << 20, max_snapshots: 10_000 }
+        Config { addr: "127.0.0.1:0".into(), models: vec![toy], state_dir: None, context_tokens: 4096, decision_context_tokens: 3072, pin_bytes: 1 << 20, max_snapshots: 10_000, seal_cut_heads: false }
     }
 }
 
@@ -58,6 +61,8 @@ pub struct Snap {
     pub model: String,
     pub tokens: Arc<Vec<u32>>,
     pub parent: Option<String>,
+    /// A build that starts from it reads its model state rounded.
+    pub sealed: bool,
     born: u64,
 }
 
@@ -132,8 +137,20 @@ impl Store {
             return;
         }
         self.next_born += 1;
-        self.snaps.insert(id, Snap { model: model.to_string(), tokens: Arc::new(tokens.to_vec()), parent, born: self.next_born });
+        self.snaps.insert(id, Snap { model: model.to_string(), tokens: Arc::new(tokens.to_vec()), parent, sealed: false, born: self.next_born });
         self.evict();
+    }
+
+    /// Seals a held snapshot, so a build that starts from it reads its model state rounded.
+    pub fn seal(&mut self, id: &str) {
+        if let Some(s) = self.snaps.get_mut(id) {
+            s.sealed = true;
+        }
+    }
+
+    /// Whether a held snapshot is sealed.
+    pub fn sealed(&self, id: &str) -> bool {
+        self.snaps.get(id).is_some_and(|s| s.sealed)
     }
 
     /// The tokens a snapshot adds to its parent's.
@@ -195,7 +212,7 @@ impl Store {
         let Some(dir) = &self.cfg.state_dir else { return };
         let kept = self.kept();
         let snaps: serde_json::Map<String, Value> =
-            kept.iter().filter_map(|id| self.snaps.get(id).map(|s| (id.clone(), json!({"model": s.model, "tokens": *s.tokens, "parent": s.parent})))).collect();
+            kept.iter().filter_map(|id| self.snaps.get(id).map(|s| (id.clone(), json!({"model": s.model, "tokens": *s.tokens, "parent": s.parent, "sealed": s.sealed})))).collect();
         let pins: serde_json::Map<String, Value> = self.pins.iter().map(|(o, p)| (o.clone(), json!({"snapshots": p.snapshots, "expires": p.expires}))).collect();
         let v = json!({"specs": self.specs, "pins": pins, "snapshots": snaps});
         let _ = std::fs::create_dir_all(dir);
@@ -218,6 +235,9 @@ impl Store {
         for (id, s) in snaps {
             let tokens: Vec<u32> = s["tokens"].as_array().into_iter().flatten().filter_map(|t| t.as_u64().map(|t| t as u32)).collect();
             self.hold(id.clone(), s["model"].as_str().unwrap_or(""), &tokens, s["parent"].as_str().map(String::from));
+            if s["sealed"] == json!(true) {
+                self.seal(id);
+            }
         }
         let now = self.now();
         for (o, p) in v["pins"].as_object().into_iter().flatten() {

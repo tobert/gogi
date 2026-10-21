@@ -1,4 +1,4 @@
-//! `gogi-fake [--listen ADDR] [--state-dir DIR] [--context-tokens N] [--model NAME]...`
+//! `gogi-fake [--listen ADDR] [--state-dir DIR] [--context-tokens N] [--seal-cut-heads] [--model NAME]...`
 
 use gogi_fake::{Config, FakeModel, Server};
 
@@ -12,6 +12,7 @@ fn main() {
             "--listen" => cfg.addr = value("--listen"),
             "--state-dir" => cfg.state_dir = Some(value("--state-dir").into()),
             "--context-tokens" => cfg.context_tokens = value("--context-tokens").parse().unwrap_or_else(|_| usage("--context-tokens is a number")),
+            "--seal-cut-heads" => cfg.seal_cut_heads = true,
             "--model" => {
                 let name = value("--model");
                 models.push(FakeModel::ready(&name, models.len() as u64));
@@ -30,6 +31,6 @@ fn main() {
 }
 
 fn usage(msg: &str) -> ! {
-    eprintln!("gogi-fake: {}\nusage: gogi-fake [--listen ADDR] [--state-dir DIR] [--context-tokens N] [--model NAME]...\n\n  --model NAME  serve a model named NAME, ready; repeat it to serve more than one. Default: gogi-toy-1, alias toy", msg);
+    eprintln!("gogi-fake: {}\nusage: gogi-fake [--listen ADDR] [--state-dir DIR] [--context-tokens N] [--seal-cut-heads] [--model NAME]...\n\n  --model NAME      serve a model named NAME, ready; repeat it to serve more than one. Default: gogi-toy-1, alias toy\n  --seal-cut-heads  hold a cut reply's head sealed, so a continuation from it reads a rounded model state", msg);
     std::process::exit(2)
 }

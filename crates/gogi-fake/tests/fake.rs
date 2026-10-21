@@ -594,3 +594,25 @@ fn a_call_cut_by_max_tokens_is_kept_as_written_with_no_head() {
     let whole = generate(&s, context, 64);
     assert_eq!((whole.finish, whole.tool_calls.len()), (gogi_proto::generation::Finish::ToolUse, 1));
 }
+
+#[test]
+fn a_sealed_cut_head_rounds_the_state_a_continuation_starts_from() {
+    let s = Server::start(Config { seal_cut_heads: true, ..Config::default() }).unwrap();
+    let whole = generate(&s, thinking(opening()), 300);
+    let mut differs = 0;
+    for k in 1..whole.usage.completion.min(12) {
+        let cut = generate(&s, thinking(opening()), k);
+        let open = cut.as_open_message().unwrap();
+        let mut messages = opening();
+        messages.push(serde_json::to_value(&open).unwrap());
+        let rest = generate(&s, thinking(messages.clone()), 300 - k);
+        rest.continues(&open).unwrap();
+        assert_eq!((rest.usage.kept, rest.usage.fed), (cut.usage.prompt + k, 0), "k {k}: the continuation starts from the sealed head");
+        let again = generate(&s, thinking(messages), 300 - k);
+        assert_eq!((&again.reasoning, &again.content), (&rest.reasoning, &rest.content), "k {k}: it replays from the same head");
+        if (&rest.reasoning, &rest.content) != (&whole.reasoning, &whole.content) {
+            differs += 1;
+        }
+    }
+    assert!(differs > 0, "the rounded state changed a continuation");
+}
