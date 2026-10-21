@@ -52,7 +52,7 @@ fn calls(v: &Value) -> Vec<(Value, Value)> {
 }
 
 /// Probabilities in [0, 1] that sum to 1, and a mass at most 0.
-fn well_formed(a: &Value) -> bool {
+pub(crate) fn well_formed(a: &Value) -> bool {
     let Some(p) = a["probabilities"].as_object() else { return false };
     let ps: Vec<f64> = p.values().filter_map(Value::as_f64).collect();
     ps.len() == p.len() && ps.iter().all(|x| (0.0..=1.0).contains(x)) && (ps.iter().sum::<f64>() - 1.0).abs() < 1e-9 && a["mass"].as_f64().is_some_and(|m| m <= 1e-12)
