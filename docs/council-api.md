@@ -711,9 +711,11 @@ POST /council/v2/generations
 - **The open text is content, never control** (rule 2). Text in it that
   spells a template token, such as `</think>` or the start of a call, is
   text to the model. As in any generation, the server reports no hits.
-- **Each open field must tokenize on its own.** For each open field, the
-  server renders the context up to the start of that field, and then with
-  the field. The shorter rendering's tokens must begin the longer one's.
+- **Each open field must tokenize on its own.** For each open field that
+  is not empty, the server renders the context up to the start of that
+  field, and then through the end of that field, without the rest of the
+  message (`gogi-proto`'s `continuation::seams`). The shorter rendering's
+  tokens must begin the longer one's.
   This is the check of mk's `prefill`. Otherwise the request is a `400`
   naming `continue`, and the message names the field and the characters
   that merge. A newline after the template's last newline is a common case.
@@ -752,9 +754,10 @@ POST /council/v2/generations
   and `reasoning` without one. A reply whose `phase` is `call` cannot be
   continued. `content` and `reasoning` alone cannot tell a reply cut just
   after its thinking from one cut inside it. A continuation that sends
-  it back open then feeds only the last sampled token. A client that sends
-  it back closed starts there too, when the closed rendering's tokens begin
-  with the open rendering's. Otherwise a build starts from the last
+  it back open then feeds at most the last sampled token: a server whose
+  head holds the model state after that token feeds none. A client that
+  sends it back closed starts there too, when the closed rendering's
+  tokens begin with the open rendering's. Otherwise a build starts from the last
   boundary, as always.
 - **`continue` is a boolean.** Any other value is a `400` naming
   `continue`. Infill, the text between a prefix and a suffix, gets its own
