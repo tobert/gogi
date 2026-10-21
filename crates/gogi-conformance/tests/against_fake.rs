@@ -84,7 +84,7 @@ fn the_fake_passes_the_continuation_checks() {
         "a dry run of a cut reply sent back open keeps its head",
         "a cut reply is the start of the whole reply",
         "a cut reply's phase agrees with its text and the whole reply",
-        "a continuation writes what the whole reply wrote",
+        "a cut reply keeps its trailing whitespace",
         "a continuation's usage relations hold",
         "a continuation starts in the phase its open message sets",
         "a continuation's stream returns an event stream",
@@ -122,4 +122,16 @@ fn the_fake_passes_the_continuation_checks() {
         assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name}: {:?}", r.checks.iter().find(|c| c.name == name));
     }
     assert!(r.checks.iter().any(|c| c.name == "a riding decision rides with a continuation" && c.status == Status::Skip), "the fake does not declare ride");
+    let whole = r.checks.iter().find(|c| c.name == "a continuation writes what the whole reply wrote");
+    assert!(whole.is_some_and(|c| c.status == Status::Skip && c.detail.contains("head")), "the fake's continuation starts from the cut reply's head: {whole:?}");
+}
+
+#[test]
+fn the_fake_passes_with_sealed_cut_heads() {
+    let server = Server::start(Config { seal_cut_heads: true, ..Config::default() }).unwrap();
+    let r = run(Opts { url: server.url(), restart: None, model: None }, false);
+    assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
+    for name in ["a continuation's done starts with the open text", "a continuation resumed from the head feeds at most the last sampled token", "a cut reply keeps its trailing whitespace", "a continuation's stream done equals the response without stream"] {
+        assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name}: {:?}", r.checks.iter().find(|c| c.name == name));
+    }
 }
