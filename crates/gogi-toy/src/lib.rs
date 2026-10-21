@@ -13,7 +13,13 @@
 //! assistant  <asst> [<think> reasoning <endthink>] content (<call> name(INPUT_JSON) <endcall>)* <end>
 //! tool       <tool> [<error>] content <end>
 //! generation prompt: <asst> [<think>]
+//! open message:      <asst> [<think> reasoning [<endthink>]] [content]
 //! ```
+//!
+//! An open message (`continue: true`) is the last message, rendered without its end in place of
+//! the generation prompt. With thinking on, a `content` member writes `<endthink>`, even when it
+//! is empty; without one, the rendering ends inside the thinking. [`end_open`] gives the tokens
+//! that end it as the template ends a message.
 //!
 //! `<nothink>` renders when the context sets `thinking: false`. With thinking on, every
 //! assistant message renders its `<think>` region, empty when it has no reasoning. A call's id
@@ -112,7 +118,10 @@ fn kept_reasoning(messages: &[Message], i: usize) -> bool {
     !m.tool_calls.is_empty() || !messages[i + 1..].iter().any(|n| n.role == Role::User)
 }
 
-/// The rendering of `messages`, with the generation prompt after it when asked.
+/// The rendering of `messages`, with the generation prompt after it when asked. An open last
+/// message renders as a reply up to its open text, without its end, and takes the place of the
+/// generation prompt: a `content` member closes its thinking, even when it is empty; without
+/// one, the rendering ends inside the thinking.
 pub fn render_tokens(tools: &[Tool], thinking: bool, messages: &[Message], generation_prompt: bool) -> Vec<u32> {
     let mut t = vec![BOS];
     if !thinking {
@@ -142,11 +151,15 @@ pub fn render_tokens(tools: &[Tool], thinking: bool, messages: &[Message], gener
                 push_text(&mut t, text);
             }
             Role::Assistant => {
+                let open = m.open && i + 1 == messages.len();
                 t.push(ASST);
                 if thinking {
                     t.push(THINK);
                     if kept_reasoning(messages, i) {
                         push_text(&mut t, m.reasoning.as_deref().unwrap_or(""));
+                    }
+                    if open && m.content.is_none() {
+                        return t;
                     }
                     t.push(ENDTHINK);
                 }
@@ -155,6 +168,9 @@ pub fn render_tokens(tools: &[Tool], thinking: bool, messages: &[Message], gener
                     t.push(CALL);
                     push_text(&mut t, &format!("{}({})", c.name, serde_json::to_string(&c.input).unwrap()));
                     t.push(ENDCALL);
+                }
+                if open {
+                    return t;
                 }
             }
         }
@@ -167,6 +183,43 @@ pub fn render_tokens(tools: &[Tool], thinking: bool, messages: &[Message], gener
         }
     }
     t
+}
+
+/// Whether a reply's first token is in its reasoning: the generation prompt ends with `<think>`,
+/// or the context ends with an open message that has no `content` member.
+pub fn starts_in_reasoning(thinking: bool, messages: &[Message]) -> bool {
+    match messages.last().filter(|m| m.open) {
+        Some(m) => thinking && m.content.is_none(),
+        None => thinking,
+    }
+}
+
+/// The tokens that end an open message as the template ends a message: `<endthink>` when the
+/// message is open inside its thinking, then `<end>`. A riding `before` reads after them.
+pub fn end_open(thinking: bool, open: &Message) -> Vec<u32> {
+    if thinking && open.content.is_none() { vec![ENDTHINK, END] } else { vec![END] }
+}
+
+/// The seam check's two renderings for each open field of the context's open message: the
+/// field's name, the tokens up to the start of the field, and the tokens with it. Empty when
+/// the context has no open message.
+pub fn open_seams(tools: &[Tool], thinking: bool, messages: &[Message]) -> Vec<(&'static str, Vec<u32>, Vec<u32>)> {
+    let Some((open, rest)) = messages.split_last().filter(|(m, _)| m.open) else { return Vec::new() };
+    let with = |m: &Message| {
+        let mut all = rest.to_vec();
+        all.push(m.clone());
+        render_tokens(tools, thinking, &all, true)
+    };
+    gogi_proto::continuation::seams(open).iter().map(|s| (s.field, with(&s.before), with(&s.with))).collect()
+}
+
+/// Checks that each open field tokenizes on its own. The toy tokenizer is bytes, so a field never
+/// merges with the text before it; the check is the one every server makes.
+pub fn check_open(tools: &[Tool], thinking: bool, messages: &[Message]) -> Result<(), gogi_proto::Invalid> {
+    for (field, before, with) in open_seams(tools, thinking, messages) {
+        gogi_proto::continuation::check_seam(field, &before, &with, |t| t.iter().map(|&x| piece(x)).collect())?;
+    }
+    Ok(())
 }
 
 /// A boundary: the end of message `message`, after `tokens` tokens.
@@ -308,6 +361,66 @@ mod tests {
     fn the_context_end_is_always_a_boundary() {
         let r = render(&[], true, &[Message::user("u"), Message::assistant("a")], false);
         assert_eq!(r.cuts, [Cut { message: 1, tokens: r.end }]);
+    }
+
+    fn open(reasoning: Option<&str>, content: Option<&str>) -> Message {
+        Message { reasoning: reasoning.map(String::from), content: content.map(String::from), ..Message::assistant("").opened() }
+    }
+
+    #[test]
+    fn an_open_message_renders_without_its_end_and_without_a_generation_prompt() {
+        let u = Message::user("u");
+        for (thinking, m, cut) in [
+            (true, open(None, Some("fn ")), 1),
+            (true, open(Some("plan"), Some("")), 1),
+            (true, open(Some("plan"), Some("fn ")), 1),
+            (true, open(Some("plan"), None), 2),
+            (false, open(None, Some("fn ")), 1),
+        ] {
+            let closed = render_tokens(&[], thinking, &[u.clone(), Message { open: false, ..m.clone() }], false);
+            let r = render(&[], thinking, &[u.clone(), m.clone()], true);
+            assert_eq!(r.tokens, closed[..closed.len() - cut], "{m:?}");
+            assert_eq!(render_tokens(&[], thinking, &[u.clone(), m.clone()], false), r.tokens);
+            assert_eq!((r.end, r.cuts.last().map(|c| c.tokens)), (r.tokens.len(), Some(r.tokens.len())), "the open text's end is the context's end");
+            let mut ended = r.tokens.clone();
+            ended.extend(end_open(thinking, &m));
+            assert_eq!(ended, closed, "end_open ends it as the template ends a message: {m:?}");
+        }
+        assert_eq!(&render_tokens(&[], true, &[u.clone(), open(Some("plan"), None)], false)[..], &[BOS, USER, b'u'.into(), END, ASST, THINK, b'p'.into(), b'l'.into(), b'a'.into(), b'n'.into()]);
+    }
+
+    #[test]
+    fn a_cut_reply_renders_open_as_its_prompt_and_its_sampled_tokens() {
+        let u = Message::user("u");
+        let prompt = render(&[], true, &[u.clone(), open(Some("pl"), None)], true).tokens;
+        let mut sampled = prompt.clone();
+        sampled.extend([u32::from(b'a'), u32::from(b'n'), ENDTHINK, u32::from(b'x'), u32::from(b' ')]);
+        assert_eq!(render(&[], true, &[u.clone(), open(Some("plan"), Some("x "))], true).tokens, sampled);
+        let mut fresh = render(&[], true, std::slice::from_ref(&u), true).tokens;
+        fresh.extend([u32::from(b'p'), ENDTHINK]);
+        assert_eq!(render(&[], true, &[u, open(Some("p"), Some(""))], true).tokens, fresh, "a reply cut just after its thinking renders open with content \"\"");
+    }
+
+    #[test]
+    fn a_reply_starts_in_reasoning_after_think_or_inside_an_open_thought() {
+        let u = Message::user("u");
+        assert!(starts_in_reasoning(true, std::slice::from_ref(&u)));
+        assert!(!starts_in_reasoning(false, std::slice::from_ref(&u)));
+        assert!(starts_in_reasoning(true, &[u.clone(), open(Some("plan"), None)]));
+        assert!(!starts_in_reasoning(true, &[u.clone(), open(Some("plan"), Some(""))]), "a content member closes the thinking, even when it is empty");
+        assert!(!starts_in_reasoning(true, &[u.clone(), open(None, Some("fn "))]));
+        assert!(!starts_in_reasoning(false, &[u, open(None, Some("fn "))]));
+    }
+
+    #[test]
+    fn each_open_field_tokenizes_on_its_own_in_the_toy() {
+        let u = Message::user("u\n");
+        check_open(&[], true, &[u.clone(), open(Some("\nplan"), Some("\n```"))]).unwrap();
+        check_open(&[], true, &[u.clone(), Message::assistant("closed")]).unwrap();
+        assert_eq!(open_seams(&[], true, &[u.clone(), open(Some("plan"), Some("x"))]).len(), 2);
+        let seams = open_seams(&[], true, &[u.clone(), open(Some("plan"), Some("x"))]);
+        assert!(seams.iter().all(|(_, before, with)| with.starts_with(before) && with.len() > before.len()), "{seams:?}");
+        assert!(open_seams(&[], true, &[u, Message::assistant("closed")]).is_empty());
     }
 
     #[test]

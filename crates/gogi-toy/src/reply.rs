@@ -1,5 +1,6 @@
 //! The reply parser: reads a reply's tokens, one at a time, after the generation prompt
-//! `<asst> [<think>]`.
+//! `<asst> [<think>]` or after an open message. It reads only the sampled tokens, so text in an
+//! open message, such as `<endthink>` written as text, never changes a phase.
 //!
 //! Each token gets a phase and a piece of text. At the end the parser gives the reply. A call
 //! `<call> name(INPUT_JSON) <endcall>` parses to its name and input. A call that does not parse
@@ -58,8 +59,8 @@ pub struct ReplyParser {
 }
 
 impl ReplyParser {
-    /// `thinking` is true when the generation prompt ended with `<think>`, so the reply starts in
-    /// its reasoning.
+    /// `thinking` is true when the reply starts in its reasoning: the generation prompt ended with
+    /// `<think>`, or an open message without `content` did (`crate::starts_in_reasoning`).
     pub fn new(thinking: bool) -> Self {
         ReplyParser { thinking, in_call: false, ended: false, reasoning: vec![], content: vec![], shown: (0, 0), call: vec![], calls: vec![] }
     }
@@ -111,6 +112,18 @@ impl ReplyParser {
             _ => String::new(),
         };
         Step { phase, piece }
+    }
+
+    /// The phase the next token would have: `call` inside a call, `reasoning` before the reply's
+    /// `<endthink>`, else `content`. A reply cut by `max_tokens` reports it as `done.phase`.
+    pub fn phase(&self) -> Phase {
+        if self.in_call {
+            Phase::Call
+        } else if self.thinking {
+            Phase::Reasoning
+        } else {
+            Phase::Content
+        }
     }
 
     /// The reply read so far. A call still open is malformed: it has no `<endcall>`.
@@ -330,6 +343,21 @@ mod tests {
         let (steps, r) = run(false, &[b'a'.into(), crate::USER, b'b'.into(), END]);
         assert_eq!(steps[1].piece, "");
         assert_eq!(r.content, "ab");
+    }
+
+    #[test]
+    fn phase_names_the_part_the_next_token_belongs_to() {
+        let mut p = ReplyParser::new(true);
+        assert_eq!(p.phase(), Phase::Reasoning);
+        p.push(u32::from(b'a'));
+        assert_eq!(p.phase(), Phase::Reasoning);
+        p.push(ENDTHINK);
+        assert_eq!(p.phase(), Phase::Content, "a reply cut just after <endthink> resumes in its content");
+        p.push(CALL);
+        assert_eq!(p.phase(), Phase::Call);
+        p.push(ENDCALL);
+        assert_eq!(p.phase(), Phase::Content);
+        assert_eq!(ReplyParser::new(false).phase(), Phase::Content);
     }
 
     #[test]
