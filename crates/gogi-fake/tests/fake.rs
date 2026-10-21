@@ -516,7 +516,7 @@ fn each_misuse_of_continue_is_a_400_naming_continue() {
         thinking({ let mut m = with(json!({"role": "assistant", "content": "a", "continue": true})); m.push(json!({"role": "user", "content": "v"})); m }),
         thinking(with(json!({"role": "user", "content": "u", "continue": true}))),
         thinking(with(json!({"role": "assistant", "content": "a", "tool_calls": [{"id": "c", "name": "sh", "input": {}}], "continue": true}))),
-        thinking(with(json!({"role": "assistant", "content": "", "continue": true}))),
+        thinking(with(json!({"role": "assistant", "reasoning": "", "continue": true}))),
         json!({"thinking": false, "messages": with(json!({"role": "assistant", "reasoning": "r", "continue": true}))}),
         json!({"messages": with(json!({"role": "assistant", "reasoning": "r", "continue": true}))}),
         thinking(with(json!({"role": "assistant", "content": "a", "continue": "yes"}))),

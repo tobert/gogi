@@ -122,6 +122,7 @@ pub fn is_id(s: &str) -> bool {
 /// first is system text at that point in the context. Only the last of `messages` may be open
 /// (`continue: true`); a broken rule of an open message is an error naming `continue`.
 pub fn validate(before: &[Message], messages: &[Message]) -> Result<(), Invalid> {
+    check_opens(messages)?;
     let mut calls: Vec<&str> =
         before.iter().rev().find(|m| m.role == Role::Assistant).map(|m| m.tool_calls.iter().map(|c| c.id.as_str()).collect()).unwrap_or_default();
     let mut prev_role = before.last().map(|m| m.role.as_str()).unwrap_or("");
@@ -148,9 +149,6 @@ pub fn validate(before: &[Message], messages: &[Message]) -> Result<(), Invalid>
         if m.is_error && m.role != Role::Tool {
             return bad("only a tool message carries is_error");
         }
-        if m.open {
-            check_open(m, i + 1 == messages.len()).map_err(|s| Invalid::param("continue", format!("messages[{}]: {}", i, s)))?;
-        }
         if m.role == Role::Assistant {
             calls = m.tool_calls.iter().map(|c| c.id.as_str()).collect();
         }
@@ -159,8 +157,17 @@ pub fn validate(before: &[Message], messages: &[Message]) -> Result<(), Invalid>
     Ok(())
 }
 
-/// Checks an open message: the last message, an assistant message, no `tool_calls`, and
-/// `reasoning` or `content` that is not empty.
+/// Checks each open message before any other rule, so a broken rule of an open message is an
+/// error naming `continue` even when another rule also fails.
+pub fn check_opens(messages: &[Message]) -> Result<(), Invalid> {
+    for (i, m) in messages.iter().enumerate().filter(|(_, m)| m.open) {
+        check_open(m, i + 1 == messages.len()).map_err(|s| Invalid::param("continue", format!("messages[{}]: {}", i, s)))?;
+    }
+    Ok(())
+}
+
+/// Checks an open message: the last message, an assistant message, no `tool_calls`, and a
+/// `content` member, even an empty one, or `reasoning` that is not empty.
 fn check_open(m: &Message, last: bool) -> Result<(), &'static str> {
     if !last {
         return Err("only the last message may carry continue: true");
@@ -171,8 +178,8 @@ fn check_open(m: &Message, last: bool) -> Result<(), &'static str> {
     if !m.tool_calls.is_empty() {
         return Err("an open message carries no tool_calls; send the reply back closed, or drop the call");
     }
-    if m.reasoning.as_deref().unwrap_or("").is_empty() && m.content.as_deref().unwrap_or("").is_empty() {
-        return Err("an open message needs reasoning or content that is not empty");
+    if m.content.is_none() && m.reasoning.as_deref().unwrap_or("").is_empty() {
+        return Err("an open message needs a content member, even an empty one, or reasoning that is not empty");
     }
     Ok(())
 }
@@ -295,9 +302,24 @@ mod tests {
         assert_eq!(refused_open(&[Message::user("u"), Message::assistant("a").opened(), Message::user("v")]), "messages[1]: only the last message may carry continue: true");
         assert_eq!(refused_open(&[Message::user("u").opened()]), "messages[0]: only an assistant message carries continue: true");
         assert_eq!(refused_open(&[Message::user("u"), asks(&["a"]).opened()]), "messages[1]: an open message carries no tool_calls; send the reply back closed, or drop the call");
-        let empty = "messages[1]: an open message needs reasoning or content that is not empty";
-        assert_eq!(refused_open(&[Message::user("u"), Message::assistant("").opened()]), empty);
+        let empty = "messages[1]: an open message needs a content member, even an empty one, or reasoning that is not empty";
         assert_eq!(refused_open(&[Message::user("u"), Message { content: None, reasoning: Some(String::new()), ..Message::assistant("").opened() }]), empty);
+        assert_eq!(refused_open(&[Message::user("u"), Message { content: None, ..Message::assistant("").opened() }]), empty);
+    }
+
+    #[test]
+    fn an_empty_content_member_opens_the_content_after_an_empty_thinking() {
+        validate(&[], &[Message::user("u"), Message::assistant("").opened()]).unwrap();
+        validate(&[], &[Message::user("u"), Message { reasoning: Some(String::new()), ..Message::assistant("").opened() }]).unwrap();
+    }
+
+    #[test]
+    fn an_open_messages_errors_name_continue_even_when_another_rule_fails() {
+        let open_user = Message { reasoning: Some("r".into()), ..Message::user("u").opened() };
+        assert_eq!(refused_open(&[open_user]), "messages[0]: only an assistant message carries continue: true");
+        let stray = Message::tool("nope", "r");
+        assert_eq!(refused_open(&[stray.clone(), Message::user("u").opened()]), "messages[1]: only an assistant message carries continue: true");
+        assert_eq!(refused_open(&[Message::assistant("a").opened(), stray]), "messages[0]: only the last message may carry continue: true");
     }
 
     #[test]

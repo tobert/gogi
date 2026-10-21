@@ -686,9 +686,11 @@ POST /council/v2/generations
 ```
 
 - **`continue: true` opens the last message.** Only the last message may
-  carry it, and only an assistant message. It carries `reasoning`,
-  `content`, or both, and at least one of them is not empty. It carries no
-  `tool_calls`. Any other use is a `400` naming `continue`. `continue:
+  carry it, and only an assistant message. It carries a `content` member,
+  even an empty one, or a `reasoning` that is not empty, or both. Thus a
+  reply cut just after an empty thinking resumes as `{"content": "",
+  "continue": true}`, with its `reasoning: ""` when it has one. Decided
+  by senpai 2026-10-21 (vetoable). It carries no `tool_calls`. Any other use is a `400` naming `continue`. `continue:
   false` is allowed on any message and changes nothing.
 - **Only generations read an open message.** A context with `continue` in
   `/decisions` or `/reads` is a `400` naming `continue`. `POST /contexts`

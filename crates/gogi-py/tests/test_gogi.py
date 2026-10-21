@@ -43,7 +43,7 @@ def test_continue_opens_only_a_last_assistant_message():
     for bad in [
         [u, {"role": "assistant", "content": "a", "continue": True}, u],
         [{**u, "continue": True}],
-        [u, {"role": "assistant", "content": "", "continue": True}],
+        [u, {"role": "assistant", "reasoning": "", "continue": True}],
         [u, {"role": "assistant", "content": "a", "tool_calls": [{"id": "c0", "name": "shell", "input": {}}], "continue": True}],
     ]:
         with pytest.raises(ValueError, match="continue: true|open message"):

@@ -269,7 +269,7 @@ impl GenerationDone {
     /// A reply that ended with `max_tokens` as the open message a continuation sends back:
     /// `content` is present when `phase` is `content`, even when it is empty, and absent when
     /// `phase` is `reasoning`. `None` for any other reply, a reply without `phase` or with tool
-    /// calls, and a reply with no text.
+    /// calls, and a reply cut inside a thinking that has no text.
     pub fn as_open_message(&self) -> Option<crate::message::Message> {
         if self.finish != Finish::MaxTokens || !self.tool_calls.is_empty() {
             return None;
@@ -279,7 +279,7 @@ impl GenerationDone {
             Phase::Reasoning if self.content.is_empty() => None,
             _ => return None,
         };
-        if self.reasoning.is_empty() && self.content.is_empty() {
+        if content.is_none() && self.reasoning.is_empty() {
             return None;
         }
         Some(crate::message::Message { content, reasoning: Some(self.reasoning.clone()).filter(|r| !r.is_empty()), ..crate::message::Message::assistant("").opened() })
@@ -513,7 +513,9 @@ mod tests {
         assert_eq!((m.reasoning, m.content.as_deref()), (None, Some("fn main() ")), "the trailing whitespace stays");
         assert_eq!(cut(Some("call"), "plan", "").as_open_message(), None, "a reply cut inside a call cannot be continued");
         assert_eq!(cut(None, "plan", "x").as_open_message(), None, "without phase the open form is not known");
-        assert_eq!(cut(Some("reasoning"), "", "").as_open_message(), None, "an open message needs text");
+        assert_eq!(cut(Some("reasoning"), "", "").as_open_message(), None, "an open message inside its thinking needs reasoning");
+        let m = cut(Some("content"), "", "").as_open_message().unwrap();
+        assert_eq!((m.reasoning, m.content.as_deref()), (None, Some("")), "a reply cut just after an empty thinking resumes with content \"\"");
         let mut ended = cut(Some("content"), "plan", "x");
         ended.finish = Finish::EndTurn;
         assert_eq!(ended.as_open_message(), None);

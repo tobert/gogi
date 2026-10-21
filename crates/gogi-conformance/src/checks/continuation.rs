@@ -186,7 +186,7 @@ impl Suite {
             ("an open message that is not last", self.ctx(not_last)),
             ("an open user message", self.open_ctx(json!({"role": "user", "content": "Go on.", "continue": true}), Some(true))),
             ("an open message with tool_calls", self.open_ctx(json!({"role": "assistant", "content": "Plan:", "tool_calls": [{"id": "c0", "name": "shell", "input": {}}], "continue": true}), Some(true))),
-            ("an open message with no text", self.open_ctx(json!({"role": "assistant", "content": "", "continue": true}), Some(true))),
+            ("an open message with no text", self.open_ctx(json!({"role": "assistant", "reasoning": "", "continue": true}), Some(true))),
             ("an open message with reasoning and thinking false", self.open_ctx(json!({"role": "assistant", "reasoning": "First I", "continue": true}), Some(false))),
             ("an open message with reasoning and thinking absent", self.open_ctx(json!({"role": "assistant", "reasoning": "First I", "continue": true}), None)),
             ("continue that is a string", self.open_ctx(json!({"role": "assistant", "content": "Plan:", "continue": "yes"}), Some(true))),

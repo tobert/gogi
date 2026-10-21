@@ -78,13 +78,14 @@ impl Context {
         if self.messages.is_empty() {
             return Err(Invalid::new("a context has at least one message"));
         }
-        message::validate(&[], &self.messages)?;
+        message::check_opens(&self.messages)?;
         if let Some(m) = self.open()
             && !m.reasoning.as_deref().unwrap_or("").is_empty()
             && self.thinking != Some(true)
         {
             return Err(Invalid::param("continue", format!("messages[{}]: an open message with reasoning needs thinking: true in the context", self.messages.len() - 1)));
         }
+        message::validate(&[], &self.messages)?;
         let names = self.tool_names();
         for (i, n) in names.iter().enumerate() {
             if n.is_empty() || names[..i].contains(n) {
@@ -289,6 +290,9 @@ mod tests {
             assert_eq!((e.param.as_deref(), e.message.as_str()), (Some("continue"), "messages[1]: an open message with reasoning needs thinking: true in the context"), "{thinking:?}");
         }
         open_context(None, Message::assistant("The plan:").opened()).check().unwrap();
+        let mut stray = open_context(None, thought.clone());
+        stray.messages.insert(0, Message::tool("nope", "r"));
+        assert_eq!(stray.check().unwrap_err().param.as_deref(), Some("continue"), "the open message's rule comes first");
         open_context(Some(false), Message { reasoning: Some(String::new()), ..Message::assistant("x").opened() }).check().unwrap();
     }
 
