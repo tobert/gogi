@@ -248,6 +248,10 @@ POST /council/v2/contexts
   gives in `tool_call_id`, a call of the assistant message before its run of
   tool messages.
 - **`thinking`** absent is the server's default; mkviolet's is on.
+  A template may render a context the same with thinking on and off:
+  Qwen3.8 changes only the generation prompt. Then both contexts have one
+  head. A template that renders thinking into the context, as Gemma 4
+  does, gives two heads. (Decided by senpai 2026-10-20 night, vetoable.)
 - **`queue`** names a tool in `tools`. When the last message is an
   assistant call to it, the context is a queue context: a decision delivers
   the case as that call's result, and the model answers by calling the tool
