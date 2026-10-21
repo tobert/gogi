@@ -304,6 +304,12 @@ impl State {
         State(mix(self.0 ^ mix(u64::from(token) + 1)))
     }
 
+    /// The state a server holds when it rounds model state at a boundary, such as mk's seal: another
+    /// state, the same each time.
+    pub fn rounded(self) -> Self {
+        State(mix(self.0 ^ 0x5EA1))
+    }
+
     /// The logits for the next token: deterministic, between -6 and 6.
     pub fn logits(self) -> [f64; VOCAB] {
         let mut l = [0.0; VOCAB];
@@ -448,6 +454,14 @@ mod tests {
         let seams = open_seams(&[], true, &[u.clone(), open(Some("plan"), Some("x"))]);
         assert!(seams.iter().all(|(_, before, with)| with.starts_with(before) && with.len() > before.len()), "{seams:?}");
         assert!(open_seams(&[], true, &[u, Message::assistant("closed")]).is_empty());
+    }
+
+    #[test]
+    fn a_rounded_state_is_another_state_and_the_same_each_time() {
+        let s = State::after(0, &[1, 2, 3]);
+        assert_ne!(s.rounded(), s);
+        assert_eq!(s.rounded(), State::after(0, &[1, 2, 3]).rounded());
+        assert_ne!(s.rounded().logits(), s.logits());
     }
 
     #[test]

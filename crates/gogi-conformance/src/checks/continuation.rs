@@ -4,7 +4,7 @@
 //! naming `continue`, which skips the checks that need it.
 
 use gogi_proto::context::ContextBuilt;
-use gogi_proto::generation::{Finish, GenerationDone, Phase, StreamEvent, check_pieces_after, trim_edges};
+use gogi_proto::generation::{Finish, GenerationDone, Phase, StreamEvent, TokenEvent, check_pieces_after, is_edge_space, trim_edges};
 use gogi_proto::identity::Capability;
 use gogi_proto::message::Message;
 use serde_json::{Value, json};
@@ -18,6 +18,8 @@ use crate::{Suite, num};
 const CUT: u64 = 8;
 /// The `max_tokens` of the whole reply the checks cut.
 const WHOLE: u32 = 300;
+/// How many openings the suite tries for a whole reply with a token that ends with whitespace.
+const ATTEMPTS: usize = 6;
 /// The `max_tokens` of a continuation of text the suite writes.
 const RESUME: u32 = 40;
 
@@ -80,14 +82,51 @@ impl Suite {
         }
     }
 
+    /// Streams a generation and returns its token events and its `done`. A transport failure, a
+    /// status other than `200`, or a stream that does not end with `done` fails `what`.
+    fn streamed(&mut self, what: &str, body: Value) -> Option<(Vec<TokenEvent>, GenerationDone)> {
+        let mut body = self.routed("POST", "/council/v2/generations", Some(body)).unwrap_or_default();
+        body["stream"] = json!(true);
+        let response = match self.http.raw("POST", "/council/v2/generations", Some(&body)) {
+            Ok(r) => r,
+            Err(e) => {
+                self.r.fail(what, e);
+                return None;
+            }
+        };
+        self.note("POST", "/council/v2/generations", &response);
+        let events: Vec<StreamEvent> = sse_events(&response.text).iter().filter_map(|(n, d)| StreamEvent::parse(n, d).ok().flatten()).collect();
+        match events.last() {
+            Some(StreamEvent::Done(d)) if response.status == 200 => {
+                self.r.ok_with(what, "");
+                let tokens = events.iter().filter_map(|e| if let StreamEvent::Token(t) = e { Some(t.clone()) } else { None }).collect();
+                Some((tokens, (**d).clone()))
+            }
+            _ => {
+                self.r.fail(what, format!("returned {} without a done event at the end: {}", response.status, response.text));
+                None
+            }
+        }
+    }
+
     /// Writes a greedy reply, cuts the same request before its end, sends the cut reply back open,
-    /// and checks the continuation against the whole reply. Returns the open message it sent, when
-    /// the reply could be continued.
-    fn resume_a_cut_reply(&mut self) -> Option<Message> {
-        let opening = self.opening("continuation");
-        let ctx = self.ctx(opening.clone());
-        let w = self.generate("a reply to cut succeeds", &ctx, WHOLE)?;
-        let whole = self.decode::<GenerationDone>("a reply to cut decodes", &w)?;
+    /// and checks the continuation. Returns the opening and the open message it sent, when the reply
+    /// could be continued.
+    fn resume_a_cut_reply(&mut self) -> Option<(Vec<Value>, Message)> {
+        // A reply whose token ending with whitespace comes before its end lets the cut end there,
+        // which checks that the cut keeps its trailing whitespace. A reply may write none, so a
+        // few openings are tried.
+        let mut attempt = 0;
+        let (opening, ctx, tokens, whole, at) = loop {
+            let opening = self.opening(&format!("continuation-{}", attempt));
+            let ctx = self.ctx(opening.clone());
+            let (tokens, whole) = self.streamed("a reply to cut succeeds", json!({"context": ctx, "max_tokens": WHOLE, "sample": {"temperature": 0}}))?;
+            let at = whitespace_cut(&tokens, whole.usage.completion);
+            attempt += 1;
+            if at.is_some() || attempt == ATTEMPTS {
+                break (opening, ctx, tokens, whole, at);
+            }
+        };
         self.close_the_thinking(&opening, &whole);
         if whole.usage.completion < 2 {
             self.r.skip("a cut reply resumes", format!("the whole reply has {} token, too few to cut", whole.usage.completion));
@@ -95,7 +134,7 @@ impl Suite {
         }
         // Greedy replays, so the same request with a smaller max_tokens is cut before the end. The
         // whole reply fit, so the cut leaves room in the context.
-        let k = CUT.min(whole.usage.completion - 1);
+        let k = at.unwrap_or(CUT.min(whole.usage.completion - 1));
         let g = self.generate("a cut reply succeeds", &ctx, k as u32)?;
         let cut = self.decode::<GenerationDone>("a cut reply decodes", &g)?;
         match cut.finish {
@@ -108,6 +147,15 @@ impl Suite {
                 self.r.fail("a cut reply resumes", format!("the reply ended with {:?} within {} tokens, though the same request wrote {} tokens with a larger max_tokens", other, k, whole.usage.completion));
                 return None;
             }
+        }
+        match at {
+            Some(_) => {
+                let phase = tokens[k as usize - 1].phase;
+                let pieces: String = tokens[..k as usize].iter().filter(|t| t.phase == phase).map(|t| t.piece.as_str()).collect();
+                let part = if phase == Phase::Reasoning { &cut.reasoning } else { &cut.content };
+                self.r.check("a cut reply keeps its trailing whitespace", keeps_trailing_whitespace(part, &pieces), (part, &pieces));
+            }
+            None => self.r.skip("a cut reply keeps its trailing whitespace", format!("in {} replies, no token ended with whitespace before the reply's end", ATTEMPTS)),
         }
         let prefix = cut.usage.completion == k && whole.reasoning.starts_with(cut.reasoning.trim_end()) && whole.content.starts_with(cut.content.trim_end());
         self.r.check("a cut reply is the start of the whole reply", prefix, (&cut.reasoning, &cut.content, cut.usage, &whole.reasoning, &whole.content));
@@ -151,7 +199,7 @@ impl Suite {
         if pinned {
             self.expect("the cut reply's head unpins", "DELETE", &format!("/council/v2/pins/{}", owner), None, 204);
         }
-        resumed.then_some(open)
+        resumed.then_some((opening, open))
     }
 
     /// The checks of a cut reply sent back open as `octx`. False when the server refused it at the
@@ -196,9 +244,17 @@ impl Suite {
         from_head(self, "a continuation resumed from the head feeds at most the last sampled token", u.kept, u.fed);
         self.r.check("a continuation's completion counts only the sampled tokens", u.completion <= max_tokens as u64 && u.prompt > cut.usage.prompt && u.completion + k <= WHOLE as u64, (u, cut.usage));
         self.check_finish("a continuation", &d2, max_tokens as u64);
-        let same = (&d2.reasoning, &d2.content, d2.finish) == (&whole.reasoning, &whole.content, whole.finish) && call_shape(&g2["tool_calls"]) == call_shape(&serde_json::to_value(&whole.tool_calls).unwrap_or_default());
-        let begun = d2.finish != whole.finish && whole.reasoning.starts_with(d2.reasoning.trim_end()) && whole.content.starts_with(d2.content.trim_end());
-        self.r.check("a continuation writes what the whole reply wrote", same || begun, ((&d2.reasoning, &d2.content, d2.finish), (&whole.reasoning, &whole.content, whole.finish)));
+        // A server may hold the cut reply's head sealed, at a boundary that rounds model state, so a
+        // continuation from it may differ from the uncut reply. Only a continuation built without the
+        // head must write what the whole reply wrote.
+        let what = "a continuation writes what the whole reply wrote";
+        if head_tokens.is_some_and(|t| u.kept >= t) {
+            self.r.skip(what, "the continuation started from the cut reply's head, which a server may hold sealed, so it may differ from the uncut reply");
+        } else {
+            let same = (&d2.reasoning, &d2.content, d2.finish) == (&whole.reasoning, &whole.content, whole.finish) && call_shape(&g2["tool_calls"]) == call_shape(&serde_json::to_value(&whole.tool_calls).unwrap_or_default());
+            let begun = d2.finish != whole.finish && whole.reasoning.starts_with(d2.reasoning.trim_end()) && whole.content.starts_with(d2.content.trim_end());
+            self.r.check(what, same || begun, ((&d2.reasoning, &d2.content, d2.finish), (&whole.reasoning, &whole.content, whole.finish)));
+        }
         let phase_ok = match cut.phase {
             Some(Phase::Reasoning) => u.reasoning >= 1,
             _ => u.reasoning == 0,
@@ -371,18 +427,18 @@ impl Suite {
 
     /// A riding `before` reads after the open text, and `after` after the whole message; neither
     /// changes the reply.
-    fn riding(&mut self, open: Option<Message>) {
+    fn riding(&mut self, open: Option<(Vec<Value>, Message)>) {
         let what = "a riding decision rides with a continuation";
         if !self.has(Capability::Ride) {
             self.r.skip(what, "the served model does not declare the ride capability");
             return;
         }
-        let Some(open) = open else {
+        let Some((opening, open)) = open else {
             self.r.skip(what, "no cut reply could be continued");
             return;
         };
         let Some(spec_id) = self.hold_gate("continuation-ride") else { return };
-        let mut messages = self.opening("continuation");
+        let mut messages = opening;
         messages.push(serde_json::to_value(&open).unwrap_or_default());
         let octx = self.ctx(messages);
         let bare = json!({"context": octx, "max_tokens": RESUME, "sample": {"temperature": 0}});
@@ -402,6 +458,20 @@ impl Suite {
     }
 }
 
+/// The `max_tokens` that cuts a reply just after its first token that ends with whitespace, before
+/// the reply's end: one past that token's index, or `None` when no such token comes before the end.
+fn whitespace_cut(tokens: &[TokenEvent], completion: u64) -> Option<u64> {
+    tokens.iter().position(|t| matches!(t.phase, Phase::Reasoning | Phase::Content) && t.piece.ends_with(is_edge_space)).map(|j| j as u64 + 1).filter(|k| *k < completion)
+}
+
+/// Whether a cut reply's part keeps the edge whitespace that its pieces end with, and otherwise
+/// equals them, up to edge whitespace at the start as in any reply. Pieces that end without
+/// whitespace check nothing, so they never pass.
+fn keeps_trailing_whitespace(cut: &str, pieces: &str) -> bool {
+    let ws = &pieces[pieces.trim_end_matches(is_edge_space).len()..];
+    !ws.is_empty() && cut.ends_with(ws) && trim_edges(cut) == trim_edges(pieces)
+}
+
 /// An error body names `continue` in `param` and says why in a `message` that is not empty.
 fn names_continue(v: &Value) -> bool {
     v["error"]["param"] == json!("continue") && v["error"]["message"].as_str().is_some_and(|m| !m.is_empty())
@@ -410,6 +480,15 @@ fn names_continue(v: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cut_keeps_the_whitespace_its_pieces_end_with() {
+        assert!(keeps_trailing_whitespace("ab ", "ab "));
+        assert!(keeps_trailing_whitespace("\nab \n", "ab \n"), "the start may be trimmed as in any reply");
+        assert!(!keeps_trailing_whitespace("ab", "ab "), "a server that trims a cut reply fails");
+        assert!(!keeps_trailing_whitespace("ab ", "ab \n"));
+        assert!(!keeps_trailing_whitespace("ab", "ab"), "pieces without trailing whitespace check nothing");
+    }
 
     #[test]
     fn naming_continue_is_the_param_and_a_message() {

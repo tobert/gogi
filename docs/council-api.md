@@ -766,6 +766,14 @@ POST /council/v2/generations
   2026-10-21 (vetoable). A client that sends it back closed starts there
   too, when the closed rendering's tokens begin with the open rendering's.
   Otherwise a build starts from the last boundary, as always.
+- **A cut reply's head may be sealed.** A server may hold the head at a
+  boundary that rounds model state (see "Boundaries are content"), such
+  as mk's seal, which rounds GDN state to bf16. A continuation from that
+  head can then write a different reply than the generation would have
+  written without the cut, as any build with different boundaries can.
+  It still starts with the open text, and its numbers still replay from
+  the same head. A client that needs the uncut reply asks for enough
+  `max_tokens`. Decided by Amy 2026-10-21.
 - **A server may refuse its own cut reply at the seam.** The tokens a
   model samples need not be the tokens its tokenizer gives for the same
   text, so a cut reply sent back open can fail the seam check, a `400`
