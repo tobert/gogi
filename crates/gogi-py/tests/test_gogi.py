@@ -230,7 +230,7 @@ def test_the_fake_reports_and_keeps_the_limits_it_is_given():
         limits = ident["models"][0]["limits"]
         assert (limits["context_tokens"], limits["decision_context_tokens"], ident["limits"]["pin_bytes"]) == (512, 256, 4096)
         status, e = _call(fake.url, "POST", "/council/v2/contexts", {"model": "toy", "context": {"messages": [{"role": "user", "content": "x" * 600}]}})
-        assert (status, e["error"]["type"]) == (413, "context_full")
+        assert (status, e["error"]["type"], e["error"]["param"]) == (413, "too_large", "context_tokens")
         heads = [_call(fake.url, "POST", "/council/v2/contexts", {"model": "toy", "context": {"messages": [{"role": "user", "content": f"u{i}"}]}})[1]["head"] for i in range(3)]
         assert _call(fake.url, "GET", "/council/v2/snapshots/" + heads[0])[0] == 404, "past max_snapshots the oldest is evicted"
         assert _call(fake.url, "GET", "/council/v2/snapshots/" + heads[2])[0] == 200
