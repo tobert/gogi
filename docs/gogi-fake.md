@@ -46,6 +46,7 @@ assistant  <asst> [<think> reasoning <endthink>] content (<call> name(INPUT_JSON
 tool       <tool> [<error>] content <end>
 
 generation prompt   <asst> [<think>]
+open message        <asst> [<think> reasoning [<endthink>]] [content]
 ```
 
 - `<nothink>` renders when the context sets `thinking: false`. With thinking on, every
@@ -57,11 +58,22 @@ generation prompt   <asst> [<think>]
 - A marked message is a boundary only when its own rendering is a prefix of the whole
   context's. The context's end is always one. So an assistant message with reasoning and no tool
   calls, marked `snap`, stops being a boundary when a user message is added after it.
+- An open message (`continue: true`) renders as a reply up to its open text, without `<end>`,
+  in place of the generation prompt. With thinking on, a `content` member writes `<endthink>`,
+  even when it is empty; without one, the rendering ends inside the thinking. So a reply cut by
+  `max_tokens` renders open as exactly its prompt and its sampled tokens. `gogi_toy::end_open`
+  gives the tokens that end an open message as the template ends a message: `<endthink>` when
+  it is open inside its thinking, then `<end>`.
+- Each open field tokenizes on its own, because a token is a byte, so the seam check
+  (`gogi_toy::check_open`) never refuses a toy context.
 
 ## Reply parser
 
 `gogi_toy::reply::ReplyParser` reads a reply's token ids, one at a time, after the generation
-prompt. `ReplyParser::new(thinking)` takes `true` when the prompt ended with `<think>`. For each
+prompt or an open message. `ReplyParser::new(thinking)` takes `true` when the reply starts in
+its reasoning, which `gogi_toy::starts_in_reasoning` says: the prompt ended with `<think>`, or an
+open message has no `content` member. The parser reads only sampled tokens, so `<endthink>`
+written as open text never closes the thinking. `phase` is the phase the next token would have. For each
 token, `push` returns its phase (`reasoning`, `content`, or `call`) and the text it adds. A marker
 in reasoning or content adds no text, and a byte that does not yet complete a character adds none.
 `<endthink>` ends the reasoning and belongs to it. `<call>`, `<endcall>`, and the tokens between
@@ -89,6 +101,10 @@ function of that hash, between -6 and 6, so the same prefix gives the same bits.
 - `finish` is `end_turn` or `tool_use` when the reply wrote `<end>`, `max_tokens` when it wrote
   `max_tokens` tokens, and `context_full` when the prompt and the reply reached
   `context_tokens`. `usage.reasoning` counts the tokens of the thought, `<endthink>` included.
+- The fake declares `continuation`. A continuation's `done` is the open text as sent followed by
+  the sampled text, with nothing trimmed. `usage.prompt` counts the open text, and
+  `usage.completion`, `usage.reasoning`, and the stream's `n` count only the sampled tokens. A
+  reply cut by `max_tokens` keeps its trailing whitespace and reports `phase`.
 - A context whose last message contains the text `FAIL` gets no reply: without `stream`, a `500`
   with `error.type` `internal`; with `stream`, two `token` events and then an `error` event,
   so a client can test how it handles a failure after the stream began.
@@ -102,6 +118,10 @@ function of that hash, between -6 and 6, so the same prefix gives the same bits.
 - A build starts from the longest held snapshot whose tokens begin the context, and reports
   `kept`, `fed`, and `from`. A generation holds the head after its reply, so the next request
   starts there even though the reply is not marked `snap`.
+- A reply cut by `max_tokens` holds the head of its open rendering, listed last in `snapshots`,
+  so sending it back open feeds nothing. A reply cut inside a call, or after one, has `head`
+  `null`, because an open message holds no calls.
+- `POST /contexts` reads an open message only with `dry_run: true`.
 - Pins keep a snapshot and its parents. `pin_bytes` caps the bytes they keep together.
   `max_snapshots` drops the oldest unpinned snapshots first.
 - With `--state-dir`, specs, pins, and the snapshots pins keep survive a restart. Other
