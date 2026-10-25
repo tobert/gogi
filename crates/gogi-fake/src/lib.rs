@@ -69,8 +69,8 @@ impl Server {
     }
 
     /// Stops the server and starts a new one on the same address. Everything in memory is lost;
-    /// specs, pins, and the snapshots pins keep come back from the state directory, when there is
-    /// one.
+    /// specs, pins, the snapshots pins keep, keeps, and the objects keeps hold come back from the
+    /// state directory, when there is one.
     pub fn restart(&mut self) -> Result<(), String> {
         self.shutdown();
         let cfg = Config { addr: self.addr.to_string(), ..self.cfg.clone() };

@@ -669,3 +669,41 @@ fn keeps_expire() {
     s.advance_clock(61);
     assert_eq!(call(&s, "GET", "/council/v2/keeps/k", None).0, 404);
 }
+
+#[test]
+fn a_body_past_the_limit_is_a_413_before_it_is_read() {
+    let s = Server::start(Config::default()).unwrap();
+    let addr = s.url().trim_start_matches("http://").to_string();
+    let mut c = TcpStream::connect(&addr).unwrap();
+    let id = gogi_proto::content_id(b"x");
+    write!(c, "PUT /council/v2/objects/{id} HTTP/1.1\r\nHost: x\r\nContent-Type: audio/wav\r\nContent-Length: 100000000000\r\nConnection: close\r\n\r\n").unwrap();
+    let mut raw = String::new();
+    c.read_to_string(&mut raw).unwrap();
+    assert!(raw.starts_with("HTTP/1.1 413") && raw.contains("object_bytes"), "{raw}");
+    // The server still answers.
+    assert_eq!(call(&s, "GET", "/council/v2/identity", None).0, 200);
+}
+
+#[test]
+fn a_head_error_has_no_body() {
+    let s = Server::start(Config::default()).unwrap();
+    let (code, head, body) = exchange_bytes(&s, "HEAD", &format!("/council/v2/objects/{}", gogi_proto::content_id(b"never")), "audio/wav", &[]);
+    assert_eq!(code, 404, "{head}");
+    assert!(body.is_empty(), "{}", String::from_utf8_lossy(&body));
+}
+
+#[test]
+fn a_damaged_object_file_drops_the_object_and_the_server_starts() {
+    let dir = std::env::temp_dir().join(format!("gogi-fake-damaged-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut s = Server::start(Config { state_dir: Some(dir.clone()), ..Config::default() }).unwrap();
+    let a = put_object(&s, b"the first kept object");
+    let b = put_object(&s, b"the second kept object");
+    assert_eq!(call(&s, "PUT", "/council/v2/keeps/k", Some(json!({"objects": [a, b], "ttl_s": 600}))).0, 200);
+    std::fs::write(dir.join("objects").join(a.trim_start_matches("blake3:")), b"damaged").unwrap();
+    s.restart().unwrap();
+    assert_eq!(call(&s, "GET", "/council/v2/keeps/k", None).1["objects"], json!([b]));
+    let (code, _, _) = exchange_bytes(&s, "HEAD", &format!("/council/v2/objects/{a}"), "audio/wav", &[]);
+    assert_eq!(code, 404);
+    let _ = std::fs::remove_dir_all(dir);
+}

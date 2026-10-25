@@ -167,6 +167,7 @@ mod _gogi {
                 pin_bytes: pin_bytes.unwrap_or(d.pin_bytes),
                 max_snapshots: max_snapshots.unwrap_or(d.max_snapshots),
                 seal_cut_heads: d.seal_cut_heads,
+                ..d.clone()
             };
             Ok(FakeServer { server: Some(gogi_fake::Server::start(cfg).map_err(value_err)?) })
         }

@@ -140,8 +140,9 @@ function of that hash, between -6 and 6, so the same prefix gives the same bits.
 - Objects are held in memory and never evicted. Keeps hold them through a restart with
   `--state-dir`, which stores each kept object as a file under `objects/`. `object_bytes` is
   1 MiB and `keep_bytes` 8 MiB.
-- With `--state-dir`, specs, pins, and the snapshots pins keep survive a restart. Other
-  snapshots do not.
+- With `--state-dir`, specs, pins, the snapshots pins keep, keeps, and the objects keeps hold
+  survive a restart. Other snapshots and objects do not. A kept object whose file is missing or
+  does not hash to its id is dropped at the start, as if it were evicted.
 
 ## Requests and errors
 

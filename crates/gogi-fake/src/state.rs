@@ -125,6 +125,11 @@ impl Store {
         Ok(s)
     }
 
+    /// The most body bytes the server reads: `object_bytes`, or 16 MiB for JSON when that is more.
+    pub fn body_limit(&self) -> u64 {
+        self.cfg.object_bytes.max(16 << 20)
+    }
+
     pub fn now(&self) -> u64 {
         SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) + self.skew
     }
@@ -235,13 +240,23 @@ impl Store {
         let kept: BTreeSet<&String> = self.keeps.values().flat_map(|k| k.objects.iter()).collect();
         let objects: serde_json::Map<String, Value> = kept.iter().filter_map(|id| self.objects.get(*id).map(|(mime, _)| ((*id).clone(), json!(mime)))).collect();
         let v = json!({"specs": self.specs, "pins": pins, "snapshots": snaps, "keeps": keeps, "objects": objects});
-        let _ = std::fs::create_dir_all(dir.join("objects"));
+        let objects_dir = dir.join("objects");
+        let _ = std::fs::create_dir_all(&objects_dir);
         for id in &kept {
             if let Some((_, bytes)) = self.objects.get(*id) {
-                let file = dir.join("objects").join(id.trim_start_matches("blake3:"));
-                if !file.exists() && std::fs::write(&file, bytes).is_err() {
+                let file = objects_dir.join(id.trim_start_matches("blake3:"));
+                let whole = std::fs::read(&file).is_ok_and(|b| content_id(&b) == **id);
+                let tmp = objects_dir.join(format!("{}.tmp", id.trim_start_matches("blake3:")));
+                if !whole && std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, &file)).is_err() {
                     eprintln!("gogi-fake: could not write {}", file.display());
                 }
+            }
+        }
+        // Files of objects no keep holds go, so the directory holds the kept objects only.
+        for e in std::fs::read_dir(&objects_dir).into_iter().flatten().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !kept.iter().any(|id| id.trim_start_matches("blake3:") == name) {
+                let _ = std::fs::remove_file(e.path());
             }
         }
         let tmp = dir.join("state.json.tmp");
@@ -257,6 +272,15 @@ impl Store {
         for (id, spec) in v["specs"].as_object().into_iter().flatten() {
             self.specs.insert(id.clone(), spec.clone());
         }
+        // Pins first, so that holding the snapshots below never evicts a pinned one.
+        let now = self.now();
+        for (o, p) in v["pins"].as_object().into_iter().flatten() {
+            let expires = p["expires"].as_u64().unwrap_or(0);
+            if expires > now {
+                let snapshots = p["snapshots"].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(String::from)).collect();
+                self.pins.insert(o.clone(), Pins { snapshots, expires });
+            }
+        }
         // Parents first: a parent has fewer tokens than the snapshots built on it.
         let mut snaps: Vec<(&String, &Value)> = v["snapshots"].as_object().into_iter().flatten().collect();
         snaps.sort_by_key(|(_, s)| s["tokens"].as_array().map_or(0, |t| t.len()));
@@ -267,27 +291,25 @@ impl Store {
                 self.seal(id);
             }
         }
+        // A missing or damaged object file drops that object: a client puts it again, as after an
+        // eviction.
         for (id, mime) in v["objects"].as_object().into_iter().flatten() {
             let file = dir.join("objects").join(id.trim_start_matches("blake3:"));
-            let bytes = std::fs::read(&file).map_err(|e| format!("{}: {}", file.display(), e))?;
-            if content_id(&bytes) != *id {
-                return Err(format!("{} does not hash to {}: the state directory is damaged", file.display(), id));
+            match std::fs::read(&file) {
+                Ok(bytes) if content_id(&bytes) == *id => {
+                    self.objects.insert(id.clone(), (mime.as_str().unwrap_or("").to_string(), bytes));
+                }
+                Ok(_) => eprintln!("gogi-fake: {} does not hash to {}; the object is dropped", file.display(), id),
+                Err(e) => eprintln!("gogi-fake: {}: {}; the object is dropped", file.display(), e),
             }
-            self.objects.insert(id.clone(), (mime.as_str().unwrap_or("").to_string(), bytes));
         }
-        let now = self.now();
         for (o, k) in v["keeps"].as_object().into_iter().flatten() {
             let expires = k["expires"].as_u64().unwrap_or(0);
             if expires > now {
-                let objects = k["objects"].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(String::from)).collect();
-                self.keeps.insert(o.clone(), Keeps { objects, expires });
-            }
-        }
-        for (o, p) in v["pins"].as_object().into_iter().flatten() {
-            let expires = p["expires"].as_u64().unwrap_or(0);
-            if expires > now {
-                let snapshots = p["snapshots"].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(String::from)).collect();
-                self.pins.insert(o.clone(), Pins { snapshots, expires });
+                let objects: Vec<String> = k["objects"].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(String::from)).filter(|id| self.objects.contains_key(id)).collect();
+                if !objects.is_empty() {
+                    self.keeps.insert(o.clone(), Keeps { objects, expires });
+                }
             }
         }
         Ok(())

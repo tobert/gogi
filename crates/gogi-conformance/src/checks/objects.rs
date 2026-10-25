@@ -15,7 +15,13 @@ impl Suite {
         match self.http.bytes(method, path, body, headers) {
             Ok(r) => {
                 match r.header(gogi_proto::ids::REQUEST_ID_HEADER).filter(|i| gogi_proto::ids::is_request_id(i)) {
-                    Some(id) => self.request_ids.push(id.to_string()),
+                    Some(id) => {
+                        let v = r.json();
+                        if r.status >= 400 && v.get("error").is_some() && v["request_id"] != json!(id) {
+                            self.request_id_faults.push(format!("{} {} returned {} with request-id {} and an error body whose request_id is {}", method, path, r.status, id, v["request_id"]));
+                        }
+                        self.request_ids.push(id.to_string());
+                    }
                     None => self.request_id_faults.push(format!("{} {} returned {} with request-id {:?}", method, path, r.status, r.header(gogi_proto::ids::REQUEST_ID_HEADER))),
                 }
                 Some(r)
@@ -61,6 +67,7 @@ impl Suite {
 
         if let Some(g) = self.send_bytes("an object reads back", "GET", &path, None, &[]) {
             self.r.check("an object reads back bit for bit", g.status == 200 && g.body == body, format!("returned {} with {} bytes", g.status, g.body.len()));
+            self.r.check("an object reads back with its content-length", g.header("content-length") == Some(body.len().to_string().as_str()), g.header("content-length"));
             self.r.check("an object reads back with its media type", g.header("content-type") == Some("application/octet-stream"), g.header("content-type"));
         }
         if let Some(h) = self.send_bytes("HEAD names the size", "HEAD", &path, None, &[]) {
@@ -70,11 +77,17 @@ impl Suite {
         for (what, range, want) in [("a range reads its bytes", "bytes=2-5", 2..6), ("a range from a start reads to the end", &*format!("bytes={}-", len - 4), len - 4..len), ("a suffix range reads the last bytes", "bytes=-3", len - 3..len)] {
             if let Some(g) = self.send_bytes(what, "GET", &path, None, &[("range", range)]) {
                 let content_range = format!("bytes {}-{}/{}", want.start, want.end - 1, len);
-                self.r.check(what, g.status == 206 && g.body == body[want.clone()] && g.header("content-range") == Some(content_range.as_str()), (g.status, g.body.len(), g.header("content-range")));
+                let length = (want.end - want.start).to_string();
+                let ok = g.status == 206 && g.body == body[want.clone()] && g.header("content-range") == Some(content_range.as_str()) && g.header("content-length") == Some(length.as_str()) && g.header("content-type") == Some("application/octet-stream");
+                self.r.check(what, ok, (g.status, g.body.len(), g.header("content-range"), g.header("content-length")));
             }
         }
         if let Some(g) = self.send_bytes("a range past the end is a 416", "GET", &path, None, &[("range", &format!("bytes={}-", len))]) {
-            self.r.check("a range past the end is a 416", g.status == 416, g.status);
+            let v = g.json();
+            self.r.check("a range past the end is a 416 naming range", g.status == 416 && v["error"]["type"] == json!("invalid_request") && v["error"]["param"] == json!("range"), (g.status, &v));
+        }
+        if let Some(g) = self.send_bytes("a range that ends before it starts reads the whole object", "GET", &path, None, &[("range", &format!("bytes={}-1", len + 5))]) {
+            self.r.check("a range that ends before it starts reads the whole object", g.status == 200 && g.body == body, g.status);
         }
 
         let other = content_id(b"not these bytes");
@@ -93,10 +106,14 @@ impl Suite {
                 self.r.check(what, m.status == 400 && v["error"]["param"] == json!("content-type"), &v);
             }
         }
-        let short: String = id.chars().take("blake3:".len() + 16).collect();
-        if let Some(g) = self.send_bytes("a short object id is a 400 naming it", "GET", &format!("/council/v2/objects/{}", short), None, &[]) {
-            let v = g.json();
-            self.r.check("a short object id is a 400 naming it", g.status == 400 && v["error"]["param"] == json!("id") && v["error"]["message"].as_str().unwrap_or("").contains(&short), &v);
+        let hex = content_id(format!("objects-bad-{}", self.nonce).as_bytes()).trim_start_matches("blake3:").to_string();
+        for (what, method, bad) in [("a short object id", "GET", format!("blake3:{}", &hex[..16])), ("a sha256 object id", "GET", format!("sha256:{}", hex)), ("a put at a short object id", "PUT", format!("blake3:{}", &hex[..16])), ("a put at a sha256 object id", "PUT", format!("sha256:{}", hex))] {
+            let what = format!("{} is a 400 naming it", what);
+            let sent = if method == "PUT" { Some(body.as_slice()) } else { None };
+            if let Some(g) = self.send_bytes(&what, method, &format!("/council/v2/objects/{}", bad), sent, &[("content-type", "application/octet-stream")]) {
+                let v = g.json();
+                self.r.check(&what, g.status == 400 && v["error"]["param"] == json!("id") && v["error"]["message"].as_str().unwrap_or("").contains(&bad), &v);
+            }
         }
         if let Some(g) = self.send_bytes("an object the server does not hold is a 404", "GET", &format!("/council/v2/objects/{}", content_id(b"never put")), None, &[]) {
             let v = g.json();
@@ -109,11 +126,44 @@ impl Suite {
                     let v = m.json();
                     self.r.check("an object past object_bytes is a 413", m.status == 413 && v["error"]["type"] == json!("too_large") && v["error"]["param"] == json!("object_bytes"), &v);
                 }
+                if let Some(h) = self.send_bytes("an object past object_bytes is not held", "HEAD", &format!("/council/v2/objects/{}", content_id(&big)), None, &[]) {
+                    self.r.check("an object past object_bytes is not held", h.status == 404, h.status);
+                }
             }
             Some(_) => self.r.skip("an object past object_bytes is a 413", "object_bytes is more than the suite sends"),
             None => self.r.fail("identity names object_bytes", "a server with objects names object_bytes in limits"),
         }
         self.keeps(&id);
+        self.keep_bytes();
+    }
+
+    /// Puts objects past `keep_bytes` and keeps them in one set: a `413` naming `keep_bytes` that
+    /// keeps nothing.
+    fn keep_bytes(&mut self) {
+        let limits = self.identity.as_ref().map(|i| (i.limits.object_bytes, i.limits.keep_bytes));
+        let Some((Some(object), Some(keep))) = limits else {
+            self.r.fail("identity names keep_bytes", "a server with objects names object_bytes and keep_bytes in limits");
+            return;
+        };
+        if keep >= MAX_PROBE_BYTES {
+            self.r.skip("a keep set past keep_bytes is a 413", "keep_bytes is more than the suite sends");
+            return;
+        }
+        let size = object.min(keep).max(1);
+        let mut ids = Vec::new();
+        for i in 0..keep / size + 1 {
+            let mut bytes = self.object_bytes(&format!("keep-bytes-{}", i));
+            bytes.resize(size as usize, i as u8);
+            match self.put_object("keep_bytes: object put succeeds", &bytes, "application/octet-stream") {
+                Some(id) => ids.push(id),
+                None => return,
+            }
+        }
+        let path = format!("/council/v2/keeps/gogi-conformance-keep-bytes-{}", self.nonce);
+        if let Some((status, v)) = self.send("a keep set past keep_bytes is a 413", "PUT", &path, Some(json!({"objects": ids, "ttl_s": 60}))) {
+            self.r.check("a keep set past keep_bytes is a 413", status == 413 && v["error"]["type"] == json!("too_large") && v["error"]["param"] == json!("keep_bytes"), format!("returned {}: {}", status, v));
+        }
+        self.refused("a keep set past keep_bytes keeps nothing", "GET", &path, None, 404);
     }
 
     fn keeps(&mut self, id: &str) {
@@ -121,10 +171,11 @@ impl Suite {
         let path = format!("/council/v2/keeps/{}", owner);
         let unheld = content_id(b"never put either");
         self.refused("an owner that keeps nothing is a 404", "GET", &path, None, 404);
+        let long = "k".repeat(129);
         for method in ["GET", "DELETE"] {
-            self.refused(&format!("{} of a keep owner of 129 characters is refused", method), method, &format!("/council/v2/keeps/{}", "k".repeat(129)), None, 400);
+            self.refused_naming(&format!("{} of a keep owner of 129 characters is a 400 naming owner", method), method, &format!("/council/v2/keeps/{}", long), None, "owner", "");
         }
-        self.refused("a keep owner of 129 characters is refused", "PUT", &format!("/council/v2/keeps/{}", "k".repeat(129)), Some(json!({"objects": [], "ttl_s": 5})), 400);
+        self.refused_naming("a keep owner of 129 characters is a 400 naming owner", "PUT", &format!("/council/v2/keeps/{}", long), Some(json!({"objects": [], "ttl_s": 5})), "owner", "");
         let Some(p) = self.expect("a keep succeeds", "PUT", &path, Some(json!({"objects": [id, unheld], "ttl_s": 120})), 200) else { return };
         if let Some(r) = self.decode::<KeepsPutResult>("a keep response has the contract's fields", &p) {
             self.r.check("a keep on an object the server does not hold reports held false", r.objects.len() == 2 && r.objects[0].held && !r.objects[1].held, &p);
@@ -137,10 +188,19 @@ impl Suite {
             self.r.check("a keep may last 30 days", p["expires_in_s"].as_u64().is_some_and(|e| e > 0 && e <= KEEP_TTL_MAX_S), &p);
         }
         self.refused("a keep past 30 days is a 400", "PUT", &path, Some(json!({"objects": [id], "ttl_s": KEEP_TTL_MAX_S + 1})), 400);
-        let short: String = id.chars().take("blake3:".len() + 8).collect();
-        self.refused_naming("a keep on a short object id is a 400 naming it", "PUT", &path, Some(json!({"objects": [short], "ttl_s": 60})), "objects", &short);
+        let hex = content_id(format!("keeps-bad-{}", self.nonce).as_bytes()).trim_start_matches("blake3:").to_string();
+        for (what, bad) in [("a short object id", format!("blake3:{}", &hex[..8])), ("a sha256 object id", format!("sha256:{}", hex)), ("an object id in capitals", format!("blake3:{}", hex.to_ascii_uppercase()))] {
+            self.refused_naming(&format!("a keep on {} is a 400 naming it", what), "PUT", &path, Some(json!({"objects": [bad], "ttl_s": 60})), "objects", &bad);
+        }
         if let Some(l) = self.expect("a refused keep set changes nothing", "GET", &path, None, 200) {
             self.r.check("a refused keep set changes nothing", l["objects"] == json!([id]), &l);
+        }
+        let other = self.object_bytes("keeps-other");
+        if let Some(b) = self.put_object("keeps: second object put succeeds", &other, "application/octet-stream")
+            && self.expect("a keep set is replaced", "PUT", &path, Some(json!({"objects": [b], "ttl_s": 60})), 200).is_some()
+            && let Some(l) = self.expect("a replaced keep list succeeds", "GET", &path, None, 200)
+        {
+            self.r.check("a PUT replaces the owner's whole keep set", l["objects"] == json!([b]), &l);
         }
         self.expect("a keep set is deleted", "DELETE", &path, None, 204);
         self.refused("a deleted keep set is a 404", "GET", &path, None, 404);

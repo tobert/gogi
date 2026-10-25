@@ -12,7 +12,7 @@ pub const PIN_TTL_MAX_S: u64 = 86_400;
 
 /// An owner is 1 to 128 printable characters without a slash.
 pub fn is_owner(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 128 && !s.chars().any(char::is_control) && !s.contains('/')
+    !s.is_empty() && s.chars().count() <= 128 && !s.chars().any(char::is_control) && !s.contains('/')
 }
 
 pub fn validate_owner(owner: &str) -> Result<(), Invalid> {
@@ -114,6 +114,12 @@ pub struct SnapshotDetail {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_owner_is_up_to_128_characters_not_bytes() {
+        assert!(is_owner(&"鍵".repeat(128)) && !is_owner(&"鍵".repeat(129)));
+        assert!(!is_owner("") && !is_owner("a/b") && !is_owner("a\nb"));
+    }
 
     #[test]
     fn a_response_with_an_id_that_is_not_whole_does_not_decode() {

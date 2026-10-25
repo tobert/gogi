@@ -344,7 +344,7 @@ PUT /council/v2/pins/kernel-7f3a
   Any other owner is a `400` naming `owner`, on `PUT`, `GET`, and `DELETE`.
 - **`PUT` replaces the owner's whole set** and renews its time, so a client
   that restarts sends its set again and drops what it does not need.
-  `DELETE` drops the set; `GET` lists it as `{owner, snapshots: [<id>…],
+  `DELETE` drops the set and is a `204` with no body; `GET` lists it as `{owner, snapshots: [<id>…],
   expires_in_s}`, naming only the snapshots that were held when pinned. An
   owner with no pins is a `404`.
 - **A pin keeps a snapshot and the snapshots it is built on** from
@@ -382,6 +382,8 @@ An object is bytes and a media type that a request names by id, such as an
 image a message shows or a sound a case holds. A server with capability
 `objects` serves these routes.
 
+- **`DELETE` on a spec, a pin owner, or a keep owner is a `204`** with no
+  body.
 - **A put sends the bytes to the path of their id.** The server hashes the
   bytes as they arrive. Bytes whose content id is not the id in the path
   are a `400` naming `id`, and the message quotes both ids; nothing is held.
@@ -399,8 +401,9 @@ image a message shows or a sound a case holds. A server with capability
   `content-length`. `HEAD` returns the same headers and no body. A `Range` of
   one span, `bytes=a-b`, `bytes=a-`, or `bytes=-n`, is a `206` with
   `content-range`; a span that starts past the end is a `416` naming
-  `range`. A server may return a `200` with the whole object for any other
-  `Range`, such as several spans.
+  `range`. A span whose end is before its start is not a span (RFC 9110),
+  so the server ignores the `Range` and returns a `200` with the whole
+  object, as it may for any other `Range`, such as several spans.
 - **An object the server does not hold is a `404`.** The client puts it
   again. A server may evict any object that no keep holds, as it evicts a
   snapshot that no pin keeps, so an eviction costs a put, never a wrong

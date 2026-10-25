@@ -74,7 +74,7 @@ pub fn run(mut opts: Opts, print: bool) -> Report {
         s.tracing();
         match opts.restart.as_mut() {
             Some(restart) => s.restart(restart),
-            None => s.r.skip("specs and pins survive a restart", "run with --allow-restart <cmd> to check"),
+            None => s.r.skip("specs, pins, and keeps survive a restart", "run with --allow-restart <cmd> to check"),
         }
         s.request_ids();
     }

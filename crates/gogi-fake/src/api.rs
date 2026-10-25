@@ -52,6 +52,16 @@ fn bad_param(param: &str, message: impl Into<String>) -> Resp {
     err(400, "invalid_request", message, Some(param))
 }
 
+/// The `400` for a request header the server cannot read.
+pub fn refuse_header(name: &str, message: String) -> Resp {
+    err(400, "invalid_request", message, Some(name))
+}
+
+/// The `413` for a body past what the server reads, sent before the body is read.
+pub fn refuse_size(declared: u64, limit: u64) -> Resp {
+    err(413, "too_large", format!("nothing ran: the body is {} bytes; the server reads at most {} (object_bytes, or 16 MiB for JSON)", declared, limit), Some("object_bytes"))
+}
+
 fn not_found(message: impl Into<String>) -> Resp {
     err(404, "not_found", message, None)
 }
@@ -192,6 +202,7 @@ fn route(store: &Store, model: &str) -> Result<FakeModel, Resp> {
 
 pub fn handle(store: &mut Store, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Resp {
     store.expire_pins();
+    // http.rs joins a repeated field into one value.
     let header = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
     let Some(rest) = path.strip_prefix("/council/v2/") else { return not_found("unknown route") };
     let parts: Vec<&str> = rest.split('/').collect();
@@ -272,6 +283,9 @@ pub fn handle(store: &mut Store, method: &str, path: &str, headers: &[(String, S
 // ---- objects and keeps
 
 fn objects_put(store: &mut Store, id: &str, content_type: Option<&str>, body: &[u8]) -> Resp {
+    if let Err(r) = path_id(id) {
+        return r;
+    }
     if body.len() as u64 > store.cfg.object_bytes {
         return err(413, "too_large", format!("nothing is held: the object is {} bytes; object_bytes is {}", body.len(), store.cfg.object_bytes), Some("object_bytes"));
     }
@@ -299,7 +313,7 @@ fn objects_get(store: &Store, id: &str, range: Option<&str>) -> Resp {
             headers: vec![("Content-Range".into(), format!("bytes {}-{}/{}", start, end, len))],
         },
         gogi_proto::objects::ByteRange::Unsatisfiable => {
-            err(416, "invalid_request", format!("nothing was read: the range {:?} starts past the end of the {} bytes of {}", range.unwrap_or(""), len, id), Some("range"))
+            err(416, "invalid_request", format!("nothing was read: the range `{}` starts past the end of the {} bytes of {}", range.unwrap_or(""), len, id), Some("range"))
         }
     }
 }
@@ -319,8 +333,8 @@ fn keeps_put(store: &mut Store, owner: &str, body: &[u8]) -> Resp {
     let ids: Vec<String> = req.objects.iter().zip(&held).filter(|(_, h)| **h).map(|(i, _)| i.clone()).collect();
     let mut all: HashSet<&String> = store.keeps.iter().filter(|(o, _)| o.as_str() != owner).flat_map(|(_, k)| k.objects.iter()).collect();
     all.extend(ids.iter());
-    let total: u64 = all.iter().map(|id| store.objects[*id].1.len() as u64).sum();
-    if total > store.cfg.keep_bytes {
+    let total: u64 = all.iter().filter_map(|id| store.objects.get(*id)).map(|(_, b)| b.len() as u64).sum();
+    if !ids.is_empty() && total > store.cfg.keep_bytes {
         return err(413, "too_large", format!("nothing is kept: the kept objects would be {} bytes; keep_bytes is {}", total, store.cfg.keep_bytes), Some("keep_bytes"));
     }
     let objects: Vec<Value> = req.objects.iter().zip(&held).map(|(id, h)| json!({"id": id, "held": h})).collect();

@@ -13,7 +13,7 @@ fn the_fake_passes_every_check() {
     let r = run(Opts { url: server.url(), restart: None, model: None }, false);
     assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
     assert!(r.checks.len() > 150, "{}", r.checks.len());
-    for name in ["an object reads back bit for bit", "a range reads its bytes", "a keep list names the held objects only", "an object past object_bytes is a 413", "another object is another context", "a decision reads its case_media"] {
+    for name in ["an object reads back bit for bit", "a range reads its bytes", "a keep list names the held objects only", "an object past object_bytes is a 413", "another object is another context", "a decision reads its case_media", "a keep set past keep_bytes is a 413", "a PUT replaces the owner's whole keep set"] {
         assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name} did not pass");
     }
 }

@@ -64,8 +64,9 @@ fn connection(conn: TcpStream, store: &Mutex<Store>) -> std::io::Result<()> {
     r.read_line(&mut line)?;
     let mut it = line.split_whitespace();
     let (method, target) = (it.next().unwrap_or("").to_string(), it.next().unwrap_or("").to_string());
-    let mut len = 0usize;
-    let mut headers = Vec::new();
+    let mut len = None;
+    let mut bad_len = None;
+    let mut headers: Vec<(String, String)> = Vec::new();
     loop {
         line.clear();
         r.read_line(&mut line)?;
@@ -75,15 +76,35 @@ fn connection(conn: TcpStream, store: &Mutex<Store>) -> std::io::Result<()> {
         }
         if let Some((k, v)) = l.split_once(':') {
             if k.eq_ignore_ascii_case("content-length") {
-                len = v.trim().parse().unwrap_or(0);
+                match v.trim().parse::<u64>() {
+                    Ok(n) => len = Some(n),
+                    Err(_) => bad_len = Some(v.trim().to_string()),
+                }
             }
-            headers.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
+            // A repeated field joins with ", " to the one before it (RFC 9110 section 5.3).
+            let name = k.trim().to_ascii_lowercase();
+            match headers.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, value)) => {
+                    value.push_str(", ");
+                    value.push_str(v.trim());
+                }
+                None => headers.push((name, v.trim().to_string())),
+            }
         }
     }
-    let mut body = vec![0u8; len];
-    r.read_exact(&mut body)?;
     let path = target.split('?').next().unwrap_or("");
-    let resp = api::handle(&mut store.lock().unwrap(), &method, path, &headers, &body);
+    let limit = store.lock().unwrap().body_limit();
+    let resp = match (bad_len, len) {
+        (Some(v), _) => api::refuse_header("content-length", format!("nothing ran: content-length {:?} is not a number of bytes", v)),
+        (None, Some(n)) if n > limit => api::refuse_size(n, limit),
+        (None, n) => {
+            let mut body = vec![0u8; n.unwrap_or(0) as usize];
+            match r.read_exact(&mut body) {
+                Ok(()) => api::handle(&mut store.lock().unwrap(), &method, path, &headers, &body),
+                Err(e) => api::refuse_header("content-length", format!("nothing ran: the body ended before content-length {} bytes: {}", n.unwrap_or(0), e)),
+            }
+        }
+    };
     let id = request_id();
     match resp {
         Resp::Json(code, mut v) => {
@@ -92,7 +113,9 @@ fn connection(conn: TcpStream, store: &Mutex<Store>) -> std::io::Result<()> {
             }
             let b = serde_json::to_vec(&v).unwrap();
             write!(out, "HTTP/1.1 {}\r\n{}: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", status_line(code), REQUEST_ID_HEADER, id, b.len())?;
-            out.write_all(&b)?;
+            if method != "HEAD" {
+                out.write_all(&b)?;
+            }
         }
         Resp::Bytes { code, mime, body, headers } => {
             write!(out, "HTTP/1.1 {}\r\n{}: {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n", status_line(code), REQUEST_ID_HEADER, id, mime, body.len())?;
@@ -104,7 +127,7 @@ fn connection(conn: TcpStream, store: &Mutex<Store>) -> std::io::Result<()> {
                 out.write_all(&body)?;
             }
         }
-        Resp::Empty(code) => write!(out, "HTTP/1.1 {}\r\n{}: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", status_line(code), REQUEST_ID_HEADER, id)?,
+        Resp::Empty(code) => write!(out, "HTTP/1.1 {}\r\n{}: {}\r\nConnection: close\r\n\r\n", status_line(code), REQUEST_ID_HEADER, id)?,
         Resp::Sse(events) => {
             write!(out, "HTTP/1.1 200 OK\r\n{}: {}\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", REQUEST_ID_HEADER, id)?;
             for e in events {

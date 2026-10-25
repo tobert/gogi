@@ -145,11 +145,14 @@ pub fn byte_range(header: Option<&str>, len: u64) -> ByteRange {
             }
         }
         (Some(start), end) if b.is_empty() || end.is_some() => {
+            // An end before the start makes the field invalid, so it is ignored (RFC 9110 14.1.1).
+            if end.is_some_and(|e| e < start) {
+                return ByteRange::Whole;
+            }
             if start >= len {
                 return ByteRange::Unsatisfiable;
             }
             match end {
-                Some(e) if e < start => ByteRange::Whole,
                 Some(e) => ByteRange::Part { start, end: e.min(len - 1) },
                 None => ByteRange::Part { start, end: len - 1 },
             }
@@ -259,6 +262,7 @@ mod tests {
         assert_eq!(byte_range(Some("bytes=-0"), 10), Unsatisfiable);
         assert_eq!(byte_range(Some("bytes=0-1,4-5"), 10), Whole);
         assert_eq!(byte_range(Some("bytes=5-2"), 10), Whole);
+        assert_eq!(byte_range(Some("bytes=20-5"), 10), Whole, "an invalid span is ignored, not a 416");
         assert_eq!(byte_range(Some("items=0-1"), 10), Whole);
         assert_eq!(byte_range(Some("bytes=x-1"), 10), Whole);
     }
