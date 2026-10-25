@@ -19,6 +19,24 @@ pub struct Response {
     pub text: String,
 }
 
+/// A response read as bytes.
+pub struct Bytes {
+    pub status: u16,
+    /// By lowercase name.
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl Bytes {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+    }
+
+    pub fn json(&self) -> Value {
+        serde_json::from_slice(&self.body).unwrap_or(Value::Null)
+    }
+}
+
 impl Response {
     pub fn json(&self) -> Value {
         serde_json::from_str(&self.text).unwrap_or(Value::Null)
@@ -56,6 +74,29 @@ impl Http {
         let mut text = String::new();
         resp.into_reader().read_to_string(&mut text).map_err(|e| format!("{} {}: reading the response: {}", method, path, e))?;
         Ok(Response { status, content_type, request_id, text })
+    }
+
+    /// Sends bytes, or nothing, with headers, and returns the status, the response headers by
+    /// lowercase name, and the body's bytes.
+    pub fn bytes(&self, method: &str, path: &str, body: Option<&[u8]>, headers: &[(&str, &str)]) -> Result<Bytes, String> {
+        let mut req = self.agent.request(method, &format!("{}{}", self.base, path));
+        for (k, v) in headers {
+            req = req.set(k, v);
+        }
+        let sent = match body {
+            Some(b) => req.send_bytes(b),
+            None => req.call(),
+        };
+        let resp = match sent {
+            Ok(r) => r,
+            Err(ureq::Error::Status(_, r)) => r,
+            Err(e) => return Err(format!("{} {}: {}", method, path, e)),
+        };
+        let status = resp.status();
+        let headers = resp.headers_names().into_iter().filter_map(|n| resp.header(&n).map(|v| (n.to_ascii_lowercase(), v.to_string()))).collect();
+        let mut body = Vec::new();
+        resp.into_reader().read_to_end(&mut body).map_err(|e| format!("{} {}: reading the response: {}", method, path, e))?;
+        Ok(Bytes { status, headers, body })
     }
 
     pub fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value), String> {

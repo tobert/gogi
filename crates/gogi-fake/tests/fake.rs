@@ -616,3 +616,56 @@ fn a_sealed_cut_head_rounds_the_state_a_continuation_starts_from() {
     }
     assert!(differs > 0, "the rounded state changed a continuation");
 }
+
+/// Sends raw bytes with a media type and returns the status line's code, the head, and the body.
+fn exchange_bytes(s: &Server, method: &str, path: &str, mime: &str, body: &[u8]) -> (u16, String, Vec<u8>) {
+    let addr = s.url().trim_start_matches("http://").to_string();
+    let mut c = TcpStream::connect(&addr).unwrap();
+    write!(c, "{method} {path} HTTP/1.1\r\nHost: x\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+    c.write_all(body).unwrap();
+    let mut raw = Vec::new();
+    c.read_to_end(&mut raw).unwrap();
+    let at = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    let head = String::from_utf8(raw[..at].to_vec()).unwrap();
+    let code = head.split_whitespace().nth(1).unwrap().parse().unwrap();
+    (code, head, raw[at + 4..].to_vec())
+}
+
+fn put_object(s: &Server, bytes: &[u8]) -> String {
+    let id = gogi_proto::content_id(bytes);
+    let (code, _, body) = exchange_bytes(s, "PUT", &format!("/council/v2/objects/{id}"), "audio/wav", bytes);
+    assert_eq!(code, 201, "{}", String::from_utf8_lossy(&body));
+    id
+}
+
+#[test]
+fn head_sends_the_headers_of_an_object_and_no_body() {
+    let s = Server::start(Config::default()).unwrap();
+    let id = put_object(&s, &[1, 2, 3, 0, 255]);
+    let (code, head, body) = exchange_bytes(&s, "HEAD", &format!("/council/v2/objects/{id}"), "audio/wav", &[]);
+    assert_eq!(code, 200);
+    assert!(head.to_ascii_lowercase().contains("content-length: 5") && head.contains("audio/wav"), "{head}");
+    assert!(body.is_empty(), "{body:?}");
+}
+
+#[test]
+fn keeps_past_keep_bytes_are_a_413_and_keep_nothing() {
+    let s = Server::start(Config { keep_bytes: 300, ..Config::default() }).unwrap();
+    let a = put_object(&s, &[1u8; 200]);
+    let b = put_object(&s, &[2u8; 200]);
+    assert_eq!(call(&s, "PUT", "/council/v2/keeps/k1", Some(json!({"objects": [a], "ttl_s": 60}))).0, 200);
+    let (code, v) = call(&s, "PUT", "/council/v2/keeps/k2", Some(json!({"objects": [b], "ttl_s": 60})));
+    assert!(code == 413 && v["error"]["param"] == json!("keep_bytes"), "{v}");
+    assert_eq!(call(&s, "GET", "/council/v2/keeps/k2", None).0, 404);
+    // Replacing an owner's own set does not count its old set twice.
+    assert_eq!(call(&s, "PUT", "/council/v2/keeps/k1", Some(json!({"objects": [b], "ttl_s": 60}))).0, 200);
+}
+
+#[test]
+fn keeps_expire() {
+    let s = Server::start(Config::default()).unwrap();
+    let a = put_object(&s, b"kept for a minute");
+    assert_eq!(call(&s, "PUT", "/council/v2/keeps/k", Some(json!({"objects": [a], "ttl_s": 60}))).0, 200);
+    s.advance_clock(61);
+    assert_eq!(call(&s, "GET", "/council/v2/keeps/k", None).0, 404);
+}

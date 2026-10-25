@@ -6,6 +6,7 @@ mod generations;
 mod headers;
 mod ids;
 mod models;
+mod objects;
 mod pins;
 mod reads;
 mod restart;
@@ -24,11 +25,11 @@ pub(crate) fn shell_tools() -> Value {
         "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}}}])
 }
 
-/// Whether a capability is declared where the contract puts it: `pins`, `tiers`, and `classes` in
+/// Whether a capability is declared where the contract puts it: `pins`, `tiers`, `classes`, and `objects` in
 /// the server's list, every other one in the served model's.
 pub(crate) fn declares(identity: Option<&ServerIdentity>, model: Option<&gogi_proto::identity::ServedModel>, c: Capability) -> bool {
     match c {
-        Capability::Pins | Capability::Tiers | Capability::Classes => identity.is_some_and(|i| i.has(c)),
+        Capability::Pins | Capability::Tiers | Capability::Classes | Capability::Objects => identity.is_some_and(|i| i.has(c)),
         _ => model.is_some_and(|m| m.has(c)),
     }
 }

@@ -19,7 +19,7 @@ use serde_json::{Map, Value, json};
 use gogi_toy::read;
 use gogi_toy::reply::{Call, Reply, ReplyParser, Step};
 use gogi_toy::{self as model, State, VOCAB};
-use crate::state::{BYTES_PER_TOKEN, FakeModel, Pins, Store, snapshot_id};
+use crate::state::{BYTES_PER_TOKEN, FakeModel, Keeps, Pins, Store, snapshot_id};
 
 pub const TEMPLATE: &str = "gogi-toy-chat-2";
 
@@ -31,6 +31,8 @@ pub enum Resp {
     Empty(u16),
     /// A server-sent event stream: the events, then the end of the connection.
     Sse(Vec<StreamEvent>),
+    /// An object's bytes, with its media type and other headers. A `HEAD` sends the headers only.
+    Bytes { code: u16, mime: String, body: Vec<u8>, headers: Vec<(String, String)> },
 }
 
 fn err(status: u16, kind: &str, message: impl Into<String>, param: Option<&str>) -> Resp {
@@ -138,8 +140,9 @@ pub fn identity(store: &Store) -> Value {
         .collect();
     json!({
         "models": models,
-        "limits": {"case_bytes": CASE_BYTES, "choice_options": 26, "questions_per_spec": 16, "pin_bytes": store.cfg.pin_bytes},
-        "capabilities": ["pins"],
+        "limits": {"case_bytes": CASE_BYTES, "choice_options": 26, "questions_per_spec": 16, "pin_bytes": store.cfg.pin_bytes,
+                   "object_bytes": store.cfg.object_bytes, "keep_bytes": store.cfg.keep_bytes},
+        "capabilities": ["pins", "objects"],
         "extensions": [],
     })
 }
@@ -154,8 +157,9 @@ fn route(store: &Store, model: &str) -> Result<FakeModel, Resp> {
     Ok(store.cfg.models.iter().find(|f| f.name == m.model).cloned().expect("identity lists the config's models"))
 }
 
-pub fn handle(store: &mut Store, method: &str, path: &str, body: &[u8]) -> Resp {
+pub fn handle(store: &mut Store, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Resp {
     store.expire_pins();
+    let header = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
     let Some(rest) = path.strip_prefix("/council/v2/") else { return not_found("unknown route") };
     let parts: Vec<&str> = rest.split('/').collect();
     match (method, parts.as_slice()) {
@@ -173,6 +177,20 @@ pub fn handle(store: &mut Store, method: &str, path: &str, body: &[u8]) -> Resp 
         ("DELETE", ["pins", owner]) => {
             if store.pins.remove(&unescape(owner)).is_none() {
                 return not_found(format!("{} pins nothing", unescape(owner)));
+            }
+            store.save();
+            Resp::Empty(204)
+        }
+        ("PUT", ["objects", id]) => objects_put(store, &unescape(id), header("content-type"), body),
+        ("GET" | "HEAD", ["objects", id]) => objects_get(store, &unescape(id), header("range")),
+        ("PUT", ["keeps", owner]) => keeps_put(store, &unescape(owner), body),
+        ("GET", ["keeps", owner]) => match store.keeps.get(&unescape(owner)) {
+            Some(k) => Resp::Json(200, json!({"owner": unescape(owner), "objects": k.objects, "expires_in_s": store.expires_in(k.expires)})),
+            None => not_found(format!("{} keeps nothing", unescape(owner))),
+        },
+        ("DELETE", ["keeps", owner]) => {
+            if store.keeps.remove(&unescape(owner)).is_none() {
+                return not_found(format!("{} keeps nothing", unescape(owner)));
             }
             store.save();
             Resp::Empty(204)
@@ -202,6 +220,73 @@ pub fn handle(store: &mut Store, method: &str, path: &str, body: &[u8]) -> Resp 
         ("POST", ["generations"]) => generations(store, body),
         _ => not_found("unknown route"),
     }
+}
+
+// ---- objects and keeps
+
+fn objects_put(store: &mut Store, id: &str, content_type: Option<&str>, body: &[u8]) -> Resp {
+    if body.len() as u64 > store.cfg.object_bytes {
+        return err(413, "too_large", format!("nothing is held: the object is {} bytes; object_bytes is {}", body.len(), store.cfg.object_bytes), Some("object_bytes"));
+    }
+    if let Err(e) = gogi_proto::objects::check_put(id, content_type, body) {
+        return invalid(e);
+    }
+    let code = if store.objects.contains_key(id) { 200 } else { 201 };
+    let mime = store.objects.entry(id.to_string()).or_insert_with(|| (content_type.unwrap_or_default().to_string(), body.to_vec())).0.clone();
+    Resp::Json(code, json!({"id": id, "mime": mime, "bytes": body.len()}))
+}
+
+fn objects_get(store: &Store, id: &str, range: Option<&str>) -> Resp {
+    let id = match path_id(id) {
+        Ok(id) => id,
+        Err(r) => return r,
+    };
+    let Some((mime, bytes)) = store.objects.get(&id) else { return not_found(format!("no object {} is held; PUT it again", id)) };
+    let len = bytes.len() as u64;
+    match gogi_proto::objects::byte_range(range, len) {
+        gogi_proto::objects::ByteRange::Whole => Resp::Bytes { code: 200, mime: mime.clone(), body: bytes.clone(), headers: vec![] },
+        gogi_proto::objects::ByteRange::Part { start, end } => Resp::Bytes {
+            code: 206,
+            mime: mime.clone(),
+            body: bytes[start as usize..=end as usize].to_vec(),
+            headers: vec![("Content-Range".into(), format!("bytes {}-{}/{}", start, end, len))],
+        },
+        gogi_proto::objects::ByteRange::Unsatisfiable => {
+            err(416, "invalid_request", format!("nothing was read: the range {:?} starts past the end of the {} bytes of {}", range.unwrap_or(""), len, id), Some("range"))
+        }
+    }
+}
+
+fn keeps_put(store: &mut Store, owner: &str, body: &[u8]) -> Resp {
+    if !is_owner(owner) {
+        return bad_param("owner", "nothing is kept: an owner is printable text of up to 128 characters, without a slash");
+    }
+    let req: gogi_proto::objects::KeepsPut = match parse(body, "keeps") {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    if let Err(e) = req.validate() {
+        return invalid(e);
+    }
+    let held: Vec<bool> = req.objects.iter().map(|id| store.objects.contains_key(id)).collect();
+    let ids: Vec<String> = req.objects.iter().zip(&held).filter(|(_, h)| **h).map(|(i, _)| i.clone()).collect();
+    let mut all: HashSet<&String> = store.keeps.iter().filter(|(o, _)| o.as_str() != owner).flat_map(|(_, k)| k.objects.iter()).collect();
+    all.extend(ids.iter());
+    let total: u64 = all.iter().map(|id| store.objects[*id].1.len() as u64).sum();
+    if total > store.cfg.keep_bytes {
+        return err(413, "too_large", format!("nothing is kept: the kept objects would be {} bytes; keep_bytes is {}", total, store.cfg.keep_bytes), Some("keep_bytes"));
+    }
+    let objects: Vec<Value> = req.objects.iter().zip(&held).map(|(id, h)| json!({"id": id, "held": h})).collect();
+    let expires_in = if ids.is_empty() {
+        store.keeps.remove(owner);
+        Value::Null
+    } else {
+        let expires = store.now() + req.ttl_s;
+        store.keeps.insert(owner.to_string(), Keeps { objects: ids, expires });
+        json!(req.ttl_s)
+    };
+    store.save();
+    Resp::Json(200, json!({"owner": owner, "objects": objects, "expires_in_s": expires_in}))
 }
 
 // ---- specs

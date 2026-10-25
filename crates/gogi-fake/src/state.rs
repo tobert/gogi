@@ -47,12 +47,16 @@ pub struct Config {
     /// Hold a cut reply's head sealed: a build that starts from it reads a rounded model state, as
     /// a server that rounds model state at a boundary does.
     pub seal_cut_heads: bool,
+    /// The largest object, in bytes.
+    pub object_bytes: u64,
+    /// The most object bytes all keeps together hold.
+    pub keep_bytes: u64,
 }
 
 impl Default for Config {
     fn default() -> Self {
         let toy = FakeModel { aliases: vec!["toy".into()], ..FakeModel::ready("gogi-toy-1", 0) };
-        Config { addr: "127.0.0.1:0".into(), models: vec![toy], state_dir: None, context_tokens: 4096, decision_context_tokens: 3072, pin_bytes: 1 << 20, max_snapshots: 10_000, seal_cut_heads: false }
+        Config { addr: "127.0.0.1:0".into(), models: vec![toy], state_dir: None, context_tokens: 4096, decision_context_tokens: 3072, pin_bytes: 1 << 20, max_snapshots: 10_000, seal_cut_heads: false, object_bytes: 1 << 20, keep_bytes: 8 << 20 }
     }
 }
 
@@ -72,11 +76,20 @@ pub struct Pins {
     pub expires: u64,
 }
 
+pub struct Keeps {
+    pub objects: Vec<String>,
+    /// Unix seconds.
+    pub expires: u64,
+}
+
 pub struct Store {
     pub cfg: Config,
     pub snaps: HashMap<String, Snap>,
     pub pins: BTreeMap<String, Pins>,
     pub specs: indexmap::IndexMap<String, Value>,
+    /// Object id to its media type and bytes. The fake never evicts an object.
+    pub objects: HashMap<String, (String, Vec<u8>)>,
+    pub keeps: BTreeMap<String, Keeps>,
     /// Seconds added to the clock, so a test can make a pin expire without waiting.
     pub skew: u64,
     next_born: u64,
@@ -104,7 +117,7 @@ pub fn snapshot_id(model: &FakeModel, tokens: &[u32], counts: &[usize]) -> Strin
 
 impl Store {
     pub fn new(cfg: Config) -> Result<Store, String> {
-        let mut s = Store { cfg, snaps: HashMap::new(), pins: BTreeMap::new(), specs: Default::default(), skew: 0, next_born: 0 };
+        let mut s = Store { cfg, snaps: HashMap::new(), pins: BTreeMap::new(), specs: Default::default(), objects: HashMap::new(), keeps: BTreeMap::new(), skew: 0, next_born: 0 };
         s.load()?;
         Ok(s)
     }
@@ -117,12 +130,13 @@ impl Store {
         expires.saturating_sub(self.now())
     }
 
-    /// Drops pins whose `ttl_s` has run out.
+    /// Drops pins and keeps whose `ttl_s` has run out.
     pub fn expire_pins(&mut self) {
         let now = self.now();
-        let before = self.pins.len();
+        let before = self.pins.len() + self.keeps.len();
         self.pins.retain(|_, p| p.expires > now);
-        if self.pins.len() != before {
+        self.keeps.retain(|_, k| k.expires > now);
+        if self.pins.len() + self.keeps.len() != before {
             self.save();
         }
     }
@@ -214,8 +228,19 @@ impl Store {
         let snaps: serde_json::Map<String, Value> =
             kept.iter().filter_map(|id| self.snaps.get(id).map(|s| (id.clone(), json!({"model": s.model, "tokens": *s.tokens, "parent": s.parent, "sealed": s.sealed})))).collect();
         let pins: serde_json::Map<String, Value> = self.pins.iter().map(|(o, p)| (o.clone(), json!({"snapshots": p.snapshots, "expires": p.expires}))).collect();
-        let v = json!({"specs": self.specs, "pins": pins, "snapshots": snaps});
-        let _ = std::fs::create_dir_all(dir);
+        let keeps: serde_json::Map<String, Value> = self.keeps.iter().map(|(o, k)| (o.clone(), json!({"objects": k.objects, "expires": k.expires}))).collect();
+        let kept: BTreeSet<&String> = self.keeps.values().flat_map(|k| k.objects.iter()).collect();
+        let objects: serde_json::Map<String, Value> = kept.iter().filter_map(|id| self.objects.get(*id).map(|(mime, _)| ((*id).clone(), json!(mime)))).collect();
+        let v = json!({"specs": self.specs, "pins": pins, "snapshots": snaps, "keeps": keeps, "objects": objects});
+        let _ = std::fs::create_dir_all(dir.join("objects"));
+        for id in &kept {
+            if let Some((_, bytes)) = self.objects.get(*id) {
+                let file = dir.join("objects").join(id.trim_start_matches("blake3:"));
+                if !file.exists() && std::fs::write(&file, bytes).is_err() {
+                    eprintln!("gogi-fake: could not write {}", file.display());
+                }
+            }
+        }
         let tmp = dir.join("state.json.tmp");
         if std::fs::write(&tmp, serde_json::to_vec(&v).unwrap()).and_then(|_| std::fs::rename(&tmp, dir.join("state.json"))).is_err() {
             eprintln!("gogi-fake: could not write {}", dir.display());
@@ -239,7 +264,22 @@ impl Store {
                 self.seal(id);
             }
         }
+        for (id, mime) in v["objects"].as_object().into_iter().flatten() {
+            let file = dir.join("objects").join(id.trim_start_matches("blake3:"));
+            let bytes = std::fs::read(&file).map_err(|e| format!("{}: {}", file.display(), e))?;
+            if content_id(&bytes) != *id {
+                return Err(format!("{} does not hash to {}: the state directory is damaged", file.display(), id));
+            }
+            self.objects.insert(id.clone(), (mime.as_str().unwrap_or("").to_string(), bytes));
+        }
         let now = self.now();
+        for (o, k) in v["keeps"].as_object().into_iter().flatten() {
+            let expires = k["expires"].as_u64().unwrap_or(0);
+            if expires > now {
+                let objects = k["objects"].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(String::from)).collect();
+                self.keeps.insert(o.clone(), Keeps { objects, expires });
+            }
+        }
         for (o, p) in v["pins"].as_object().into_iter().flatten() {
             let expires = p["expires"].as_u64().unwrap_or(0);
             if expires > now {

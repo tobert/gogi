@@ -20,6 +20,15 @@ impl Suite {
         if pinned && self.expect("restart: pin succeeds", "PUT", &format!("/council/v2/pins/{}", owner), Some(json!({"snapshots": [head], "ttl_s": 600})), 200).is_none() {
             return;
         }
+        let objects = self.has(gogi_proto::identity::Capability::Objects);
+        let object = self.object_bytes("restart");
+        let keeper = format!("gogi-conformance-restart-{}", self.nonce);
+        if objects {
+            let Some(id) = self.put_object("restart: object put succeeds", &object, "audio/wav") else { return };
+            if self.expect("restart: keep succeeds", "PUT", &format!("/council/v2/keeps/{}", keeper), Some(json!({"objects": [id], "ttl_s": 600})), 200).is_none() {
+                return;
+            }
+        }
         let req = json!({"spec_id": spec_id, "case": "git push origin main", "contexts": [ctx]});
         let before = self.expect("restart: decision succeeds", "POST", "/council/v2/decisions", Some(req.clone()), 200);
         let identity_before = self.identity.as_ref().and_then(|i| serde_json::to_value(i).ok()).map(without_status);
@@ -74,6 +83,18 @@ impl Suite {
             }
         } else {
             self.r.skip("pins survive a restart", "the server does not declare the pins capability");
+        }
+        if objects {
+            let id = gogi_proto::content_id(&object);
+            if let Some(g) = self.send_bytes("restart: kept object get succeeds", "GET", &format!("/council/v2/objects/{}", id), None, &[]) {
+                self.r.check("a kept object survives a restart bit for bit", g.status == 200 && g.body == object && g.header("content-type") == Some("audio/wav"), (g.status, g.body.len()));
+            }
+            if let Some(k) = self.expect("restart: keep list succeeds", "GET", &format!("/council/v2/keeps/{}", keeper), None, 200) {
+                self.r.check("an owner's keeps survive a restart", k["objects"] == json!([id]) && num(&k["expires_in_s"]) > 0, &k);
+            }
+            self.expect("restart: keep cleanup", "DELETE", &format!("/council/v2/keeps/{}", keeper), None, 204);
+        } else {
+            self.r.skip("kept objects survive a restart", "the server does not declare the objects capability");
         }
         if let (Some(before), Some(after)) = (before, self.expect("restart: decision again succeeds", "POST", "/council/v2/decisions", Some(req), 200)) {
             self.r.check("a decision replays bit for bit across a restart", before["reads"][0]["answers"] == after["reads"][0]["answers"] && before["answers"] == after["answers"], (&before["answers"], &after["answers"]));

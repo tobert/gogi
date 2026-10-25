@@ -64,7 +64,10 @@ thing, and each thing has one term.
 | pin | An owner's claim that keeps a snapshot, and the snapshots it is built on, from eviction until `ttl_s` runs out. |
 | owner | The name a client pins under. |
 | spec | A held set of questions, with instructions and an input label. Its id is the content id of its canonical JSON. |
-| content id | `blake3:` and the 64 lowercase hex digits of a BLAKE3 hash, always whole. Snapshot ids and spec ids are content ids. |
+| content id | `blake3:` and the 64 lowercase hex digits of a BLAKE3 hash, always whole. Snapshot ids, spec ids, and object ids are content ids. |
+| object | Bytes and a media type that a client puts on the server, such as an image or a sound. Its id is the content id of its bytes. Capability `objects`. |
+| media type | How to read an object's bytes: `type/subtype` in lowercase with no parameters, such as `audio/wav`. |
+| keep | A lease on objects, with an owner and an expiry. It keeps them from eviction, as a pin keeps snapshots. |
 | question | One item of a spec: `choice`, `score`, `noul`, or `text`. |
 | option | One possible answer to a `choice` question, or one level of a `score` question. |
 | letter | The token `A`, `B`, and so on, that stands for an option when the model answers. |
@@ -99,6 +102,8 @@ thing, and each thing has one term.
 | `POST /council/v2/contexts` | Builds a context. |
 | `GET /council/v2/snapshots/{id}` | A snapshot's served model, tokens, tier, size, and pins. |
 | `PUT /council/v2/pins/{owner}`, `GET`, `DELETE` | An owner's pins. |
+| `PUT /council/v2/objects/{id}`, `GET`, `HEAD` | Holds an object, or reads it, whole or by range. Capability `objects`. |
+| `PUT /council/v2/keeps/{owner}`, `GET`, `DELETE` | An owner's keeps. Capability `objects`. |
 | `POST /council/v2/specs` | Holds a spec. The same spec gets the same id. |
 | `GET /council/v2/specs`, `GET /council/v2/specs/{spec_id}` | The held specs, or one. |
 | `DELETE /council/v2/specs/{spec_id}` | Drops a spec. |
@@ -108,8 +113,8 @@ thing, and each thing has one term.
 
 ## Content ids
 
-A snapshot id and a spec id are content ids: `blake3:` and the 64
-lowercase hex digits of a BLAKE3 hash. This document shortens them with
+A snapshot id, a spec id, and an object id are content ids: `blake3:` and
+the 64 lowercase hex digits of a BLAKE3 hash. This document shortens them with
 `…` only for reading.
 
 - **An id is always whole.** Every response, log line, and file carries
@@ -328,6 +333,65 @@ PUT /council/v2/pins/kernel-7f3a
 - **The limit is `pin_bytes`** in identity. A `PUT` past it is a `413` that
   pins nothing.
 - **Eviction is the server's policy** for every snapshot no pin keeps.
+
+## Objects and keeps
+
+```text
+PUT /council/v2/objects/blake3:7cc4…b0ac
+content-type: audio/wav
+<4,096,044 bytes>
+-> 201 {"id": "blake3:7cc4…b0ac", "mime": "audio/wav", "bytes": 4096044}
+
+GET /council/v2/objects/blake3:7cc4…b0ac
+range: bytes=0-1023
+-> 206, content-type: audio/wav, content-range: bytes 0-1023/4096044, <1,024 bytes>
+
+PUT /council/v2/keeps/kaijutsu-amy
+{"objects": ["blake3:7cc4…b0ac", "blake3:2f90…de1d"], "ttl_s": 2592000}
+-> {"owner": "kaijutsu-amy", "objects": [{"id": "blake3:7cc4…b0ac", "held": true},
+                                         {"id": "blake3:2f90…de1d", "held": false}],
+    "expires_in_s": 2592000}
+```
+
+An object is bytes and a media type that a request names by id, such as an
+image a message shows or a sound a case holds. A server with capability
+`objects` serves these routes.
+
+- **A put sends the bytes to the path of their id.** The server hashes the
+  bytes as they arrive. Bytes whose content id is not the id in the path
+  are a `400` naming `id`, and the message quotes both ids; nothing is held.
+  A new object is a `201`; an object the server holds is a `200`. A client
+  that wants to skip sending held bytes sends `HEAD` first.
+- **`content-type` is the object's media type** and is required: `type/subtype`
+  in lowercase with no parameters. Any other value, or none, is a `400`
+  naming `content-type`. Text is UTF-8. An object keeps the media type of its
+  first put; a later put with another one changes nothing, and its response
+  names the media type held.
+- **The response is `{id, mime, bytes}`.** An object larger than
+  `object_bytes` in identity is a `413` `too_large` naming `object_bytes`;
+  nothing is held.
+- **`GET` returns the bytes** with the object's `content-type` and
+  `content-length`. `HEAD` returns the same headers and no body. A `Range` of
+  one span, `bytes=a-b`, `bytes=a-`, or `bytes=-n`, is a `206` with
+  `content-range`; a span that starts past the end is a `416` naming
+  `range`. A server may return a `200` with the whole object for any other
+  `Range`, such as several spans.
+- **An object the server does not hold is a `404`.** The client puts it
+  again. A server may evict any object that no keep holds, as it evicts a
+  snapshot that no pin keeps, so an eviction costs a put, never a wrong
+  answer.
+- **A keep is a lease on objects,** with the shape and rules of a pin: an
+  owner, a `PUT` that replaces the owner's whole set and renews its time,
+  `DELETE`, and `GET`, which lists the held objects as `{owner, objects:
+  [<id>…], expires_in_s}`. A keep on an object the server does not hold
+  reports `held: false` and holds nothing for it. An owner with no keeps is
+  a `404`.
+- **Keeps expire** after `ttl_s` seconds, 1 to 2,592,000 (30 days), without
+  a `PUT`. The term is longer than a pin's because a client cannot always
+  make an object again, while a server can build a snapshot again. Keeps
+  and the objects they hold survive a restart until they expire.
+- **The limit is `keep_bytes`** in identity, over every owner. A `PUT` past
+  it is a `413` naming `keep_bytes` that keeps nothing.
 
 ## Specs
 
@@ -833,8 +897,9 @@ next step when one is known.
 | Status | `error.type` | When |
 |---|---|---|
 | `400` | `invalid_request` | The body is outside the schema, including a missing `model` or an unknown field; `model` names no served model; `ask` or `options` names what the spec lacks; a needed capability is missing; an id is not a whole content id. `param` names the field, or `id` for an id in the path. |
-| `404` | `not_found` | An unknown spec id, snapshot id, or pin owner. |
-| `413` | `too_large` | A case, spec, context, or pin set is past a limit in identity; `param` names the limit, such as `case_bytes` or `pin_bytes`. Nothing is held. |
+| `404` | `not_found` | An unknown spec id, snapshot id, object id, pin owner, or keep owner. |
+| `413` | `too_large` | A case, spec, context, pin set, object, or keep set is past a limit in identity; `param` names the limit, such as `case_bytes`, `pin_bytes`, `object_bytes`, or `keep_bytes`. Nothing is held. |
+| `416` | `invalid_request` | A `Range` on an object starts past its end; `param` is `range`. |
 | `413` | `context_full` | A generation's prompt leaves no room for a reply; the body has `prompt_tokens` and `context_tokens`. |
 | `429` | `busy` | The server has more requests than it runs. `Retry-After` when known. |
 | `500` | `internal` | The server failed. A decision's numbers that fail `gogi-proto`'s check are a `500`, never a response. |
@@ -901,6 +966,8 @@ specs, which every served model shares.
 | `default_timeout_ms` | served model | A decision's `timeout_ms` when it sends none. |
 | `text_tokens` | served model | The most tokens a `text` answer writes, with `describe`. |
 | `pin_bytes` | server | The most snapshot bytes all pins together keep, over every served model. |
+| `object_bytes` | server | The largest object, with `objects`. |
+| `keep_bytes` | server | The most object bytes all keeps together hold, with `objects`. |
 | `case_bytes` | server | The longest case, in bytes. |
 | `questions_per_spec` | server | The most questions a spec holds. |
 | `choice_options` | server | The most options a `choice` question has, 2 to 255. |
@@ -917,6 +984,7 @@ specs, which every served model shares.
 | `leave_one_out` | served model | Pooled answers carry `leave_one_out`. |
 | `describe` | served model | Specs may hold `text` questions. |
 | `pins` | server | `/council/v2/pins`. |
+| `objects` | server | `/council/v2/objects` and `/council/v2/keeps`. |
 | `tiers` | server | Snapshots report `tier`, and pinned snapshots move between tiers. |
 | `classes` | server | Requests are scheduled by `class` and `priority`. The server trusts every client with `priority`. |
 

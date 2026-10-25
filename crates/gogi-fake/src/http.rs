@@ -43,10 +43,13 @@ pub fn serve(listener: TcpListener, store: Arc<Mutex<Store>>, stop: Arc<AtomicBo
 fn status_line(code: u16) -> &'static str {
     match code {
         200 => "200 OK",
+        201 => "201 Created",
         204 => "204 No Content",
+        206 => "206 Partial Content",
         400 => "400 Bad Request",
         404 => "404 Not Found",
         413 => "413 Payload Too Large",
+        416 => "416 Range Not Satisfiable",
         503 => "503 Service Unavailable",
         _ => "500 Internal Server Error",
     }
@@ -62,6 +65,7 @@ fn connection(conn: TcpStream, store: &Mutex<Store>) -> std::io::Result<()> {
     let mut it = line.split_whitespace();
     let (method, target) = (it.next().unwrap_or("").to_string(), it.next().unwrap_or("").to_string());
     let mut len = 0usize;
+    let mut headers = Vec::new();
     loop {
         line.clear();
         r.read_line(&mut line)?;
@@ -69,16 +73,17 @@ fn connection(conn: TcpStream, store: &Mutex<Store>) -> std::io::Result<()> {
         if l.is_empty() {
             break;
         }
-        if let Some((k, v)) = l.split_once(':')
-            && k.eq_ignore_ascii_case("content-length")
-        {
-            len = v.trim().parse().unwrap_or(0);
+        if let Some((k, v)) = l.split_once(':') {
+            if k.eq_ignore_ascii_case("content-length") {
+                len = v.trim().parse().unwrap_or(0);
+            }
+            headers.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
         }
     }
     let mut body = vec![0u8; len];
     r.read_exact(&mut body)?;
     let path = target.split('?').next().unwrap_or("");
-    let resp = api::handle(&mut store.lock().unwrap(), &method, path, &body);
+    let resp = api::handle(&mut store.lock().unwrap(), &method, path, &headers, &body);
     let id = request_id();
     match resp {
         Resp::Json(code, mut v) => {
@@ -88,6 +93,16 @@ fn connection(conn: TcpStream, store: &Mutex<Store>) -> std::io::Result<()> {
             let b = serde_json::to_vec(&v).unwrap();
             write!(out, "HTTP/1.1 {}\r\n{}: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", status_line(code), REQUEST_ID_HEADER, id, b.len())?;
             out.write_all(&b)?;
+        }
+        Resp::Bytes { code, mime, body, headers } => {
+            write!(out, "HTTP/1.1 {}\r\n{}: {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n", status_line(code), REQUEST_ID_HEADER, id, mime, body.len())?;
+            for (k, v) in headers {
+                write!(out, "{}: {}\r\n", k, v)?;
+            }
+            write!(out, "Connection: close\r\n\r\n")?;
+            if method != "HEAD" {
+                out.write_all(&body)?;
+            }
         }
         Resp::Empty(code) => write!(out, "HTTP/1.1 {}\r\n{}: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", status_line(code), REQUEST_ID_HEADER, id)?,
         Resp::Sse(events) => {

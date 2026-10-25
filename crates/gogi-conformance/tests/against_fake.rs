@@ -13,6 +13,9 @@ fn the_fake_passes_every_check() {
     let r = run(Opts { url: server.url(), restart: None, model: None }, false);
     assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
     assert!(r.checks.len() > 150, "{}", r.checks.len());
+    for name in ["an object reads back bit for bit", "a range reads its bytes", "a keep list names the held objects only", "an object past object_bytes is a 413"] {
+        assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name} did not pass");
+    }
 }
 
 #[test]
@@ -25,6 +28,7 @@ fn the_fake_passes_the_restart_checks_when_it_keeps_its_state() {
     let r = run(Opts { url, restart: Some(Restart::Hook(Box::new(move || hook.lock().unwrap().restart()))), model: None }, false);
     assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
     assert!(r.checks.iter().any(|c| c.name == "a pinned snapshot survives a restart" && c.status == Status::Ok));
+    assert!(r.checks.iter().any(|c| c.name == "a kept object survives a restart bit for bit" && c.status == Status::Ok));
     let _ = std::fs::remove_dir_all(dir);
 }
 

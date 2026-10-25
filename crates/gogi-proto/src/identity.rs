@@ -20,6 +20,8 @@ pub enum Capability {
     Think,
     /// `/council/v2/pins`.
     Pins,
+    /// `/council/v2/objects` and `/council/v2/keeps`.
+    Objects,
     /// Snapshots report `tier`, and pinned snapshots move between tiers.
     Tiers,
     /// Generations accept `decisions` that ride with them.
@@ -79,6 +81,12 @@ pub struct ServerLimits {
     pub questions_per_spec: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin_bytes: Option<u64>,
+    /// The largest object, in bytes, with `objects`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_bytes: Option<u64>,
+    /// The most object bytes all keeps together hold, with `objects`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_bytes: Option<u64>,
 }
 
 /// One served model: its identity, limits, capabilities, and status. It reports the same identity
