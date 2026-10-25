@@ -147,4 +147,5 @@ fn the_fake_passes_as_a_model_that_reads_text_only() {
     assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
     assert!(r.checks.iter().any(|c| c.name == "an object part to a model that reads text only is a 400 naming the part" && c.status == Status::Ok));
     assert!(r.checks.iter().any(|c| c.name == "an output to a model that writes text only is a 400 naming output.mime" && c.status == Status::Ok));
+    assert!(r.checks.iter().any(|c| c.name == "case_media to a model that reads text only is a 400 naming it" && c.status == Status::Ok));
 }

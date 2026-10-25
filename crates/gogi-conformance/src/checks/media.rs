@@ -32,6 +32,11 @@ impl Suite {
         let Some(read) = inputs.first().map(|p| probe_type(p)) else {
             let c = self.with_object(&content_id(b"any"), "image/png");
             self.refused_naming("an object part to a model that reads text only is a 400 naming the part", "POST", "/council/v2/contexts", Some(json!({"context": c})), part, "image/png");
+            if let Some(spec_id) = self.hold_gate("media-text-only") {
+                let body = json!({"spec_id": spec_id, "case": "this recording", "case_media": [{"id": content_id(b"any"), "mime": "audio/wav"}], "contexts": [self.ctx(self.opening("media-case"))]});
+                self.refused_naming("case_media to a model that reads text only is a 400 naming it", "POST", "/council/v2/decisions", Some(body), "case_media[0]", "audio/wav");
+                self.expect("media spec cleanup", "DELETE", &format!("/council/v2/specs/{}", spec_id), None, 204);
+            }
             self.r.skip("media", "the served model declares no media inputs");
             return;
         };
