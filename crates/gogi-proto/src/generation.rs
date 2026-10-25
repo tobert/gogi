@@ -259,7 +259,7 @@ impl GenerationDone {
         }
         Some(crate::message::Message {
             role: crate::message::Role::Assistant,
-            content: Some(self.content.clone()).filter(|c| !c.is_empty()),
+            content: Some(self.content.clone()).filter(|c| !c.is_empty()).map(crate::message::Content::Text),
             reasoning: Some(self.reasoning.clone()).filter(|r| !r.is_empty()),
             tool_calls: calls,
             tool_call_id: None,
@@ -278,7 +278,7 @@ impl GenerationDone {
             return None;
         }
         let content = match self.phase? {
-            Phase::Content => Some(self.content.clone()),
+            Phase::Content => Some(crate::message::Content::Text(self.content.clone())),
             Phase::Reasoning if self.content.is_empty() => None,
             _ => return None,
         };
@@ -291,8 +291,8 @@ impl GenerationDone {
     /// Checks that a continuation's reply is the whole message: `content` starts with the open
     /// message's `content` and `reasoning` with its `reasoning`.
     pub fn continues(&self, open: &crate::message::Message) -> Result<(), String> {
-        for (name, done, sent) in [("reasoning", &self.reasoning, &open.reasoning), ("content", &self.content, &open.content)] {
-            let sent = sent.as_deref().unwrap_or("");
+        for (name, done, sent) in [("reasoning", &self.reasoning, open.reasoning.as_deref()), ("content", &self.content, open.text())] {
+            let sent = sent.unwrap_or("");
             if !done.starts_with(sent) {
                 return Err(format!("done.{} {:?} does not start with the open {} {:?}", name, done, name, sent));
             }
@@ -356,8 +356,8 @@ pub fn check_pieces(tokens: &[TokenEvent], done: &GenerationDone) -> Result<(), 
 /// whitespace at either end, as in any reply.
 pub fn check_pieces_after(tokens: &[TokenEvent], done: &GenerationDone, open: &crate::message::Message) -> Result<(), String> {
     done.continues(open)?;
-    let after = |text: &str, sent: &Option<String>| (text[sent.as_deref().unwrap_or("").len()..].to_string(), sent.is_some());
-    let (reasoning, content) = (after(&done.reasoning, &open.reasoning), after(&done.content, &open.content));
+    let after = |text: &str, sent: Option<&str>| (text[sent.unwrap_or("").len()..].to_string(), sent.is_some());
+    let (reasoning, content) = (after(&done.reasoning, open.reasoning.as_deref()), after(&done.content, open.text()));
     join_pieces(tokens, [(&reasoning.0, reasoning.1), (&content.0, content.1)], " after the open text")
 }
 
@@ -446,7 +446,7 @@ mod tests {
         assert_eq!(id, "c2");
         assert_eq!(serde_json::to_string(input).unwrap(), r#"{"path":"/tmp","all":true}"#);
         let m = d.as_message().unwrap();
-        assert_eq!((m.content.as_deref(), m.reasoning.as_deref(), m.tool_calls[0].id.as_str()), (None, Some("list it"), "c2"));
+        assert_eq!((m.text(), m.reasoning.as_deref(), m.tool_calls[0].id.as_str()), (None, Some("list it"), "c2"));
     }
 
     #[test]
@@ -514,16 +514,16 @@ mod tests {
         assert_eq!(d.phase, Some(Phase::Content));
         assert_eq!(serde_json::to_value(&d).unwrap()["phase"], json!("content"));
         let m = d.as_open_message().unwrap();
-        assert_eq!((m.reasoning.as_deref(), m.content.as_deref(), m.open), (Some("plan"), Some(""), true), "a reply cut just after its thinking resumes with content \"\"");
+        assert_eq!((m.reasoning.as_deref(), m.text(), m.open), (Some("plan"), Some(""), true), "a reply cut just after its thinking resumes with content \"\"");
         let m = cut(Some("reasoning"), "pla", "").as_open_message().unwrap();
-        assert_eq!((m.reasoning.as_deref(), m.content.as_deref()), (Some("pla"), None), "a reply cut inside its thinking resumes without content");
+        assert_eq!((m.reasoning.as_deref(), m.text()), (Some("pla"), None), "a reply cut inside its thinking resumes without content");
         let m = cut(Some("content"), "", "fn main() ").as_open_message().unwrap();
-        assert_eq!((m.reasoning, m.content.as_deref()), (None, Some("fn main() ")), "the trailing whitespace stays");
+        assert_eq!((m.reasoning.as_deref(), m.text()), (None, Some("fn main() ")), "the trailing whitespace stays");
         assert_eq!(cut(Some("call"), "plan", "").as_open_message(), None, "a reply cut inside a call cannot be continued");
         assert_eq!(cut(None, "plan", "x").as_open_message(), None, "without phase the open form is not known");
         assert_eq!(cut(Some("reasoning"), "", "").as_open_message(), None, "an open message inside its thinking needs reasoning");
         let m = cut(Some("content"), "", "").as_open_message().unwrap();
-        assert_eq!((m.reasoning, m.content.as_deref()), (None, Some("")), "a reply cut just after an empty thinking resumes with content \"\"");
+        assert_eq!((m.reasoning.as_deref(), m.text()), (None, Some("")), "a reply cut just after an empty thinking resumes with content \"\"");
         let mut ended = cut(Some("content"), "plan", "x");
         ended.finish = Finish::EndTurn;
         assert_eq!(ended.as_open_message(), None);

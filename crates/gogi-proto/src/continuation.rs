@@ -27,8 +27,8 @@ pub fn seams(open: &Message) -> Vec<Seam> {
         let thinking = |r: &str| Message { reasoning: Some(r.into()), content: None, ..open.clone() };
         out.push(Seam { field: "reasoning", before: thinking(""), with: thinking(reasoning) });
     }
-    if !open.content.as_deref().unwrap_or("").is_empty() {
-        out.push(Seam { field: "content", before: Message { content: Some(String::new()), ..open.clone() }, with: open.clone() });
+    if !open.text().unwrap_or("").is_empty() {
+        out.push(Seam { field: "content", before: Message { content: Some("".into()), ..open.clone() }, with: open.clone() });
     }
     out
 }
@@ -81,9 +81,9 @@ mod tests {
         let both = Message { reasoning: Some("plan".into()), ..Message::assistant("```toml\n").opened() };
         let s = seams(&both);
         assert_eq!(s.iter().map(|x| x.field).collect::<Vec<_>>(), ["reasoning", "content"]);
-        assert_eq!((s[0].before.reasoning.as_deref(), s[0].before.content.as_deref()), (Some(""), None));
-        assert_eq!((s[0].with.reasoning.as_deref(), s[0].with.content.as_deref()), (Some("plan"), None));
-        assert_eq!((s[1].before.reasoning.as_deref(), s[1].before.content.as_deref()), (Some("plan"), Some("")));
+        assert_eq!((s[0].before.reasoning.as_deref(), s[0].before.text()), (Some(""), None));
+        assert_eq!((s[0].with.reasoning.as_deref(), s[0].with.text()), (Some("plan"), None));
+        assert_eq!((s[1].before.reasoning.as_deref(), s[1].before.text()), (Some("plan"), Some("")));
         assert_eq!(s[1].with, both);
         assert!(s.iter().all(|x| x.before.open && x.with.open));
         let closed_thinking = Message { reasoning: Some("plan".into()), ..Message::assistant("").opened() };

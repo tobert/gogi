@@ -89,6 +89,25 @@ pub struct ServerLimits {
     pub keep_bytes: Option<u64>,
 }
 
+/// The media types a served model reads in a message or a case, and writes in a reply. A type is
+/// `type/subtype`, or `type/*` for every subtype. Text is always read and written, so a served
+/// model without `media` reads and writes text only.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Media {
+    #[serde(default)]
+    pub inputs: Vec<String>,
+    #[serde(default)]
+    pub outputs: Vec<String>,
+}
+
+/// Whether `pattern`, `type/subtype` or `type/*`, covers the media type `mime`.
+pub fn mime_matches(pattern: &str, mime: &str) -> bool {
+    match pattern.strip_suffix("/*") {
+        Some(kind) => mime.split_once('/').is_some_and(|(k, _)| k == kind),
+        None => pattern == mime,
+    }
+}
+
 /// One served model: its identity, limits, capabilities, and status. It reports the same identity
 /// in every status.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,9 +126,21 @@ pub struct ServedModel {
     pub text_stop: Option<String>,
     pub limits: ModelLimits,
     pub capabilities: Vec<Capability>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<Media>,
 }
 
 impl ServedModel {
+    /// Whether the served model reads objects of media type `mime`.
+    pub fn reads(&self, mime: &str) -> bool {
+        self.media.as_ref().is_some_and(|m| m.inputs.iter().any(|p| mime_matches(p, mime)))
+    }
+
+    /// The media types it reads, for an error message.
+    pub fn inputs(&self) -> Vec<String> {
+        self.media.as_ref().map(|m| m.inputs.clone()).unwrap_or_default()
+    }
+
     pub fn has(&self, c: Capability) -> bool {
         self.capabilities.contains(&c)
     }
@@ -156,6 +187,12 @@ impl ServerIdentity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_media_pattern_covers_its_type_only() {
+        assert!(mime_matches("image/*", "image/png") && mime_matches("audio/wav", "audio/wav"));
+        assert!(!mime_matches("image/*", "audio/wav") && !mime_matches("image/*", "imagex/png") && !mime_matches("audio/wav", "audio/flac"));
+    }
 
     /// mkviolet's identity, as `GET /council/v2/identity` returned it on 2026-10-18.
     const MKVIOLET: &str = r#"{"models":[{"model":"gemma-4-26b-a4b","weight_hash":"0x1EBEA246FC63EB7F","tokenizer_hash":"sha256:4d777ef5bdc1aa36","engine":"mkviolet:a93ed27853c9835c+numbers:e0cf8f63c78acb7a","device":"2x Intel(R) Arc(TM) Pro B70 Graphics","template":"mkv-letters-1:d71541e05da41620+gemma4-chat:344a60f6d8cc3423","aliases":[],"status":"ready","limits":{"context_tokens":65535,"decision_context_tokens":3072,"snapshot_bytes":450560,"contexts_per_decision":8,"default_timeout_ms":30000},"capabilities":["reads","generate","ride","dry_run","leave_one_out"]}],"limits":{"case_bytes":65536,"choice_options":26,"questions_per_spec":16,"pin_bytes":17179869184},"capabilities":["pins"],"extensions":["/mk/v1"]}"#;

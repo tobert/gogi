@@ -67,6 +67,7 @@ thing, and each thing has one term.
 | content id | `blake3:` and the 64 lowercase hex digits of a BLAKE3 hash, always whole. Snapshot ids, spec ids, and object ids are content ids. |
 | object | Bytes and a media type that a client puts on the server, such as an image or a sound. Its id is the content id of its bytes. Capability `objects`. |
 | media type | How to read an object's bytes: `type/subtype` in lowercase with no parameters, such as `audio/wav`. |
+| part | One piece of a message's content: text, or an object by its id and media type. |
 | keep | A lease on objects, with an owner and an expiry. It keeps them from eviction, as a pin keeps snapshots. |
 | question | One item of a spec: `choice`, `score`, `noul`, or `text`. |
 | option | One possible answer to a `choice` question, or one level of a `score` question. |
@@ -143,7 +144,8 @@ GET /council/v2/identity
        "device": "2x Intel(R) Arc(TM) Pro B70 Graphics",
        "limits": {"context_tokens": 65535, "decision_context_tokens": 3072, "snapshot_bytes": 450560,
                   "contexts_per_decision": 8, "default_timeout_ms": 30000},
-       "capabilities": ["reads", "generate", "dry_run", "leave_one_out"]},
+       "capabilities": ["reads", "generate", "dry_run", "leave_one_out"],
+       "media": {"inputs": ["image/*", "audio/wav"], "outputs": []}},
       {"model": "qwen-3.8-mutant-636", "aliases": [], "status": "unloaded", …}],
     "limits": {"pin_bytes": 17179869184, "case_bytes": 65536, "questions_per_spec": 16, "choice_options": 26},
     "capabilities": ["pins"],
@@ -225,6 +227,28 @@ POST /council/v2/contexts
                   {"id": "blake3:51d0…", "message": 4, "tokens": 1840, "tier": "host"}]}
 ```
 
+- **Content is a string or an array of parts.** A part is `{"type":
+  "text", "text"}` or `{"type": "object", "id", "mime"}`, in the order the
+  message shows them:
+
+  ```json
+  {"role": "user", "content": [{"type": "text", "text": "Does this loop swing?"},
+                               {"type": "object", "id": "blake3:7cc4…b0ac", "mime": "audio/wav"}]}
+  ```
+
+  A string is one text part. A part of another type, a missing member, or
+  an unknown member is a `400` naming `content`, and the message names the
+  part. An empty array is a `400`. An open message's content is a string.
+- **A served model reads the media types in its `media.inputs`,** each
+  `type/subtype` or `type/*`. An object of any other type is a `400` that
+  names the part, such as `messages[2].content[1]`, and the message lists
+  what the served model reads. A served model without `media` reads text
+  only. An object the server does not hold is a `404` that names the part
+  and quotes the id; the client puts it and sends the request again. In a
+  request with several contexts, the part is named
+  `contexts[0].messages[2].content[1]`.
+- **An object renders as the template reads it,** which is part of
+  `template`. An object is content, never control (rule 2).
 - **Messages are the model's chat shape.** Roles are `system`, `user`,
   `assistant`, and `tool`. An assistant message may carry `content`,
   `reasoning` (its thinking), and `tool_calls`; a `tool` message gives the
@@ -481,7 +505,7 @@ POST /council/v2/decisions
 The numbers above are illustrative. `choice` is the argmax for a client to
 show: it is not a decision.
 
-- **A decision takes `model`, `spec_id`, `case`, `contexts`, `ask`,
+- **A decision takes `model`, `spec_id`, `case`, `case_media`, `contexts`, `ask`,
   `options`, `pool`, `timeout_ms`, `think`, `class`, and `priority`.** Any
   other field is a `400`, because a misspelled field that a server ignored
   would change the decision without saying so.
@@ -497,6 +521,10 @@ show: it is not a decision.
   at most `case_bytes` long. Any other value is a `400` naming `case`. A
   string renders verbatim; an object or array renders as JSON with its
   members in request order.
+- **`case_media` is the objects the case holds,** `[{id, mime}]`, read
+  with the case in order. Each follows the rules of an object part, and an
+  error names it, such as `case_media[1]`. A read's `rendered_hash` covers
+  them.
 - **`contexts` are 0 to `contexts_per_decision` context objects** (at most
   8), each sent whole. With none, the case is read after the spec alone,
   and the one read has `context: null`. Each read names its context by its
@@ -898,7 +926,7 @@ next step when one is known.
 | Status | `error.type` | When |
 |---|---|---|
 | `400` | `invalid_request` | The body is outside the schema, including a missing `model` or an unknown field; `model` names no served model; `ask` or `options` names what the spec lacks; a needed capability is missing; an id is not a whole content id. `param` names the field, or `id` for an id in the path. |
-| `404` | `not_found` | An unknown spec id, snapshot id, object id, pin owner, or keep owner. |
+| `404` | `not_found` | An unknown spec id, snapshot id, object id, pin owner, or keep owner; an object a part or `case_media` names that the server does not hold, with `param` naming it. |
 | `413` | `too_large` | A case, spec, context, pin set, object, or keep set is past a limit in identity; `param` names the limit, such as `case_bytes`, `pin_bytes`, `object_bytes`, or `keep_bytes`. Nothing is held. |
 | `416` | `invalid_request` | A `Range` on an object starts past its end; `param` is `range`. |
 | `413` | `context_full` | A generation's prompt leaves no room for a reply; the body has `prompt_tokens` and `context_tokens`. |
@@ -946,7 +974,8 @@ next step when one is known.
 `extensions`, as "Served models" shows. Each entry of `models` has `model`,
 `aliases`, `weight_hash`, `tokenizer_hash`, `template`, `engine`, `device`,
 and, with `describe`, `text_stop`, plus `status`, `limits`, and
-`capabilities`. A limit or capability belongs to the served model when it
+`capabilities`, and `media` when it reads or writes more than text:
+`{inputs, outputs}`, each a list of `type/subtype` or `type/*`. A limit or capability belongs to the served model when it
 depends on the model, and to the server when it depends on the store or on
 specs, which every served model shares.
 

@@ -5,6 +5,7 @@ mod decisions;
 mod generations;
 mod headers;
 mod ids;
+mod media;
 mod models;
 mod objects;
 mod pins;

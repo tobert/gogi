@@ -59,6 +59,35 @@ impl ObjectRef {
     }
 }
 
+/// Each object that messages name, with the member that names it, such as
+/// `messages[2].content[1]`.
+pub fn objects_of(messages: &[crate::message::Message]) -> Vec<(String, ObjectRef)> {
+    let mut out = Vec::new();
+    for (i, m) in messages.iter().enumerate() {
+        if let Some(crate::message::Content::Parts(parts)) = &m.content {
+            for (j, p) in parts.iter().enumerate() {
+                if let crate::message::Part::Object { id, mime } = p {
+                    out.push((format!("messages[{}].content[{}]", i, j), ObjectRef { id: id.clone(), mime: mime.clone() }));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Checks that served model `model` reads the media type of each object: otherwise a `400`
+/// that names the member, the media type, and the types the served model reads.
+pub fn check_reads(model: &crate::identity::ServedModel, objects: &[(String, ObjectRef)]) -> Result<(), Invalid> {
+    for (at, o) in objects {
+        if !model.reads(&o.mime) {
+            let inputs = model.inputs();
+            let reads = if inputs.is_empty() { "text only".to_string() } else { format!("text and {}", inputs.join(", ")) };
+            return Err(Invalid::param(at.clone(), format!("nothing ran: {} is {} of media type {}, and {} reads {}", at, o.id, o.mime, model.model, reads)));
+        }
+    }
+    Ok(())
+}
+
 /// Checks a `PUT /council/v2/objects/{id}`: a whole id in the path, a media type in
 /// `content-type`, and bytes whose content id is the id. Nothing is held when a check fails.
 pub fn check_put(id: &str, content_type: Option<&str>, bytes: &[u8]) -> Result<(), Invalid> {

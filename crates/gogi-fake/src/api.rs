@@ -10,6 +10,7 @@ use gogi_proto::generation::{GenerationRequest, Phase as EventPhase, StreamEvent
 use gogi_proto::identity::{ModelStatus, ServerIdentity};
 use gogi_proto::math::{self, Row, WeightSpec};
 use gogi_proto::message::{Message, ToolCall};
+use gogi_proto::objects::{ObjectRef, objects_of};
 use gogi_proto::pins::{PinsPut, is_owner};
 use gogi_proto::reads::ReadsRequest;
 use gogi_proto::spec::{Question, QuestionKind, SpecRules, parse_spec};
@@ -21,7 +22,7 @@ use gogi_toy::reply::{Call, Reply, ReplyParser, Step};
 use gogi_toy::{self as model, State, VOCAB};
 use crate::state::{BYTES_PER_TOKEN, FakeModel, Keeps, Pins, Store, snapshot_id};
 
-pub const TEMPLATE: &str = "gogi-toy-chat-2";
+pub const TEMPLATE: &str = "gogi-toy-chat-3";
 
 /// The longest case, in bytes.
 const CASE_BYTES: usize = 65536;
@@ -145,6 +146,9 @@ pub fn identity(store: &Store) -> Value {
             v["limits"] = json!({"context_tokens": store.cfg.context_tokens, "decision_context_tokens": store.cfg.decision_context_tokens,
                                  "snapshot_bytes": BYTES_PER_TOKEN, "contexts_per_decision": 8, "default_timeout_ms": 30000});
             v["capabilities"] = json!(["reads", "generate", "continuation", "dry_run", "leave_one_out"]);
+            if !store.cfg.media_inputs.is_empty() {
+                v["media"] = json!({"inputs": store.cfg.media_inputs, "outputs": []});
+            }
             v
         })
         .collect();
@@ -155,6 +159,25 @@ pub fn identity(store: &Store) -> Value {
         "capabilities": ["pins", "objects"],
         "extensions": [],
     })
+}
+
+/// Refuses an object that served model `m` does not read, a `400`, or that the server does not
+/// hold, a `404`. Each error names the member, such as `messages[1].content[0]`.
+fn check_objects(store: &Store, m: &FakeModel, objects: &[(String, ObjectRef)]) -> Result<(), Resp> {
+    let id: ServerIdentity = serde_json::from_value(identity(store)).expect("the fake's identity decodes");
+    let served = id.models.iter().find(|s| s.model == m.name).expect("identity lists the config's models");
+    gogi_proto::objects::check_reads(served, objects).map_err(invalid)?;
+    for (at, o) in objects {
+        if !store.objects.contains_key(&o.id) {
+            return Err(err(404, "not_found", format!("nothing ran: {} names {}, which the server does not hold; PUT the object, then send the request again", at, o.id), Some(at)));
+        }
+    }
+    Ok(())
+}
+
+/// The objects of each context of a request with several, named `contexts[k].messages[i]...`.
+fn objects_in(contexts: &[Context]) -> Vec<(String, ObjectRef)> {
+    contexts.iter().enumerate().flat_map(|(k, c)| objects_of(&c.messages).into_iter().map(move |(at, o)| (format!("contexts[{}].{}", k, at), o))).collect()
 }
 
 /// The served model a request names, or the `400` or `503` that refuses it.
@@ -398,6 +421,9 @@ fn build_route(store: &mut Store, body: &[u8]) -> Resp {
     if let Err(e) = req.validate().and_then(|_| model::check_open(&req.context.tools, req.context.thinks(), &req.context.messages)) {
         return invalid(e);
     }
+    if let Err(r) = check_objects(store, &m, &objects_of(&req.context.messages)) {
+        return r;
+    }
     let dry_run = req.dry_run.unwrap_or(false);
     let limit = store.cfg.context_tokens;
     let n = model::render(&req.context.tools, req.context.thinks(), &req.context.messages, false).end;
@@ -467,6 +493,9 @@ fn reads(store: &mut Store, body: &[u8]) -> Resp {
     };
     if let Err(e) = req.validate() {
         return invalid(e);
+    }
+    if let Err(r) = check_objects(store, &m, &objects_in(&req.contexts)) {
+        return r;
     }
     let letters = match letter_tokens(&req.letters) {
         Ok(l) => l,
@@ -581,6 +610,9 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
     if let Err(e) = req.validate() {
         return invalid(e);
     }
+    if let Err(r) = check_objects(store, &m, &objects_of(&req.context.messages)) {
+        return r;
+    }
     if !req.decisions.is_empty() {
         return bad_param("decisions", "nothing ran: riding decisions need the ride capability, which this model does not have; send the generation without decisions");
     }
@@ -603,7 +635,7 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
         return context_full(prompt.tokens.len(), limit);
     }
     let stream = req.stream.unwrap_or(false);
-    let last = c.messages.last().and_then(|m| m.content.as_deref()).unwrap_or("");
+    let last = c.messages.last().and_then(|m| m.text()).unwrap_or("");
     let fail = last.contains("FAIL");
     if fail && !stream {
         return err(500, "internal", "nothing was returned: the fake fails a reply whose context ends with a message containing FAIL", None);
@@ -678,7 +710,7 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
     };
     // `done` is the whole message: the open text as sent, then the sampled text.
     let reasoning = format!("{}{}", open.and_then(|m| m.reasoning.as_deref()).unwrap_or(""), reasoning);
-    let content = format!("{}{}", open.and_then(|m| m.content.as_deref()).unwrap_or(""), content);
+    let content = format!("{}{}", open.and_then(|m| m.text()).unwrap_or(""), content);
     // The calls as the parser read them: a call that does not parse is kept as written.
     let call_id = |k: usize| format!("call_{}_{}", prompt.tokens.len(), k);
     let tool_calls: Vec<ToolCall> = written.iter().enumerate().filter_map(|(k, w)| match w {
@@ -698,7 +730,7 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
         tool_calls: tool_calls.clone(),
         ..Message::assistant(content.clone())
     };
-    let reply = Message { content: Some(content.clone()).filter(|c| !c.is_empty()), ..reply };
+    let reply = Message { content: Some(content.clone()).filter(|c| !c.is_empty()).map(Into::into), ..reply };
     let mut messages: Vec<Message> = c.messages.clone();
     if open.is_some() {
         messages.pop();
@@ -706,7 +738,7 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
     // A reply cut by max_tokens holds the head of its open rendering, which is the prompt and the
     // sampled tokens; one cut inside a call has none, because an open message holds no calls.
     let (head, snapshots) = if finish == "max_tokens" {
-        let cut = Message { content: (next == EventPhase::Content).then(|| content.clone()), tool_calls: Vec::new(), ..reply.clone().opened() };
+        let cut = Message { content: (next == EventPhase::Content).then(|| content.clone().into()), tool_calls: Vec::new(), ..reply.clone().opened() };
         messages.push(cut);
         let after = Context { messages, ..c.clone() };
         if next != EventPhase::Call && written.is_empty() && after.check().is_ok() {
@@ -775,6 +807,11 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
     }
     if let Err(e) = req.validate() {
         return invalid(e);
+    }
+    let mut objects = objects_in(&req.contexts);
+    objects.extend(req.case_media.iter().enumerate().map(|(i, o)| (format!("case_media[{}]", i), o.clone())));
+    if let Err(r) = check_objects(store, &m, &objects) {
+        return r;
     }
     let spec_id = req.spec_id.clone();
     let Some(v) = store.specs.get(&spec_id) else { return not_found(format!("no held spec {}; POST it again", spec_id)) };
@@ -861,7 +898,7 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
             if let Err(e) = check_queue_schema(c, &asked_ids) {
                 return invalid(e);
             }
-            let mut toks = read::queue_start(c, &call_id, &case_text);
+            let mut toks = read::queue_start(c, &call_id, &case_text, &req.case_media);
             for &qi in &sorted {
                 let q = &ask.questions[qi];
                 read::queue_question(&mut toks, &q.id);
@@ -874,7 +911,7 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
             rendered = read::rendered_hash(&toks);
             fed += toks.len() - base_tokens.len();
         } else {
-            let text_all = read::plain_text(&base_tokens, &instructions, &label, &case_text);
+            let text_all = read::plain_text(&base_tokens, &instructions, &label, &case_text, &req.case_media);
             for &qi in &ask.asked {
                 let q = &ask.questions[qi];
                 let toks = read::plain_question(&text_all, &q.id, &q.instructions);

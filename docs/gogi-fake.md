@@ -15,7 +15,7 @@ engine can use `gogi-toy` alone to serve the same model.
 By default the fake serves one model, `gogi-toy-1`, with the alias `toy`. Every request that
 reads a context names its served model in `model`, as the contract requires. Each `--model NAME`
 serves a model of that name, ready. Every served model uses the template below, whose id is
-`gogi-toy-chat-2`. Each has a seed, its position
+`gogi-toy-chat-3`. Each has a seed, its position
 among the `--model` flags, that changes its numbers and its `weight_hash`, so two served models
 give two sets of numbers and two sets of snapshots.
 
@@ -30,7 +30,7 @@ and pins stay held through the change.
 
 ## Tokens
 
-A token is one of the 256 byte values, or one of 14 template markers (ids 256 to 269).
+A token is one of the 256 byte values, or one of 16 template markers (ids 256 to 271).
 Text becomes its UTF-8 bytes, so content never spells a marker. Only a `reads` suffix does:
 marker text in a suffix, such as `<user>`, becomes one marker id, and the reply lists it in
 `signals.control_text`.
@@ -44,6 +44,7 @@ system     <sys> content <end>
 user       <user> content <end>
 assistant  <asst> [<think> reasoning <endthink>] content (<call> name(INPUT_JSON) <endcall>)* <end>
 tool       <tool> [<error>] content <end>
+content    text, or each part in order: text, or <obj> ID_HEX <endobj>
 
 generation prompt   <asst> [<think>]
 open message        <asst> [<think> reasoning [<endthink>]] [content]
@@ -53,6 +54,10 @@ open message        <asst> [<think> reasoning [<endthink>]] [content]
   assistant message renders its `<think>` region, empty when it has no reasoning.
 - `TOOLS_JSON` is the context's `tools` as JSON, each `{name, description, input_schema}`.
 - A call's `id` is never rendered. `<error>` renders when a tool message has `is_error: true`.
+- An object part renders as `<obj>`, the 64 hex digits of its id as bytes, and `<endobj>`. The
+  toy reads an object by its id; its media type is not rendered. A decision's `case_media`
+  renders the same way after the case. Every served model reads `image/*` and `audio/*`
+  (`Config::media_inputs`); an empty list makes them read text only.
 - The thinking rule: an assistant message without tool calls loses its `reasoning` once a later
   user message follows. A message with tool calls keeps it.
 - A marked message is a boundary only when its own rendering is a prefix of the whole

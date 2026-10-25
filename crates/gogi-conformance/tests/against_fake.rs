@@ -13,7 +13,7 @@ fn the_fake_passes_every_check() {
     let r = run(Opts { url: server.url(), restart: None, model: None }, false);
     assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
     assert!(r.checks.len() > 150, "{}", r.checks.len());
-    for name in ["an object reads back bit for bit", "a range reads its bytes", "a keep list names the held objects only", "an object past object_bytes is a 413"] {
+    for name in ["an object reads back bit for bit", "a range reads its bytes", "a keep list names the held objects only", "an object past object_bytes is a 413", "another object is another context", "a decision reads its case_media"] {
         assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name} did not pass");
     }
 }
@@ -138,4 +138,12 @@ fn the_fake_passes_with_sealed_cut_heads() {
     for name in ["a continuation's done starts with the open text", "a continuation resumed from the head feeds at most the last sampled token", "a cut reply keeps its trailing whitespace", "a continuation's stream done equals the response without stream"] {
         assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name}: {:?}", r.checks.iter().find(|c| c.name == name));
     }
+}
+
+#[test]
+fn the_fake_passes_as_a_model_that_reads_text_only() {
+    let server = Server::start(Config { media_inputs: vec![], ..Config::default() }).unwrap();
+    let r = run(Opts { url: server.url(), restart: None, model: None }, false);
+    assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
+    assert!(r.checks.iter().any(|c| c.name == "an object part to a model that reads text only is a 400 naming the part" && c.status == Status::Ok));
 }

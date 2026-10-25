@@ -65,6 +65,9 @@ pub struct DecisionRequest {
     pub model: String,
     /// What the decision judges: a string, object, or array.
     pub case: Value,
+    /// Objects the case holds, read with it in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub case_media: Vec<crate::objects::ObjectRef>,
     /// A held spec's id. Text, so that a malformed id is a `400` naming `spec_id` and an id the
     /// server does not hold is a `404`.
     pub spec_id: String,
@@ -99,6 +102,9 @@ impl DecisionRequest {
         }
         if let Some(problem) = crate::ids::content_id_problem(&self.spec_id) {
             return Err(Invalid::param("spec_id", format!("nothing ran: spec_id {}", problem)));
+        }
+        for (i, o) in self.case_media.iter().enumerate() {
+            o.check(&format!("case_media[{}]", i))?;
         }
         if let Some(ask) = &self.ask {
             check_ask(ask).map_err(|m| Invalid::param("ask", m))?;
@@ -370,7 +376,7 @@ mod tests {
 
     #[test]
     fn a_spec_id_that_is_not_a_whole_content_id_is_refused_by_name() {
-        let req = |spec_id: &str| DecisionRequest { model: "m".into(), case: json!("x"), spec_id: spec_id.into(), ask: None, options: None, contexts: vec![chat()], pool: None, timeout_ms: None, think: None, class: None, priority: None };
+        let req = |spec_id: &str| DecisionRequest { model: "m".into(), case: json!("x"), case_media: vec![], spec_id: spec_id.into(), ask: None, options: None, contexts: vec![chat()], pool: None, timeout_ms: None, think: None, class: None, priority: None };
         req(&spec_id()).validate().unwrap();
         for bad in ["blake3:aaaaaaaaaaaa", "sha256:aaaa", "verdict"] {
             let e = req(bad).validate().unwrap_err();

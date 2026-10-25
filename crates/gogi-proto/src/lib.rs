@@ -30,7 +30,7 @@ pub use canon::{canonical_json, content_id, spec_id_of};
 pub use context::{Context, ContextBuild, ContextBuilt, SnapshotInfo, Tier, Tool, Usage};
 pub use error::{ErrorBody, ErrorDetail, ErrorType, Invalid};
 pub use ids::{ContentId, SnapshotId, SpecId, content_id_problem};
-pub use message::{Message, Role, ToolCall};
+pub use message::{Content, Message, Part, Role, ToolCall};
 
 /// Accepts `null` or a value but, unlike a plain `Option`, requires the member.
 pub(crate) fn required_nullable<'de, D, T>(de: D) -> Result<Option<T>, D::Error>

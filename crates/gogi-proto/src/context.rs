@@ -299,7 +299,7 @@ mod tests {
     #[test]
     fn open_names_the_open_last_message() {
         let c = open_context(None, Message::assistant("The plan:").opened());
-        assert_eq!(c.open().and_then(|m| m.content.as_deref()), Some("The plan:"));
+        assert_eq!(c.open().and_then(|m| m.text()), Some("The plan:"));
         assert_eq!(open_context(None, Message::assistant("done")).open(), None);
     }
 

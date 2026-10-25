@@ -1,6 +1,6 @@
 //! The toy model, its chat template, and its reply parser.
 //!
-//! Tokens are the 256 byte values plus 14 template markers (ids 256 and up). Text becomes
+//! Tokens are the 256 byte values plus 16 template markers (ids 256 and up). Text becomes
 //! its UTF-8 bytes, so content can never spell a marker: only a `reads` suffix, through
 //! [`tokenize_suffix`], turns marker text into marker ids.
 //!
@@ -12,6 +12,7 @@
 //! user       <user> content <end>
 //! assistant  <asst> [<think> reasoning <endthink>] content (<call> name(INPUT_JSON) <endcall>)* <end>
 //! tool       <tool> [<error>] content <end>
+//! content    text, or each part in order: text, or <obj> ID_HEX <endobj>
 //! generation prompt: <asst> [<think>]
 //! open message:      <asst> [<think> reasoning [<endthink>]] [content]
 //! ```
@@ -23,7 +24,9 @@
 //!
 //! `<nothink>` renders when the context sets `thinking: false`. With thinking on, every
 //! assistant message renders its `<think>` region, empty when it has no reasoning. A call's id
-//! is never rendered. `<error>` renders when a tool message has `is_error: true`.
+//! is never rendered. `<error>` renders when a tool message has `is_error: true`. An object part
+//! renders as `<obj>`, the 64 hex digits of its id as bytes, and `<endobj>`: the toy reads an
+//! object by its id, and its media type is not rendered.
 //!
 //! The thinking rule: an assistant message without tool calls loses its reasoning once a later
 //! user message follows. A message with tool calls keeps it. So a marked assistant message with
@@ -37,7 +40,7 @@ pub mod read;
 pub mod reply;
 
 use gogi_proto::context::Tool;
-use gogi_proto::message::{Message, Role};
+use gogi_proto::message::{Content, Message, Part, Role};
 
 pub const BOS: u32 = 256;
 pub const SYS: u32 = 257;
@@ -53,9 +56,11 @@ pub const TOOLS: u32 = 266;
 pub const ENDTOOLS: u32 = 267;
 pub const NOTHINK: u32 = 268;
 pub const ERROR: u32 = 269;
-pub const VOCAB: usize = 270;
+pub const OBJ: u32 = 270;
+pub const ENDOBJ: u32 = 271;
+pub const VOCAB: usize = 272;
 
-pub const MARKERS: [(&str, u32); 14] = [
+pub const MARKERS: [(&str, u32); 16] = [
     ("<bos>", BOS),
     ("<sys>", SYS),
     ("<user>", USER),
@@ -70,10 +75,35 @@ pub const MARKERS: [(&str, u32); 14] = [
     ("<endtools>", ENDTOOLS),
     ("<nothink>", NOTHINK),
     ("<error>", ERROR),
+    ("<obj>", OBJ),
+    ("<endobj>", ENDOBJ),
 ];
 
 pub fn push_text(t: &mut Vec<u32>, s: &str) {
     t.extend(s.bytes().map(u32::from));
+}
+
+/// Appends an object as the toy reads it: `<obj>`, the hex digits of its id, `<endobj>`.
+pub fn push_object(t: &mut Vec<u32>, id: &str) {
+    t.push(OBJ);
+    push_text(t, id.trim_start_matches("blake3:"));
+    t.push(ENDOBJ);
+}
+
+/// Appends a message's content: its text, or each part in order.
+pub fn push_content(t: &mut Vec<u32>, content: Option<&Content>) {
+    match content {
+        None => {}
+        Some(Content::Text(s)) => push_text(t, s),
+        Some(Content::Parts(parts)) => {
+            for p in parts {
+                match p {
+                    Part::Text { text } => push_text(t, text),
+                    Part::Object { id, .. } => push_object(t, id),
+                }
+            }
+        }
+    }
 }
 
 /// Marker texts a piece of content spells.
@@ -151,22 +181,22 @@ pub fn render_tokens(tools: &[Tool], thinking: bool, messages: &[Message], gener
         t.push(ENDTOOLS);
     }
     for (i, m) in messages.iter().enumerate() {
-        let text = m.content.as_deref().unwrap_or("");
+        let text = m.content.as_ref();
         match m.role {
             Role::System => {
                 t.push(SYS);
-                push_text(&mut t, text);
+                push_content(&mut t, text);
             }
             Role::User => {
                 t.push(USER);
-                push_text(&mut t, text);
+                push_content(&mut t, text);
             }
             Role::Tool => {
                 t.push(TOOL);
                 if m.is_error {
                     t.push(ERROR);
                 }
-                push_text(&mut t, text);
+                push_content(&mut t, text);
             }
             Role::Assistant => {
                 let open = m.open && i + 1 == messages.len();
@@ -181,7 +211,7 @@ pub fn render_tokens(tools: &[Tool], thinking: bool, messages: &[Message], gener
                     }
                     t.push(ENDTHINK);
                 }
-                push_text(&mut t, text);
+                push_content(&mut t, text);
                 for c in &m.tool_calls {
                     t.push(CALL);
                     push_text(&mut t, &format!("{}({})", c.name, serde_json::to_string(&c.input).unwrap()));
@@ -388,7 +418,7 @@ mod tests {
     }
 
     fn open(reasoning: Option<&str>, content: Option<&str>) -> Message {
-        Message { reasoning: reasoning.map(String::from), content: content.map(String::from), ..Message::assistant("").opened() }
+        Message { reasoning: reasoning.map(String::from), content: content.map(Into::into), ..Message::assistant("").opened() }
     }
 
     #[test]
