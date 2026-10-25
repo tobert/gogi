@@ -65,7 +65,8 @@ pub struct DecisionRequest {
     pub model: String,
     /// What the decision judges: a string, object, or array.
     pub case: Value,
-    /// A held spec's id. Text: an id the server does not hold is a `404`, not a decode error.
+    /// A held spec's id. Text, so that a malformed id is a `400` naming `spec_id` and an id the
+    /// server does not hold is a `404`.
     pub spec_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask: Option<Vec<QuestionId>>,
@@ -95,6 +96,9 @@ impl DecisionRequest {
     pub fn validate(&self) -> Result<(), Invalid> {
         if !matches!(self.case, Value::String(_) | Value::Object(_) | Value::Array(_)) {
             return Err(Invalid::param("case", "case is a string, object, or array"));
+        }
+        if let Some(problem) = crate::ids::content_id_problem(&self.spec_id) {
+            return Err(Invalid::param("spec_id", format!("nothing ran: spec_id {}", problem)));
         }
         if let Some(ask) = &self.ask {
             check_ask(ask).map_err(|m| Invalid::param("ask", m))?;
@@ -285,8 +289,8 @@ pub struct Read {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub described: Option<IndexMap<QuestionId, String>>,
     pub answers: IndexMap<QuestionId, ReadAnswer>,
-    /// sha256 of the rendered text this read was conditioned on.
-    pub rendered_sha256: String,
+    /// The content id of the rendered text this read was conditioned on.
+    pub rendered_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thought: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -357,11 +361,21 @@ mod tests {
     use serde_json::json;
 
     fn spec_id() -> String {
-        format!("sha256:{}", "a".repeat(64))
+        format!("blake3:{}", "a".repeat(64))
     }
 
     fn chat() -> Context {
         Context { messages: vec![Message::user("u")], ..Default::default() }
+    }
+
+    #[test]
+    fn a_spec_id_that_is_not_a_whole_content_id_is_refused_by_name() {
+        let req = |spec_id: &str| DecisionRequest { model: "m".into(), case: json!("x"), spec_id: spec_id.into(), ask: None, options: None, contexts: vec![chat()], pool: None, timeout_ms: None, think: None, class: None, priority: None };
+        req(&spec_id()).validate().unwrap();
+        for bad in ["blake3:aaaaaaaaaaaa", "sha256:aaaa", "verdict"] {
+            let e = req(bad).validate().unwrap_err();
+            assert!(e.param.as_deref() == Some("spec_id") && e.message.contains(&format!("{:?}", bad)), "{bad}: {e:?}");
+        }
     }
 
     fn queue_context() -> Context {
@@ -462,7 +476,7 @@ mod tests {
 
     #[test]
     fn a_read_names_its_context_by_index_or_null() {
-        let r = |c: Value| json!({"context": c, "snapshot": null, "answers": {}, "rendered_sha256": "x"});
+        let r = |c: Value| json!({"context": c, "snapshot": null, "answers": {}, "rendered_hash": "x"});
         assert_eq!(serde_json::from_value::<Read>(r(json!(3))).unwrap().context, Some(3));
         assert_eq!(serde_json::from_value::<Read>(r(json!(null))).unwrap().context, None);
         assert!(serde_json::from_value::<Read>(r(json!("abc"))).is_err());

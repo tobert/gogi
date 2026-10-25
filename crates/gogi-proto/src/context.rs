@@ -214,7 +214,7 @@ mod tests {
     }
 
     fn snap(p: &str) -> String {
-        format!("snap:{p}{}", "0".repeat(64 - p.len()))
+        format!("blake3:{p}{}", "0".repeat(64 - p.len()))
     }
 
     #[test]

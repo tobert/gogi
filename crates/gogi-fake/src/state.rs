@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gogi_proto::canon::sha256_hex;
+use gogi_proto::canon::content_id;
 use gogi_proto::identity::ModelStatus;
 use serde_json::{Value, json};
 
@@ -99,7 +99,7 @@ pub fn snapshot_id(model: &FakeModel, tokens: &[u32], counts: &[usize]) -> Strin
     for c in counts {
         bytes.extend_from_slice(&(*c as u64).to_le_bytes());
     }
-    format!("snap:{}", sha256_hex(&bytes))
+    content_id(&bytes)
 }
 
 impl Store {

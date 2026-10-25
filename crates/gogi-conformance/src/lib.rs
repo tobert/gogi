@@ -64,6 +64,7 @@ pub fn run(mut opts: Opts, print: bool) -> Report {
         s.boundaries();
         s.pins();
         s.specs();
+        s.ids();
         s.decisions();
         s.reads();
         s.ride();

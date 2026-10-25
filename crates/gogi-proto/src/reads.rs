@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn a_response_keeps_letter_order_and_the_token_ids() {
-        let r: ReadsResponse = serde_json::from_value(json!({"model": "m", "reads": [{"context": 0, "snapshot": format!("snap:{}", "0".repeat(64)), "suffix": 1,
+        let r: ReadsResponse = serde_json::from_value(json!({"model": "m", "reads": [{"context": 0, "snapshot": format!("blake3:{}", "0".repeat(64)), "suffix": 1,
             "logprobs": {"B": -1.0, "A": -2.0}, "mass": -0.7, "top": [{"token": "A", "id": 65, "logprob": -2.0}]}], "signals": {"control_text": []},
             "usage": {"prompt": 20, "kept": 18, "fed": 2, "completion": 0, "reasoning": 0}})).unwrap();
         assert_eq!(r.reads[0].logprobs.keys().collect::<Vec<_>>(), ["B", "A"]);

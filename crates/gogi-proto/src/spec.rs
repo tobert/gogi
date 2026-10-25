@@ -230,7 +230,7 @@ mod tests {
         let v: Value = serde_json::from_str(FIXTURE).unwrap();
         let s = parse_spec(&v, &SpecRules { describe: true, text_tokens: 256, ..rules() }).unwrap();
         assert_eq!(s.questions.iter().map(|q| q.id.as_str()).collect::<Vec<_>>(), ["effect", "undo", "verdict"]);
-        assert_eq!(s.id(), "sha256:5114ff063b887c710333afd4fe35238c55946ac2a63fb76d6c9004b56a1503ea");
+        assert_eq!(s.id(), "blake3:5d61eaa8fab8492392c9c7715f9b1c4e45dd0627d7008682f57a247a0d99b9b7");
         assert_eq!(s.questions[1].answer_keys(), ["0", "1", "2"]);
     }
 

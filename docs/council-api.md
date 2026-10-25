@@ -63,7 +63,8 @@ thing, and each thing has one term.
 | tier | Where a snapshot's model state is stored: `device`, `host`, or `disk`. |
 | pin | An owner's claim that keeps a snapshot, and the snapshots it is built on, from eviction until `ttl_s` runs out. |
 | owner | The name a client pins under. |
-| spec | A held set of questions, with instructions and an input label. Its id is the sha256 of its canonical JSON. |
+| spec | A held set of questions, with instructions and an input label. Its id is the content id of its canonical JSON. |
+| content id | `blake3:` and the 64 lowercase hex digits of a BLAKE3 hash, always whole. Snapshot ids and spec ids are content ids. |
 | question | One item of a spec: `choice`, `score`, `noul`, or `text`. |
 | option | One possible answer to a `choice` question, or one level of a `score` question. |
 | letter | The token `A`, `B`, and so on, that stands for an option when the model answers. |
@@ -104,6 +105,27 @@ thing, and each thing has one term.
 | `POST /council/v2/decisions` | Reads a case after each context and pools the reads. |
 | `POST /council/v2/reads` | Raw reads: letter log probabilities after a suffix. Capability `reads`. |
 | `POST /council/v2/generations` | A sampled reply after a context. Capability `generate`. |
+
+## Content ids
+
+A snapshot id and a spec id are content ids: `blake3:` and the 64
+lowercase hex digits of a BLAKE3 hash. This document shortens them with
+`…` only for reading.
+
+- **An id is always whole.** Every response, log line, and file carries
+  the whole id. A client may show a short form, but no request may send
+  one.
+- **A server never looks up a prefix.** An id that is not a whole content
+  id is a `400` with `error.type` `invalid_request`, wherever it is: in the
+  path, where `param` is `id`, or in a body, where `param` names the
+  member. The message quotes the id and says what is wrong with it, such as
+  its digit count. In a cluster that copies objects between machines, a
+  prefix that names one object today can name two tomorrow.
+- **A whole id the server does not hold is a `404`.** The client sends what
+  the id names again.
+- **BLAKE3, not SHA-256.** BLAKE3 is a tree hash, so a reader can check one
+  range of an object against its id without the rest, and one hash of a
+  large file runs on many cores.
 
 ## Served models
 
@@ -192,10 +214,10 @@ a queue context a client builds at startup:
 POST /council/v2/contexts
 {"model": "gemma-4-26b-a4b",
  "context": {"thinking": true, "tools": […], "queue": "next_command", "messages": […]}}
--> {"model": "gemma-4-26b-a4b", "head": "snap:51d0…", "from": null, "dry_run": false,
+-> {"model": "gemma-4-26b-a4b", "head": "blake3:51d0…", "from": null, "dry_run": false,
     "usage": {"prompt": 1840, "kept": 0, "fed": 1840, "completion": 0, "reasoning": 0},
-    "snapshots": [{"id": "snap:9a1e…", "message": 1, "tokens": 412, "tier": "host"},
-                  {"id": "snap:51d0…", "message": 4, "tokens": 1840, "tier": "host"}]}
+    "snapshots": [{"id": "blake3:9a1e…", "message": 1, "tokens": 412, "tier": "host"},
+                  {"id": "blake3:51d0…", "message": 4, "tokens": 1840, "tier": "host"}]}
 ```
 
 - **Messages are the model's chat shape.** Roles are `system`, `user`,
@@ -271,24 +293,22 @@ POST /council/v2/contexts
 ## Snapshots and pins
 
 ```json
-GET /council/v2/snapshots/snap:51d0…
--> {"id": "snap:51d0…", "model": "gemma-4-26b-a4b", "tokens": 1840, "tier": "host",
+GET /council/v2/snapshots/blake3:51d0…
+-> {"id": "blake3:51d0…", "model": "gemma-4-26b-a4b", "tokens": 1840, "tier": "host",
     "bytes": 829030400, "pins": [{"owner": "kernel-7f3a", "expires_in_s": 3412}]}
 
 PUT /council/v2/pins/kernel-7f3a
-{"snapshots": ["snap:51d0…", "snap:c4e2…"], "ttl_s": 3600}
--> {"owner": "kernel-7f3a", "snapshots": [{"id": "snap:51d0…", "held": true},
-                                          {"id": "snap:c4e2…", "held": false}],
+{"snapshots": ["blake3:51d0…", "blake3:c4e2…"], "ttl_s": 3600}
+-> {"owner": "kernel-7f3a", "snapshots": [{"id": "blake3:51d0…", "held": true},
+                                            {"id": "blake3:c4e2…", "held": false}],
     "expires_in_s": 3600}
 ```
 
-- **A snapshot id is `<scheme>:<hex>`:** a scheme of 1 to 16 lowercase
-  letters and digits, then 32 to 128 lowercase hex digits, such as `snap:`
-  and 64 digits, or `blake3:` and 64 digits. A client treats it as opaque
-  text and never derives one. A server derives it from the build's tokens,
-  boundaries, and identity (mkviolet), or from the bytes of the model state
-  (a content id); either way an id names one model state and is never
-  used for another. When a server's feeding does not repeat bit for bit,
+- **A snapshot id is a content id:** `blake3:` and 64 lowercase hex
+  digits. A client treats it as opaque text and never derives one. A server
+  hashes the build's tokens, boundaries, and identity, or the bytes of the
+  model state; either way an id names one model state and is never used
+  for another. When a server's feeding does not repeat bit for bit,
   the same context built twice may get two ids.
 - **An owner is any printable name a client chooses,** up to 128
   characters and without a slash, such as a kernel id. It names pins only.
@@ -324,7 +344,7 @@ POST /council/v2/specs
     "criteria": [{"option": "allow", "means": "routine, local, easy to undo, or clearly permitted here"},
                  {"option": "ask", "means": "outward-facing, hard to undo, or not clearly permitted here"},
                  {"option": "report", "means": "ask, but louder: it could destroy work or break a firm rule"}]}]}
--> {"spec_id": "sha256:9c1f…", "spec": {…}}
+-> {"spec_id": "blake3:9c1f…", "spec": {…}}
 ```
 
 - **Question types:**
@@ -348,8 +368,8 @@ POST /council/v2/specs
   question is read after the `text` answers before it in the spec's order,
   and its own answer never enters the text any later question is read
   after.
-- **The spec id** is `sha256:` and the hex sha256 of the spec's canonical
-  JSON (RFC 8785). Numbers in a spec are integers below 2^53; a spec holding
+- **The spec id** is the content id of the spec's canonical JSON (RFC
+  8785): `blake3:` and the hex BLAKE3 hash of that text. Numbers in a spec are integers below 2^53; a spec holding
   any other number is a `400`, because writing it canonically needs ES6
   number formatting.
 - **Specs survive a restart.** How a served model renders a spec is part of
@@ -359,7 +379,7 @@ POST /council/v2/specs
 
 ```json
 POST /council/v2/decisions
-{"model": "gemma-4-26b-a4b", "spec_id": "sha256:9c1f…",
+{"model": "gemma-4-26b-a4b", "spec_id": "blake3:9c1f…",
  "case": {"command": "git push origin main", "cwd": "/src/app"},
  "contexts": [{"thinking": true, "tools": […], "queue": "next_command", "messages": […]},
               {"thinking": true, "tools": […], "queue": "next_command", "messages": […]}],
@@ -378,18 +398,18 @@ POST /council/v2/decisions
                "leave_one_out": {"0": {"allow": 0.02, "ask": 0.38, "report": 0.60},
                                  "1": {"allow": 0.05, "ask": 0.90, "report": 0.05}}}},
  "reads": [
-   {"context": 0, "snapshot": "snap:4be0…",
+   {"context": 0, "snapshot": "blake3:4be0…",
     "described": {"effect": "Publishes the local commits on main to the shared remote."},
     "answers": {"verdict": {"type": "choice", "choice": "ask",
                             "probabilities": {"allow": 0.05, "ask": 0.90, "report": 0.05},
                             "logprobs": {"allow": -3.0, "ask": -0.105, "report": -3.0},
                             "mass": -0.0001, "confidence": 0.90}, …},
-    "rendered_sha256": "e3b0…"},
+    "rendered_hash": "blake3:e3b0…"},
    {"context": 1, …}],
  "pool": {"method": "loglinear", "weights": "mass", "normalized": {"undo": [0.5, 0.5], "verdict": [0.5, 0.5]}},
  "signals": {"control_text": []},
  "identity": {"model": "gemma-4-26b-a4b", "weight_hash": "…", "tokenizer_hash": "…",
-              "template": "mkv-letters-1:…", "engine": "…", "spec_id": "sha256:9c1f…"},
+              "template": "mkv-letters-1:…", "engine": "…", "spec_id": "blake3:9c1f…"},
  "usage": {"prompt": 1252, "kept": 1040, "fed": 212, "completion": 26, "reasoning": 0}}
 ```
 
@@ -480,7 +500,7 @@ top-level `answers` map pooled over the reads.
   a response against these.
 - **The response's other fields.** `pool` echoes `method` and `weights` and
   adds `normalized`: by question id, the weight each read pooled with, in
-  read order. Each read's `rendered_sha256` is the sha256 of the text that
+  read order. Each read's `rendered_hash` is the content id of the text that
   read was conditioned on, through its own described text. `identity`
   repeats the identity fields a threshold depends on, with the `spec_id`.
   `usage` sums over the reads: `prompt` counts every token a read was
@@ -679,15 +699,15 @@ POST /council/v2/generations
       "content": "```toml\n[http]\nbind = \"",
       "continue": true}]},
  "max_tokens": 512, "sample": {"temperature": 0.7},
- "decisions": [{"spec_id": "self-check", "ask": ["on_track"], "when": "before"},
-               {"spec_id": "self-check", "when": "after"}],
+ "decisions": [{"spec_id": "blake3:77c0…", "ask": ["on_track"], "when": "before"},
+               {"spec_id": "blake3:77c0…", "when": "after"}],
  "stream": true}
 -> done: {"content": "```toml\n[http]\nbind = \"100.83.138.103:8090\"\n```",
           "reasoning": "The unit needs Type=notify and the 8090 address.",
           "finish": "end_turn",
           "usage": {"prompt": 412, "kept": 398, "fed": 14, "completion": 21, "reasoning": 0},
-          "decisions": [{"spec_id": "self-check", "when": "before", "answers": […]},
-                        {"spec_id": "self-check", "when": "after", "answers": […]}], …}
+          "decisions": [{"spec_id": "blake3:77c0…", "when": "before", "answers": […]},
+                        {"spec_id": "blake3:77c0…", "when": "after", "answers": […]}], …}
 ```
 
 - **`continue: true` opens the last message.** Only the last message may
@@ -812,7 +832,7 @@ next step when one is known.
 
 | Status | `error.type` | When |
 |---|---|---|
-| `400` | `invalid_request` | The body is outside the schema, including a missing `model` or an unknown field; `model` names no served model; `ask` or `options` names what the spec lacks; a needed capability is missing. `param` names the field. |
+| `400` | `invalid_request` | The body is outside the schema, including a missing `model` or an unknown field; `model` names no served model; `ask` or `options` names what the spec lacks; a needed capability is missing; an id is not a whole content id. `param` names the field, or `id` for an id in the path. |
 | `404` | `not_found` | An unknown spec id, snapshot id, or pin owner. |
 | `413` | `too_large` | A case, spec, context, or pin set is past a limit in identity; `param` names the limit, such as `case_bytes` or `pin_bytes`. Nothing is held. |
 | `413` | `context_full` | A generation's prompt leaves no room for a reply; the body has `prompt_tokens` and `context_tokens`. |

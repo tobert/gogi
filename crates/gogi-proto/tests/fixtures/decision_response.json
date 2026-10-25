@@ -58,7 +58,7 @@
  "reads": [
   {
    "context": 0,
-   "snapshot": "snap:ad8eec527db476432584478044f7a9819dbd02801f434f12d2282bdc2b3e4fbe",
+   "snapshot": "blake3:ad8eec527db476432584478044f7a9819dbd02801f434f12d2282bdc2b3e4fbe",
    "described": {
     "effect": "Publishes local commits to the remote."
    },
@@ -101,13 +101,13 @@
      "mass": -0.2645867741678689
     }
    },
-   "rendered_sha256": "57228b0bddca64da52462957ef6fe4477b31494fbd191e14a4843e8e174a9195",
+   "rendered_hash": "blake3:57228b0bddca64da52462957ef6fe4477b31494fbd191e14a4843e8e174a9195",
    "tokens": 96,
    "ms": 12.5
   },
   {
    "context": 1,
-   "snapshot": "snap:979d15ceb6faa54648bb078c9ca91debdcedf90bded148566399638f2005260b",
+   "snapshot": "blake3:979d15ceb6faa54648bb078c9ca91debdcedf90bded148566399638f2005260b",
    "described": {
     "effect": "Publishes local commits to the remote."
    },
@@ -150,7 +150,7 @@
      "mass": -1.0190319155299834
     }
    },
-   "rendered_sha256": "46ea5093e8e88018d1b04a9b5e9a2b9637a46e003ac14924f9ede69681ed65d0",
+   "rendered_hash": "blake3:46ea5093e8e88018d1b04a9b5e9a2b9637a46e003ac14924f9ede69681ed65d0",
    "tokens": 96,
    "ms": 12.5
   }
@@ -178,7 +178,7 @@
   "tokenizer_hash": "t1",
   "template": "mk-letters-1:0123456789abcdef",
   "engine": "e1",
-  "spec_id": "sha256:5114ff063b887c710333afd4fe35238c55946ac2a63fb76d6c9004b56a1503ea"
+  "spec_id": "blake3:5d61eaa8fab8492392c9c7715f9b1c4e45dd0627d7008682f57a247a0d99b9b7"
  },
  "usage": {
   "prompt": 1252,

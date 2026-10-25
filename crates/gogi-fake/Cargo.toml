@@ -12,4 +12,4 @@ gogi-toy = { path = "../gogi-toy" }
 serde.workspace = true
 serde_json.workspace = true
 indexmap.workspace = true
-sha2.workspace = true
+blake3.workspace = true

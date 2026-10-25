@@ -102,6 +102,9 @@ impl GenerationRequest {
             s.validate()?;
         }
         for (i, d) in self.decisions.iter().enumerate() {
+            if let Some(problem) = crate::ids::content_id_problem(&d.spec_id) {
+                return Err(Invalid::param("decisions", format!("nothing ran: decisions[{}].spec_id {}", i, problem)));
+            }
             if let Some(ask) = &d.ask {
                 crate::decision::check_ask(ask).map_err(|m| Invalid::param("decisions", format!("decisions[{}]: {}", i, m)))?;
             }
@@ -425,7 +428,7 @@ mod tests {
     use serde_json::json;
 
     fn snap(p: &str) -> String {
-        format!("snap:{p}{}", "0".repeat(64 - p.len()))
+        format!("blake3:{p}{}", "0".repeat(64 - p.len()))
     }
 
     fn done() -> Value {
@@ -587,12 +590,15 @@ mod tests {
         assert!(serde_json::from_value::<GenerationRequest>(v).is_err(), "a generation sends max_tokens");
         assert!(GenerationRequest { context: Context::default(), ..r.clone() }.validate().is_err());
         let ride = |ask: Option<Vec<String>>| GenerationRequest {
-            decisions: vec![RidingDecision { spec_id: format!("sha256:{}", "a".repeat(64)), ask, when: RideWhen::After }],
+            decisions: vec![RidingDecision { spec_id: format!("blake3:{}", "a".repeat(64)), ask, when: RideWhen::After }],
             ..r.clone()
         };
         ride(Some(vec!["q".into()])).validate().unwrap();
         assert_eq!(ride(Some(vec![])).validate().unwrap_err().param.as_deref(), Some("decisions"));
         assert_eq!(ride(Some(vec!["q".into(), "q".into()])).validate().unwrap_err().param.as_deref(), Some("decisions"));
+        let short = GenerationRequest { decisions: vec![RidingDecision { spec_id: "blake3:5d61eaa8fab8".into(), ask: None, when: RideWhen::After }], ..r.clone() };
+        let e = short.validate().unwrap_err();
+        assert!(e.param.as_deref() == Some("decisions") && e.message.contains("decisions[0].spec_id \"blake3:5d61eaa8fab8\""), "{e:?}");
         for s in [Sample { temperature: Some(-1.0), ..Default::default() }, Sample { top_p: Some(0.0), ..Default::default() }, Sample { min_p: Some(1.0), ..Default::default() }] {
             assert!(GenerationRequest { sample: Some(s), ..r.clone() }.validate().is_err());
         }

@@ -1,15 +1,15 @@
-//! RFC 8785 canonical JSON and spec ids.
+//! RFC 8785 canonical JSON, content ids, and spec ids.
 //!
 //! A spec contains only integers: a number must be an integer below 2^53 in magnitude, because
 //! writing any other number canonically needs ES6 number formatting.
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 const MAX_EXACT: i64 = 1 << 53;
 
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|b| format!("{:02x}", b)).collect()
+/// The content id of `bytes`: `blake3:` and the 64 lowercase hex digits of their BLAKE3 hash.
+pub fn content_id(bytes: &[u8]) -> String {
+    format!("blake3:{}", blake3::hash(bytes).to_hex())
 }
 
 /// Appends the canonical JSON of `value`: object members sorted by the UTF-16 code units of
@@ -73,11 +73,11 @@ fn canonical_string(s: &str, out: &mut String) {
     out.push('"');
 }
 
-/// The id of a spec: `sha256:` and the hex sha256 of its canonical JSON.
+/// The id of a spec: the content id of its canonical JSON.
 pub fn spec_id_of(spec: &Value) -> Result<String, String> {
     let mut text = String::new();
     canonical_json(spec, &mut text)?;
-    Ok(format!("sha256:{}", sha256_hex(text.as_bytes())))
+    Ok(content_id(text.as_bytes()))
 }
 
 #[cfg(test)]
@@ -86,8 +86,8 @@ mod tests {
     use serde_json::json;
 
     const FIXTURE: &str = include_str!("../tests/fixtures/spec.json");
-    /// kaijutsu's id for the same file (`DOC_SPEC_ID`).
-    const FIXTURE_ID: &str = "sha256:5114ff063b887c710333afd4fe35238c55946ac2a63fb76d6c9004b56a1503ea";
+    /// The BLAKE3 of the file's canonical JSON, the text whose SHA-256 is kaijutsu's `DOC_SPEC_ID`.
+    const FIXTURE_ID: &str = "blake3:5d61eaa8fab8492392c9c7715f9b1c4e45dd0627d7008682f57a247a0d99b9b7";
 
     fn canon(v: &Value) -> String {
         let mut s = String::new();

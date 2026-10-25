@@ -7,7 +7,7 @@
 //! - the rules a request must meet, checked the way mkviolet checks them
 //!   (`message::validate`, `Context::check`, `spec::parse_spec`);
 //! - what a server checks of an open message, the seams of a continuation (`continuation`);
-//! - canonical JSON and `spec_id` (`canon`);
+//! - canonical JSON, content ids, and `spec_id` (`canon`);
 //! - the pooling math in `f64` and the check that a decision's numbers obey it
 //!   (`math::pool`, `math::verify`).
 
@@ -25,10 +25,10 @@ pub mod pins;
 pub mod reads;
 pub mod spec;
 
-pub use canon::{canonical_json, sha256_hex, spec_id_of};
+pub use canon::{canonical_json, content_id, spec_id_of};
 pub use context::{Context, ContextBuild, ContextBuilt, SnapshotInfo, Tier, Tool, Usage};
 pub use error::{ErrorBody, ErrorDetail, ErrorType, Invalid};
-pub use ids::{SnapshotId, SpecId};
+pub use ids::{SnapshotId, SpecId, content_id_problem};
 pub use message::{Message, Role, ToolCall};
 
 /// Accepts `null` or a value but, unlike a plain `Option`, requires the member.

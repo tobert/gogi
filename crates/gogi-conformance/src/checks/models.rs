@@ -21,7 +21,7 @@ impl Suite {
         // A request without model is refused, however many models the server serves.
         let unnamed: [(&str, &str, Value); 4] = [
             ("a build", "/council/v2/contexts", json!({"context": ctx})),
-            ("a decision", "/council/v2/decisions", json!({"spec_id": format!("sha256:{}", "0".repeat(64)), "case": "x", "contexts": [ctx]})),
+            ("a decision", "/council/v2/decisions", json!({"spec_id": format!("blake3:{}", "0".repeat(64)), "case": "x", "contexts": [ctx]})),
             ("a raw read", "/council/v2/reads", json!({"contexts": [ctx], "suffixes": ["x"], "letters": ["A", "B"]})),
             ("a generation", "/council/v2/generations", json!({"context": ctx, "max_tokens": 8})),
         ];

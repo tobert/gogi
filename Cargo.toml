@@ -13,5 +13,5 @@ publish = false
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 indexmap = { version = "2", features = ["serde"] }
-sha2 = "0.10"
+blake3 = "1.8"
 thiserror = "2"

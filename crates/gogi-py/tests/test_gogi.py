@@ -9,7 +9,7 @@ import pytest
 import gogi
 
 FIXTURES = pathlib.Path(__file__).resolve().parents[2] / "gogi-proto" / "tests" / "fixtures"
-KAIJUTSU_FIXTURE_ID = "sha256:5114ff063b887c710333afd4fe35238c55946ac2a63fb76d6c9004b56a1503ea"
+KAIJUTSU_FIXTURE_ID = "blake3:5d61eaa8fab8492392c9c7715f9b1c4e45dd0627d7008682f57a247a0d99b9b7"
 
 
 def test_spec_id_matches_kaijutsus_fixture():

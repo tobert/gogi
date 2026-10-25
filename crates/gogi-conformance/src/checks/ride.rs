@@ -41,7 +41,7 @@ impl Suite {
             }
         }
         let mut gone = bare;
-        gone["decisions"] = json!([{"spec_id": format!("sha256:{}", "0".repeat(64)), "when": "after"}]);
+        gone["decisions"] = json!([{"spec_id": format!("blake3:{}", "0".repeat(64)), "when": "after"}]);
         self.refused("a riding decision on a spec the server does not hold is a 404", "POST", "/council/v2/generations", Some(gone), 404);
     }
 }

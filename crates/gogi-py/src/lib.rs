@@ -44,7 +44,7 @@ mod _gogi {
         Ok(out)
     }
 
-    /// The `sha256:...` id of a spec. Raises `ValueError` for a number that is not an integer
+    /// The `blake3:...` id of a spec. Raises `ValueError` for a number that is not an integer
     /// below 2^53.
     #[pyfunction]
     fn spec_id(spec_json: &str) -> PyResult<String> {

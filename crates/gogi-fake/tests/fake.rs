@@ -177,7 +177,7 @@ fn every_response_carries_a_request_id_and_an_error_repeats_it() {
     let (_, b, _) = exchange(&s, "GET", "/council/v2/identity", None);
     assert_eq!(code, 200);
     assert!(is_request_id(&a) && is_request_id(&b) && a != b, "{a} {b}");
-    let (code, id, body) = exchange(&s, "POST", "/council/v2/decisions", Some(json!({"model": "toy", "spec_id": format!("sha256:{}", "a".repeat(64)), "case": "x", "verdict": "A"})));
+    let (code, id, body) = exchange(&s, "POST", "/council/v2/decisions", Some(json!({"model": "toy", "spec_id": format!("blake3:{}", "a".repeat(64)), "case": "x", "verdict": "A"})));
     let e: Value = serde_json::from_str(&body).unwrap();
     assert_eq!((code, &e["error"]["param"], &e["request_id"]), (400, &json!("verdict"), &json!(id)), "{e}");
     let (code, id, _) = exchange(&s, "DELETE", "/council/v2/pins/never", None);
@@ -217,7 +217,7 @@ fn pins_name_their_snapshot_not_its_chain_expire_and_report_unheld_ids() {
     let s = Server::start(Config::default()).unwrap();
     let (_, b) = post(&s, "/council/v2/contexts", json!({"model": "toy", "context": ctx(json!(answer_with_reasoning()))}));
     let (first, head) = (b["snapshots"][0]["id"].as_str().unwrap(), b["head"].as_str().unwrap());
-    let unheld = format!("snap:{}", "0".repeat(64));
+    let unheld = format!("blake3:{}", "0".repeat(64));
     let (code, p) = call(&s, "PUT", "/council/v2/pins/o", Some(json!({"snapshots": [head, unheld], "ttl_s": 60})));
     assert_eq!(code, 200);
     assert_eq!((p["snapshots"][0]["held"].clone(), p["snapshots"][1]["held"].clone()), (json!(true), json!(false)));
@@ -285,7 +285,7 @@ fn a_spec_is_held_by_content_and_a_decision_decodes_and_verifies() {
     }
     assert_eq!(d["reads"][1]["context"], json!(1));
     assert!(resp.usage.kept + resp.usage.fed == resp.usage.prompt && resp.usage.fed > 0, "{:?}", resp.usage);
-    assert_eq!(post(&s, "/council/v2/decisions", json!({"model": "toy", "spec_id": format!("sha256:{}", "a".repeat(64)), "case": "x"})).0, 404);
+    assert_eq!(post(&s, "/council/v2/decisions", json!({"model": "toy", "spec_id": format!("blake3:{}", "a".repeat(64)), "case": "x"})).0, 404);
     assert_eq!(post(&s, "/council/v2/decisions", json!({"model": "toy", "spec_id": a["spec_id"], "case": "x", "contexts": [{"id": "old"}]})).0, 400);
     assert_eq!(call(&s, "DELETE", &format!("/council/v2/specs/{}", a["spec_id"].as_str().unwrap()), None).0, 204);
 }
@@ -394,7 +394,7 @@ fn riding_decisions_are_a_400_naming_decisions_because_the_fake_does_not_declare
     let (_, id) = call(&s, "GET", "/council/v2/identity", None);
     assert!(!id["models"][0]["capabilities"].as_array().unwrap().contains(&json!("ride")));
     let body = json!({"model": "toy", "context": ctx(json!([{"role": "user", "content": "hi"}])), "max_tokens": 4,
-        "decisions": [{"spec_id": format!("sha256:{}", "a".repeat(64)), "when": "after"}]});
+        "decisions": [{"spec_id": format!("blake3:{}", "a".repeat(64)), "when": "after"}]});
     let (code, e) = post(&s, "/council/v2/generations", body);
     assert_eq!((code, &e["error"]["param"]), (400, &json!("decisions")), "{e}");
 }

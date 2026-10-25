@@ -1,4 +1,4 @@
-//! Snapshot ids, `<scheme>:<hex>`, spec ids, `sha256:` and 64 lowercase hex digits, and the
+//! Content ids, `blake3:` and 64 lowercase hex digits, for snapshots, specs, and objects, and the
 //! headers that name a request.
 
 use serde::{Deserialize, Serialize};
@@ -7,14 +7,32 @@ fn is_lower_hex(s: &str) -> bool {
     s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// A scheme of 1 to 16 lowercase letters and digits, a colon, then 32 to 128 lowercase hex digits.
-fn is_snapshot_id(s: &str) -> bool {
-    s.split_once(':').is_some_and(|(scheme, hex)| {
-        (1..=16).contains(&scheme.len())
-            && scheme.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-            && (32..=128).contains(&hex.len())
-            && is_lower_hex(hex)
-    })
+/// The scheme of every content id.
+pub const SCHEME: &str = "blake3";
+
+/// The hex digits of a content id: the whole 256-bit hash.
+pub const HEX_DIGITS: usize = 64;
+
+/// Why `s` is not a content id, or `None` when it is one. A content id is `blake3:` and 64
+/// lowercase hex digits: the whole hash, never a short form or a prefix.
+pub fn content_id_problem(s: &str) -> Option<String> {
+    let rule = "a content id is `blake3:` and 64 lowercase hex digits";
+    let Some((scheme, hex)) = s.split_once(':') else {
+        return Some(format!("{:?} has no scheme: {}", s, rule));
+    };
+    if scheme != SCHEME {
+        return Some(format!("{:?} has the scheme `{}`: {}", s, scheme, rule));
+    }
+    if let Some((i, c)) = hex.char_indices().find(|(_, c)| !c.is_ascii_hexdigit()) {
+        return Some(format!("{:?} has {:?} at hex digit {}, which is not a hex digit: {}", s, c, i + 1, rule));
+    }
+    if hex.len() != HEX_DIGITS {
+        return Some(format!("{:?} has {} hex digits, not {}: send the whole id, because no server accepts a short form or a prefix", s, hex.len(), HEX_DIGITS));
+    }
+    if !is_lower_hex(hex) {
+        return Some(format!("{:?} has uppercase hex digits: {}", s, rule));
+    }
+    None
 }
 
 /// The response header that carries the id a server gives each request.
@@ -29,12 +47,8 @@ pub fn is_request_id(s: &str) -> bool {
     (1..=128).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_graphic())
 }
 
-fn is_spec_id(s: &str) -> bool {
-    s.strip_prefix("sha256:").is_some_and(|hex| hex.len() == 64 && is_lower_hex(hex))
-}
-
 macro_rules! prefixed_id {
-    ($(#[$doc:meta])* $name:ident, $check:ident) => {
+    ($(#[$doc:meta])* $name:ident, $what:literal) => {
         $(#[$doc])*
         #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
         #[serde(try_from = "String", into = "String")]
@@ -54,7 +68,10 @@ macro_rules! prefixed_id {
         impl TryFrom<String> for $name {
             type Error = String;
             fn try_from(s: String) -> Result<Self, String> {
-                if $check(&s) { Ok(Self(s)) } else { Err(format!(concat!("not a ", stringify!($name), ": {:?}"), s)) }
+                match content_id_problem(&s) {
+                    None => Ok(Self(s)),
+                    Some(problem) => Err(format!(concat!("not a ", $what, ": {}"), problem)),
+                }
             }
         }
 
@@ -73,46 +90,75 @@ macro_rules! prefixed_id {
 }
 
 prefixed_id!(
-    /// The opaque address of one model state, such as `snap:` or `blake3:` and 64 hex digits. A
-    /// client never derives one.
+    /// The address of one model state. A client treats it as opaque and never derives one.
     SnapshotId,
-    is_snapshot_id
+    "snapshot id"
 );
 prefixed_id!(
-    /// `sha256:` and 64 hex digits: the hash of a spec's canonical JSON.
+    /// The BLAKE3 hash of a spec's canonical JSON.
     SpecId,
-    is_spec_id
+    "spec id"
 );
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn is_content_id(s: &str) -> bool {
+        content_id_problem(s).is_none()
+    }
+
+    fn id(hex: &str) -> String {
+        format!("blake3:{}", hex)
+    }
+
     #[test]
-    fn a_snapshot_id_is_a_scheme_and_lowercase_hex() {
-        for good in [format!("snap:{}", "ab".repeat(32)), format!("blake3:{}", "0".repeat(64)), format!("sha256:{}", "a".repeat(32)), format!("k2:{}", "f".repeat(128))] {
+    fn a_content_id_is_blake3_and_64_lowercase_hex_digits() {
+        for good in [id(&"0".repeat(64)), id(&"ab".repeat(32)), id(&"0123456789abcdef".repeat(4))] {
+            assert!(is_content_id(&good), "{good}");
             assert_eq!(SnapshotId::parse(good.clone()).unwrap().as_str(), good);
+            assert_eq!(SpecId::parse(good.clone()).unwrap().as_str(), good);
         }
         for bad in [
             String::new(),
-            "snap:".into(),
-            format!("snap:{}", "AB".repeat(32)),
-            format!("snap:{}", "a".repeat(31)),
-            format!("snap:{}", "a".repeat(129)),
-            format!("Snap:{}", "a".repeat(64)),
-            format!(":{}", "a".repeat(64)),
-            format!("{}:{}", "s".repeat(17), "a".repeat(64)),
-            format!("snap:{}/x", "a".repeat(64)),
+            "blake3:".into(),
+            id(&"a".repeat(63)),
+            id(&"a".repeat(65)),
+            id(&"a".repeat(12)),
+            id(&"AB".repeat(32)),
+            id(&format!("{}g", "a".repeat(63))),
+            format!("snap:{}", "a".repeat(64)),
+            format!("sha256:{}", "a".repeat(64)),
+            format!("Blake3:{}", "a".repeat(64)),
+            "a".repeat(64),
+            format!("blake3:{}/x", "a".repeat(64)),
         ] {
+            assert!(!is_content_id(&bad), "{bad:?}");
             assert!(SnapshotId::parse(bad.clone()).is_err(), "{bad:?}");
+            assert!(SpecId::parse(bad.clone()).is_err(), "{bad:?}");
         }
     }
 
     #[test]
-    fn a_spec_id_is_sha256_and_64_lowercase_hex_digits() {
-        assert!(SpecId::parse(format!("snap:{}", "0".repeat(64))).is_err());
-        assert!(SpecId::parse(format!("sha256:{}", "0".repeat(63))).is_err());
-        assert!(SpecId::parse(format!("sha256:{}", "0".repeat(64))).is_ok());
-        assert!(serde_json::from_str::<SpecId>("\"sha256:zz\"").is_err());
+    fn the_problem_names_the_id_and_what_is_wrong() {
+        let short = id("7cc44eb19abc");
+        let p = content_id_problem(&short).unwrap();
+        assert!(p.contains(&format!("{:?}", short)) && p.contains("12 hex digits") && p.contains("short form"), "{p}");
+        let p = content_id_problem(&format!("sha256:{}", "a".repeat(64))).unwrap();
+        assert!(p.contains("the scheme `sha256`"), "{p}");
+        let p = content_id_problem(&"a".repeat(64)).unwrap();
+        assert!(p.contains("has no scheme"), "{p}");
+        let p = content_id_problem(&id(&"A".repeat(64))).unwrap();
+        assert!(p.contains("uppercase"), "{p}");
+        let p = content_id_problem(&id(&format!("{}z", "a".repeat(9)))).unwrap();
+        assert!(p.contains("'z' at hex digit 10"), "{p}");
+    }
+
+    #[test]
+    fn a_decode_error_says_which_id_it_was() {
+        let e = serde_json::from_str::<SpecId>("\"sha256:zz\"").unwrap_err().to_string();
+        assert!(e.starts_with("not a spec id: "), "{e}");
+        let e = SnapshotId::parse(id("ab")).unwrap_err();
+        assert!(e.starts_with("not a snapshot id: "), "{e}");
     }
 }

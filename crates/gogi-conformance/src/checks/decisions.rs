@@ -71,7 +71,7 @@ impl Suite {
             }
             self.refused(&format!("{} is refused", name), "POST", "/council/v2/specs", Some(bad), 400);
         }
-        self.refused("an unknown spec is a 404", "GET", &format!("/council/v2/specs/sha256:{}", "0".repeat(64)), None, 404);
+        self.refused("an unknown spec is a 404", "GET", &format!("/council/v2/specs/blake3:{}", "0".repeat(64)), None, 404);
         self.expect("spec cleanup", "DELETE", &format!("/council/v2/specs/{}", id), None, 204);
     }
 
@@ -166,7 +166,7 @@ impl Suite {
             ("a decision with values and uniform weights", json!({"spec_id": spec_id, "case": "x", "pool": {"values": [1.0]}}), 400),
             ("a decision with given weights that sum to 0", json!({"spec_id": spec_id, "case": "x", "pool": {"weights": "given", "values": [0.0]}}), 400),
             ("a decision on a bad context", json!({"spec_id": spec_id, "case": "x", "contexts": [self.ctx(vec![json!({"role": "tool", "tool_call_id": "z", "content": "x"})])]}), 400),
-            ("a decision on a spec the server does not hold", json!({"spec_id": format!("sha256:{}", "0".repeat(64)), "case": "x"}), 404),
+            ("a decision on a spec the server does not hold", json!({"spec_id": format!("blake3:{}", "0".repeat(64)), "case": "x"}), 404),
         ];
         for (name, body, want) in bad {
             self.refused(&format!("{} is refused", name), "POST", "/council/v2/decisions", Some(body), want);

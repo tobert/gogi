@@ -18,7 +18,7 @@
 use serde_json::Value;
 
 use crate::{ASST, BOS, END, USER, push_text, render, tokenize_suffix};
-use gogi_proto::canon::sha256_hex;
+use gogi_proto::canon::content_id;
 use gogi_proto::context::Context;
 use gogi_proto::message::Message;
 
@@ -48,9 +48,9 @@ pub fn case_text(case: &Value) -> String {
     }
 }
 
-/// The SHA-256 of tokens as 32-bit little-endian words, in lowercase hexadecimal.
-pub fn rendered_sha256(tokens: &[u32]) -> String {
-    sha256_hex(tokens.iter().flat_map(|t| t.to_le_bytes()).collect::<Vec<u8>>().as_slice())
+/// The content id of tokens as 32-bit little-endian words.
+pub fn rendered_hash(tokens: &[u32]) -> String {
+    content_id(tokens.iter().flat_map(|t| t.to_le_bytes()).collect::<Vec<u8>>().as_slice())
 }
 
 /// The tokens a decision over no context starts from.

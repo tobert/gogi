@@ -2,7 +2,7 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use gogi_proto::canon::{sha256_hex, spec_id_of};
+use gogi_proto::canon::spec_id_of;
 use gogi_proto::context::{Context, Usage};
 use gogi_proto::decision::{DecisionRequest, PoolMethod, PoolWeights, check_queue_schema, queue_call};
 use gogi_proto::error::{ErrorBody, ErrorType};
@@ -51,6 +51,15 @@ fn bad_param(param: &str, message: impl Into<String>) -> Resp {
 
 fn not_found(message: impl Into<String>) -> Resp {
     err(404, "not_found", message, None)
+}
+
+/// A content id from a path, or the `400` that names it: the server never looks up a short form
+/// or a prefix.
+fn path_id(id: &str) -> Result<String, Resp> {
+    match gogi_proto::content_id_problem(id) {
+        None => Ok(id.to_string()),
+        Some(problem) => Err(bad_param("id", format!("nothing was looked up: {}", problem))),
+    }
 }
 
 fn invalid(e: gogi_proto::Invalid) -> Resp {
@@ -152,7 +161,10 @@ pub fn handle(store: &mut Store, method: &str, path: &str, body: &[u8]) -> Resp 
     match (method, parts.as_slice()) {
         ("GET", ["identity"]) => Resp::Json(200, identity(store)),
         ("POST", ["contexts"]) => build_route(store, body),
-        ("GET", ["snapshots", id]) => snapshot_route(store, &unescape(id)),
+        ("GET", ["snapshots", id]) => match path_id(&unescape(id)) {
+            Ok(id) => snapshot_route(store, &id),
+            Err(r) => r,
+        },
         ("PUT", ["pins", owner]) => pins_put(store, &unescape(owner), body),
         ("GET", ["pins", owner]) => match store.pins.get(&unescape(owner)) {
             Some(p) => Resp::Json(200, json!({"owner": unescape(owner), "snapshots": p.snapshots, "expires_in_s": store.expires_in(p.expires)})),
@@ -167,12 +179,19 @@ pub fn handle(store: &mut Store, method: &str, path: &str, body: &[u8]) -> Resp 
         }
         ("POST", ["specs"]) => specs_post(store, body),
         ("GET", ["specs"]) => Resp::Json(200, json!({"specs": store.specs.iter().map(|(id, s)| held_spec(id, s)).collect::<Vec<_>>()})),
-        ("GET", ["specs", id]) => match store.specs.get(*id) {
-            Some(s) => Resp::Json(200, held_spec(id, s)),
-            None => not_found(format!("no held spec {}", id)),
+        ("GET", ["specs", id]) => match path_id(&unescape(id)) {
+            Ok(id) => match store.specs.get(&id) {
+                Some(s) => Resp::Json(200, held_spec(&id, s)),
+                None => not_found(format!("no held spec {}", id)),
+            },
+            Err(r) => r,
         },
         ("DELETE", ["specs", id]) => {
-            if store.specs.shift_remove(*id).is_none() {
+            let id = match path_id(&unescape(id)) {
+                Ok(id) => id,
+                Err(r) => return r,
+            };
+            if store.specs.shift_remove(&id).is_none() {
                 return not_found(format!("no held spec {}", id));
             }
             store.save();
@@ -483,7 +502,7 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
     let b = build(store, &m, c, false);
     let sample = req.sample.clone().unwrap_or_default();
     let temperature = sample.temperature.unwrap_or(1.0);
-    let seed = sample.seed.unwrap_or_else(|| u64::from_le_bytes(sha256_hex(&prompt.tokens.iter().flat_map(|t| t.to_le_bytes()).collect::<Vec<u8>>()).as_bytes()[..8].try_into().unwrap()));
+    let seed = sample.seed.unwrap_or_else(|| u64::from_le_bytes(blake3::hash(&prompt.tokens.iter().flat_map(|t| t.to_le_bytes()).collect::<Vec<u8>>()).as_bytes()[..8].try_into().unwrap()));
     let mut rng = Rng(seed);
     let trigger = !c.tools.is_empty() && last.contains("CALL");
 
@@ -627,7 +646,7 @@ struct Asked<'a> {
 }
 
 /// One read of a decision: the head it read after, each asked question's option log
-/// probabilities, its index, and its `rendered_sha256`.
+/// probabilities, its index, and its `rendered_hash`.
 type ReadOut = (Option<String>, Vec<Vec<f64>>, usize, String);
 
 fn decisions(store: &mut Store, body: &[u8]) -> Resp {
@@ -743,7 +762,7 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
                 read::queue_letter(&mut toks, ask.chosen[qi][best]);
                 lps[qi] = Some(read);
             }
-            rendered = read::rendered_sha256(&toks);
+            rendered = read::rendered_hash(&toks);
             fed += toks.len() - base_tokens.len();
         } else {
             let text_all = read::plain_text(&base_tokens, &instructions, &label, &case_text);
@@ -754,7 +773,7 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
                 lps[qi] = Some(ask.chosen[qi].iter().map(|&j| lp[read::option_letter(j) as usize]).collect());
                 fed += toks.len() - base_tokens.len();
             }
-            rendered = read::rendered_sha256(&text_all);
+            rendered = read::rendered_hash(&text_all);
         }
         usage.prompt += (kept + fed) as u64;
         usage.kept += kept as u64;
@@ -812,7 +831,7 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
     let reads_json: Vec<Value> = reads
         .iter()
         .enumerate()
-        .map(|(i, (head, _, _, rendered))| json!({"context": if named[i].is_some() { json!(i) } else { Value::Null }, "snapshot": head, "answers": read_answers[i], "rendered_sha256": rendered, "tokens": 0, "ms": 0.0}))
+        .map(|(i, (head, _, _, rendered))| json!({"context": if named[i].is_some() { json!(i) } else { Value::Null }, "snapshot": head, "answers": read_answers[i], "rendered_hash": rendered, "tokens": 0, "ms": 0.0}))
         .collect();
     let mut identity = identity_of(&m);
     identity["spec_id"] = json!(spec_id);

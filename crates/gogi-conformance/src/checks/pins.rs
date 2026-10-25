@@ -26,7 +26,7 @@ impl Suite {
             self.r.check("snapshot info: tokens match the build", st.tokens as i64 == num(&b2["usage"]["prompt"]) && st.pins.is_empty(), &s);
             self.r.check("snapshot info names its served model", st.model == self.model_name(), (&st.model, self.model_name()));
         }
-        self.refused("an unknown snapshot is a 404", "GET", &format!("/council/v2/snapshots/snap:{}", "0".repeat(64)), None, 404);
+        self.refused("an unknown snapshot is a 404", "GET", &format!("/council/v2/snapshots/blake3:{}", "0".repeat(64)), None, 404);
 
         if !self.has(Capability::Pins) {
             self.r.skip("pins", "the server does not declare the pins capability");
@@ -34,7 +34,7 @@ impl Suite {
         }
         let owner = format!("gogi-conformance-{}", self.nonce);
         let path = format!("/council/v2/pins/{}", owner);
-        let unheld = format!("snap:{}", "0".repeat(64));
+        let unheld = format!("blake3:{}", "0".repeat(64));
         self.refused("an owner with nothing is a 404", "GET", &path, None, 404);
         self.refused("deleting an owner with nothing is a 404", "DELETE", &path, None, 404);
 
