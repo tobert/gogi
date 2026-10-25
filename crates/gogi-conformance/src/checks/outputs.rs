@@ -83,7 +83,7 @@ impl Suite {
             }
         }
         let media = done.usage.media.unwrap_or_default();
-        self.r.check("usage.media counts the output written", media.written.objects == 1 && media.written.bytes == sealed.bytes, &done.usage);
+        self.r.check("usage.media counts the output written", media.written.objects == 1 && media.written.bytes == sealed.bytes, done.usage);
 
         // The reply's message holds its output after its text, and the next build starts from the head.
         if let (Some(reply), Some(head)) = (done.as_message(), done.head.clone()) {
@@ -94,6 +94,8 @@ impl Suite {
             if done.finish == gogi_proto::generation::Finish::MaxTokens {
                 // A cut reply's head is its open rendering, which holds no parts (see Continuations).
                 self.r.skip("a reply sent back with its output feeds nothing", "the reply was cut by max_tokens, so its head is its open rendering");
+            } else if !self.model.as_ref().is_some_and(|m| m.text_replies()) {
+                self.r.skip("a reply sent back with its output feeds nothing", "the served model takes no build: it has no text replies");
             } else if let Some(b) = self.build("a reply sent back with its output builds", &self.ctx(messages), false) {
                 self.r.check("a reply sent back with its output feeds nothing", b["from"] == json!(head.as_str()) && num(&b["usage"]["fed"]) == 0, (&b["from"], head.as_str(), &b["usage"]));
             }
@@ -130,6 +132,31 @@ impl Suite {
         self.refused_naming("a keep on a pending id is a 400 naming it", "PUT", &owner, Some(json!({"objects": [started.pending], "ttl_s": 60})), "objects", &started.pending);
         let mut m = self.opening("outputs");
         m.push(json!({"role": "user", "content": [{"type": "object", "id": started.pending, "mime": mime}]}));
-        self.refused_naming("an object part with a pending id is a 400 naming the part", "POST", "/council/v2/contexts", Some(json!({"context": self.ctx(m)})), "messages[2].content[0]", &started.pending);
+        if self.model.as_ref().is_some_and(|m| m.text_replies()) {
+            self.refused_naming("an object part with a pending id is a 400 naming the part", "POST", "/council/v2/contexts", Some(json!({"context": self.ctx(m)})), "messages[2].content[0]", &started.pending);
+        } else {
+            let body = json!({"context": self.ctx(m), "max_tokens": 4, "output": {"mime": mime}});
+            self.refused_naming("an object part with a pending id is a 400 naming the part", "POST", "/council/v2/generations", Some(body), "messages[2].content[0]", &started.pending);
+        }
+    }
+
+    /// Checks a served model with no text replies: a build, a decision, and a raw read naming it
+    /// are a `400` naming `model`, and so is no route but a generation with an `output`.
+    pub(crate) fn writes_no_text(&mut self) {
+        let ctx = self.ctx(self.opening("no-text"));
+        let spec = format!("blake3:{}", "0".repeat(64));
+        for (what, path, body) in [
+            ("a build naming a model with no text replies is a 400 naming model", "/council/v2/contexts", json!({"context": ctx})),
+            ("a decision naming a model with no text replies is a 400 naming model", "/council/v2/decisions", json!({"spec_id": spec, "case": "x", "contexts": [ctx]})),
+            ("a raw read naming a model with no text replies is a 400 naming model", "/council/v2/reads", json!({"contexts": [ctx], "suffixes": ["A"], "letters": ["A", "B"]})),
+        ] {
+            if let Some((status, v)) = self.send(what, "POST", path, Some(body)) {
+                self.r.check(what, status == 400 && v["error"]["param"] == json!("model"), format!("returned {}: {}", status, v));
+            }
+        }
+        let body = json!({"context": ctx, "max_tokens": 4});
+        if let Some((status, v)) = self.send("a generation with no output to a model with no text replies is a 400 naming output", "POST", "/council/v2/generations", Some(body)) {
+            self.r.check("a generation with no output to a model with no text replies is a 400 naming output", status == 400 && v["error"]["param"] == json!("output"), format!("returned {}: {}", status, v));
+        }
     }
 }

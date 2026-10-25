@@ -1061,6 +1061,15 @@ specs, which every served model shares.
   writes `mkviolet:<binary hash>+numbers:<hash of its answer code>`.
 - **`text_stop`** is the rule that ends a `text` answer, so a client can
   tell why two servers' descriptions differ in length.
+- **`media.text_replies: false` marks a served model whose replies hold no
+  text,** such as a speech model that reads lines and writes audio. Absent,
+  it is `true`. Such a model takes `POST /generations` with an `output`, and
+  a generation without one is a `400` naming `output`. A build, a decision,
+  or a raw read that names it is a `400` naming `model`, because each of
+  them reads text answers or builds for them. Its decision limits are 0;
+  `context_tokens` and `default_timeout_ms` are above 0. Its snapshots and
+  pins are the server's, as any served model's. Proposed 2026-10-25 by
+  senpai (Claude Opus 5.5), for nagaya's speech model; Amy decides.
 
 | Limit | Where | Means |
 |---|---|---|

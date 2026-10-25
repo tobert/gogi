@@ -98,6 +98,18 @@ pub struct Media {
     pub inputs: Vec<String>,
     #[serde(default)]
     pub outputs: Vec<String>,
+    /// False for a served model whose replies hold objects and no text, such as a speech
+    /// model. It takes generations with an `output` only. Absent: true.
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub text_replies: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_yes(v: &bool) -> bool {
+    *v
 }
 
 /// Whether `pattern`, `type/subtype` or `type/*`, covers the media type `mime`.
@@ -153,6 +165,12 @@ impl ServedModel {
 
     pub fn has(&self, c: Capability) -> bool {
         self.capabilities.contains(&c)
+    }
+
+    /// Whether its replies hold text. A served model whose replies do not takes generations with
+    /// an `output` only: builds, decisions, and raw reads naming it are a `400` naming `model`.
+    pub fn text_replies(&self) -> bool {
+        self.media.as_ref().is_none_or(|m| m.text_replies)
     }
 
     /// Whether a request's `model` names this served model, by its `model` or an alias.
@@ -257,5 +275,20 @@ mod tests {
         assert_eq!(Class::default(), Class::Interactive);
         assert_eq!(serde_json::from_str::<Class>(r#""batch""#).unwrap(), Class::Batch);
         assert!(serde_json::from_str::<Class>(r#""filler""#).is_err());
+    }
+}
+
+#[cfg(test)]
+mod text_replies_tests {
+    use super::*;
+
+    #[test]
+    fn media_with_no_text_replies_says_so_and_absent_means_text() {
+        let m: Media = serde_json::from_str(r#"{"inputs": [], "outputs": ["audio/wav"], "text_replies": false}"#).unwrap();
+        assert!(!m.text_replies);
+        assert_eq!(serde_json::to_value(&m).unwrap()["text_replies"], serde_json::json!(false));
+        let m: Media = serde_json::from_str(r#"{"inputs": ["image/*"], "outputs": []}"#).unwrap();
+        assert!(m.text_replies);
+        assert!(serde_json::to_value(&m).unwrap().get("text_replies").is_none(), "true is not written");
     }
 }

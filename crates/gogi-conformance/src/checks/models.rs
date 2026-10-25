@@ -64,6 +64,12 @@ impl Suite {
         // Two served models never share a snapshot.
         let others: Vec<_> = id.models.iter().filter(|m| m.status == ModelStatus::Ready && m.model != me.model).cloned().collect();
         for m in &others {
+            if !m.text_replies() {
+                if let Some((status, v)) = self.bare("a build on a served model with no text replies", "/council/v2/contexts", named(&m.model)) {
+                    self.r.check(&format!("a build naming {}, which has no text replies, is a 400 naming model", m.model), status == 400 && v["error"]["param"] == json!("model"), (status, &v));
+                }
+                continue;
+            }
             if let Some((status, v)) = self.bare("a build on another ready served model", "/council/v2/contexts", named(&m.model)) {
                 self.r.check(&format!("{} builds the same context into a snapshot of its own", m.model), status == 200 && v["model"] == json!(m.model) && v["head"].is_string() && v["head"] != b["head"], (status, &v));
             }

@@ -55,7 +55,14 @@ pub fn run(mut opts: Opts, print: bool) -> Report {
         format!("{:x}{:x}", t & 0xffff_ffff_ffff, std::process::id())
     };
     let mut s = Suite { http: http::Http::new(&opts.url), r: Report::new(print), identity: None, model: None, nonce, request_ids: Vec::new(), request_id_faults: Vec::new() };
-    if s.identity(opts.model.as_deref()) {
+    let checked = s.identity(opts.model.as_deref());
+    if checked && !s.model.as_ref().is_some_and(|m| m.text_replies()) {
+        // A served model with no text replies takes generations with an output only.
+        s.writes_no_text();
+        s.objects();
+        s.outputs();
+        s.request_ids();
+    } else if checked {
         s.validation();
         s.models();
         s.builds();

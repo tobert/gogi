@@ -212,11 +212,21 @@ impl Suite {
         self.r.check("each served model's name and aliases name no other", names.len() == all, &names);
         for m in &id.models {
             let l = &m.limits;
-            self.r.check(
-                &format!("{}: limits are positive", m.model),
-                l.context_tokens > 0 && l.decision_context_tokens > 0 && l.snapshot_bytes > 0 && (1..=8).contains(&l.contexts_per_decision) && l.default_timeout_ms > 0,
-                l,
-            );
+            if m.text_replies() {
+                self.r.check(
+                    &format!("{}: limits are positive", m.model),
+                    l.context_tokens > 0 && l.decision_context_tokens > 0 && l.snapshot_bytes > 0 && (1..=8).contains(&l.contexts_per_decision) && l.default_timeout_ms > 0,
+                    l,
+                );
+            } else {
+                // A served model with no text replies takes no decision, so its decision limits are 0.
+                self.r.check(
+                    &format!("{}: a model with no text replies has positive limits and decision limits of 0", m.model),
+                    l.context_tokens > 0 && l.snapshot_bytes > 0 && l.default_timeout_ms > 0 && l.decision_context_tokens == 0 && l.contexts_per_decision == 0,
+                    l,
+                );
+                self.r.check(&format!("{}: a model with no text replies writes media", m.model), !m.outputs().is_empty(), &m.media);
+            }
             self.r.check(&format!("{}: decision_context_tokens is at most context_tokens", m.model), l.decision_context_tokens <= l.context_tokens, l);
             self.r.check(&format!("{}: its status is one the contract names", m.model), m.status != ModelStatus::Unknown, m.status);
         }
