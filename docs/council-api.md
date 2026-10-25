@@ -243,15 +243,23 @@ POST /council/v2/contexts
 
   A string is one text part. A part of another type, a missing member, or
   an unknown member is a `400` naming `content`, and the message names the
-  part. An empty array is a `400`. An open message's content is a string.
+  part. An empty array is a `400` naming the content, such as
+  `messages[2].content`. An open message's content is a string.
 - **A served model reads the media types in its `media.inputs`,** each
-  `type/subtype` or `type/*`. An object of any other type is a `400` that
-  names the part, such as `messages[2].content[1]`, and the message lists
-  what the served model reads. A served model without `media` reads text
-  only. An object the server does not hold is a `404` that names the part
-  and quotes the id; the client puts it and sends the request again. In a
-  request with several contexts, the part is named
-  `contexts[0].messages[2].content[1]`.
+  `type/subtype` or `type/*`. An assistant message may also hold objects of
+  a type in `media.outputs`, such as an output sent back. A served model
+  without `media`, or with empty lists, reads and writes text only.
+- **A server checks each object part in this order,** and the first rule
+  that fails gives the error, which names the part, such as
+  `messages[2].content[1]`; in a request with several contexts it is
+  `contexts[0].messages[2].content[1]`:
+  1. The id is a whole content id and the `mime` is a media type: a `400`.
+  2. The served model reads the media type: a `400` whose message names the
+     media type and lists what the served model reads.
+  3. When the server holds the object, `mime` is the media type of its put:
+     a `400` whose message names both.
+  4. The server holds the object: a `404` that quotes the id. The client
+     puts it and sends the request again.
 - **An object renders as the template reads it,** which is part of
   `template`. An object is content, never control (rule 2).
 - **Messages are the model's chat shape.** Roles are `system`, `user`,
@@ -667,8 +675,7 @@ POST /council/v2/generations
   default.
 - **`done` is the reply.** It has `model`, the reply's `content`,
   `reasoning`, and `tool_calls`, `finish`, `usage`, `head`, the context's
-  `snapshots`, and `seed`, and `parts` when it wrote an output (see
-  Outputs). A reply that ends with `max_tokens` also has
+  `snapshots`, and `seed`, and `outputs` when it wrote one (see Outputs). A reply that ends with `max_tokens` also has
   `phase`, the phase its next token would have (see Continuations).
   Without `stream`, `done` is the JSON response.
 - **`finish`** says why the reply ended:
@@ -687,7 +694,9 @@ POST /council/v2/generations
 
 - **`usage.media`**, in every response with `usage`, counts what was not
   text: `{read, written}`, each `{objects, bytes}`, with `audio_ms`,
-  `pixels`, `frames`, or `steps` when the served model reports them. It is
+  `pixels`, `frames`, or `steps` when the served model reports them.
+  `read` counts each distinct object the request names once, however many
+  parts or contexts name it, whether its model state was kept or fed. It is
   absent when the request read and wrote text only.
 - **`usage`** counts the prompt in `prompt`, `kept`, and `fed`, and the
   reply in `completion`, with its thinking also in `reasoning`.
@@ -752,7 +761,7 @@ data: {"model": "gemma-4-26b-a4b", "content": "…", "finish": "end_turn", …}
 | Event | `data` |
 |---|---|
 | `token` | One sampled token: its `id`; `piece`, the text it adds; `phase`, `reasoning`, `content`, or `call`; `p`, its untempered probability; `h`, the entropy in nats of the distribution it came from; `n`, the reply's sampled tokens so far, this one included, without a continuation's open text; and `tps`, reply tokens per second so far, when the server reports it. |
-| `part` | An output begins: `{index, mime, pending}`. `GET` on the pending id reads the bytes while the server makes them (see Outputs). |
+| `output` | An output begins: `{index, mime, pending}`. `GET` on the pending id reads the bytes while the server makes them (see Outputs). |
 | `ping` | `{}`. A server may send it at any time, such as while it feeds a long prompt. |
 | `done` | The reply, as above. The last event of a stream that succeeds. |
 | `error` | An error body, as a status response's: `{error, request_id}`. The last event of a stream that fails; no `done` follows it. |
@@ -787,12 +796,12 @@ POST /council/v2/generations
 ```
 
 ```text
-event: part
+event: output
 data: {"index": 0, "mime": "audio/wav", "pending": "pending:8c1e…41d0"}
 
 event: done
 data: {"content": "", "finish": "end_turn",
-       "parts": [{"index": 0, "id": "blake3:bcce…caf8", "mime": "audio/wav", "bytes": 2048044}],
+       "outputs": [{"index": 0, "id": "blake3:bcce…caf8", "mime": "audio/wav", "bytes": 2048044}],
        "usage": {"prompt": 31, "kept": 0, "fed": 31, "completion": 0, "reasoning": 0,
                  "media": {"read": {"objects": 0, "bytes": 0}, "written": {"objects": 1, "bytes": 2048044, "audio_ms": 21333}}}, …}
 ```
@@ -800,21 +809,30 @@ data: {"content": "", "finish": "end_turn",
 - **`output` asks the reply to write an object:** `{mime, options}`. `mime`
   is a media type that the served model's `media.outputs` covers; any other
   is a `400` naming `output.mime`, and the message lists what the served
-  model writes. `options` holds the members the served model defines, such
-  as `seconds`, `width`, or `steps`; an unknown member or a value out of
-  range is a `400` naming it, such as `output.options.seconds`. Any other
-  member of `output` is a `400`. Capability `objects` on the server.
-- **`done.parts` is each object the reply wrote, sealed:** `{index, id,
+  model writes. A served model that writes text only gives that `400`
+  whether or not the server declares `objects`. `options` holds the members
+  the served model defines, such as `seconds`, `width`, or `steps`; an
+  unknown member or a value out of range is a `400` naming it, such as
+  `output.options.seconds`. Any other member of `output` is a `400`.
+  Capability `objects` on the server.
+- **`done.outputs` is each output the reply wrote, sealed:** `{index, id,
   mime, bytes}`, in index order. `id` is the content id of the bytes, and
   the server holds the object as any object a client puts: it can evict it
   unless a keep holds it, so a client keeps the outputs it uses. A reply
-  can also carry text.
-- **A stream sends a `part` event when an output begins,** with a pending
-  id. `GET` on the pending id streams the bytes as the server makes them,
-  and ends when the part is sealed. Once the part is sealed, `GET` and
-  `HEAD` on the pending id are a `308` to the object's content id, for as
-  long as the server holds the object. A pending id the server never gave
-  is a `404`; a malformed one is a `400` naming `id`.
+  can also carry text. The reply writes its outputs whatever its `finish`.
+  A reply that ends with an `error` event seals none.
+- **The reply's message holds its outputs** as object parts after its text,
+  so a client appends the reply with them, and the next build starts from
+  the head. A reply cut by `max_tokens` sends back an open message, which
+  holds text only (see Continuations).
+- **A stream sends an `output` event when an output begins,** with a
+  pending id. `GET` on the pending id streams the bytes as the server makes
+  them, and ends when the output is sealed. Once it is sealed, `GET` and
+  `HEAD` on the pending id are a `308` to the object's content id for at
+  least 60 seconds, and then may be a `404`: the content id in `done` is
+  the name that lasts. A pending id the server never gave is a `404`; a
+  malformed one is a `400` naming `id`. Closing the stream cancels the
+  output, and its pending id is then a `404`.
 - **The same request with the same seed usually writes the same bytes,**
   under the same terms as a reply's text (see `seed`).
 - **`max_tokens` bounds the text of the reply,** as for any generation. A

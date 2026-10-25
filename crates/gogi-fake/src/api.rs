@@ -6,11 +6,11 @@ use gogi_proto::canon::spec_id_of;
 use gogi_proto::context::{Context, MediaCount, MediaUsage, Usage};
 use gogi_proto::decision::{DecisionRequest, PoolMethod, PoolWeights, check_queue_schema, queue_call};
 use gogi_proto::error::{ErrorBody, ErrorType};
-use gogi_proto::generation::{GenerationRequest, PartEvent, Phase as EventPhase, StreamEvent, TokenEvent};
+use gogi_proto::generation::{GenerationRequest, OutputEvent, Phase as EventPhase, StreamEvent, TokenEvent};
 use gogi_proto::identity::{ModelStatus, ServerIdentity};
 use gogi_proto::math::{self, Row, WeightSpec};
 use gogi_proto::message::{Message, ToolCall};
-use gogi_proto::objects::{ObjectRef, objects_of};
+use gogi_proto::objects::{Named, objects_of};
 use gogi_proto::pins::{PinsPut, is_owner};
 use gogi_proto::reads::ReadsRequest;
 use gogi_proto::spec::{Question, QuestionKind, SpecRules, parse_spec};
@@ -175,26 +175,32 @@ pub fn identity(store: &Store) -> Value {
 
 /// Refuses an object that served model `m` does not read, a `400`, or that the server does not
 /// hold, a `404`. Each error names the member, such as `messages[1].content[0]`.
-fn check_objects(store: &Store, m: &FakeModel, objects: &[(String, ObjectRef)]) -> Result<(), Resp> {
+fn check_objects(store: &Store, m: &FakeModel, objects: &[Named]) -> Result<(), Resp> {
     let id: ServerIdentity = serde_json::from_value(identity(store)).expect("the fake's identity decodes");
     let served = id.models.iter().find(|s| s.model == m.name).expect("identity lists the config's models");
     gogi_proto::objects::check_reads(served, objects).map_err(invalid)?;
-    for (at, o) in objects {
-        if !store.objects.contains_key(&o.id) {
-            return Err(err(404, "not_found", format!("nothing ran: {} names {}, which the server does not hold; PUT the object, then send the request again", at, o.id), Some(at)));
+    for Named { at, object: o, .. } in objects {
+        match store.objects.get(&o.id) {
+            Some((held, _)) if *held != o.mime => {
+                return Err(bad_param(at, format!("nothing ran: {} names {} as {}, but the server holds it as {}; send the media type of its put", at, o.id, o.mime, held)));
+            }
+            Some(_) => {}
+            None => return Err(err(404, "not_found", format!("nothing ran: {} names {}, which the server does not hold; PUT the object, then send the request again", at, o.id), Some(at))),
         }
     }
     Ok(())
 }
 
 /// What a request read and wrote that is not text, or `None` when it read and wrote text only.
-fn media_usage(store: &Store, read: &[(String, ObjectRef)], written: &[u64]) -> Option<MediaUsage> {
+fn media_usage(store: &Store, read: &[Named], written: &[u64]) -> Option<MediaUsage> {
     if read.is_empty() && written.is_empty() {
         return None;
     }
     let bytes = |id: &str| store.objects.get(id).map_or(0, |(_, b)| b.len() as u64);
+    // Each distinct object counts once, however many parts name it.
+    let distinct: HashSet<&str> = read.iter().map(|n| n.object.id.as_str()).collect();
     Some(MediaUsage {
-        read: MediaCount { objects: read.len() as u64, bytes: read.iter().map(|(_, o)| bytes(&o.id)).sum(), ..Default::default() },
+        read: MediaCount { objects: distinct.len() as u64, bytes: distinct.iter().map(|id| bytes(id)).sum(), ..Default::default() },
         written: MediaCount { objects: written.len() as u64, bytes: written.iter().sum(), ..Default::default() },
     })
 }
@@ -215,8 +221,8 @@ fn output_bytes(m: &FakeModel, seed: u64, mime: &str, prompt: &[u32], n: usize) 
 }
 
 /// The objects of each context of a request with several, named `contexts[k].messages[i]...`.
-fn objects_in(contexts: &[Context]) -> Vec<(String, ObjectRef)> {
-    contexts.iter().enumerate().flat_map(|(k, c)| objects_of(&c.messages).into_iter().map(move |(at, o)| (format!("contexts[{}].{}", k, at), o))).collect()
+fn objects_in(contexts: &[Context]) -> Vec<Named> {
+    contexts.iter().enumerate().flat_map(|(k, c)| objects_of(&c.messages).into_iter().map(move |n| Named { at: format!("contexts[{}].{}", k, n.at), ..n })).collect()
 }
 
 /// The served model a request names, or the `400` or `503` that refuses it.
@@ -707,7 +713,11 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
         return context_full(prompt.tokens.len(), limit);
     }
     let stream = req.stream.unwrap_or(false);
-    let last = c.messages.last().and_then(|m| m.text()).unwrap_or("");
+    // The text of the last message, with the text parts of a message of parts joined.
+    let last: String = c.messages.last().and_then(|m| m.content.as_ref()).map(|content| content.parts().into_iter().filter_map(|p| match p {
+        gogi_proto::Part::Text { text } => Some(text),
+        gogi_proto::Part::Object { .. } => None,
+    }).collect()).unwrap_or_default();
     let fail = last.contains("FAIL");
     if fail && !stream {
         return err(500, "internal", "nothing was returned: the fake fails a reply whose context ends with a message containing FAIL", None);
@@ -797,12 +807,34 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
         }
     }).collect();
     let unparsed = tool_calls.len() != written.len();
+    // An output is written whatever the reply's finish. Its object follows the reply's text in the
+    // reply's message, so the held head is the context that a client sends back.
+    let mut outputs = Vec::new();
+    if let Some((mime, size)) = &output {
+        let bytes = output_bytes(&m, seed, mime, &prompt.tokens, *size);
+        let id = gogi_proto::content_id(&bytes);
+        store.objects.entry(id.clone()).or_insert_with(|| (mime.clone(), bytes.clone()));
+        if stream {
+            let pending = format!("pending:{}", blake3::hash(format!("{}-{}", id, store.pending.len()).as_bytes()).to_hex());
+            store.pending.insert(pending.clone(), id.clone());
+            events.insert(0, StreamEvent::Output(OutputEvent { index: 0, mime: mime.clone(), pending }));
+        }
+        outputs.push(json!({"index": 0, "id": id, "mime": mime, "bytes": bytes.len()}));
+    }
     let reply = Message {
         reasoning: Some(reasoning.clone()).filter(|r| !r.is_empty()),
         tool_calls: tool_calls.clone(),
         ..Message::assistant(content.clone())
     };
-    let reply = Message { content: Some(content.clone()).filter(|c| !c.is_empty()).map(Into::into), ..reply };
+    let text = Some(content.clone()).filter(|c| !c.is_empty());
+    let reply_content = if outputs.is_empty() {
+        text.map(Into::into)
+    } else {
+        let mut parts: Vec<gogi_proto::Part> = text.map(|text| gogi_proto::Part::Text { text }).into_iter().collect();
+        parts.extend(outputs.iter().map(|o| gogi_proto::Part::Object { id: o["id"].as_str().unwrap_or("").to_string(), mime: o["mime"].as_str().unwrap_or("").to_string() }));
+        Some(gogi_proto::Content::Parts(parts))
+    };
+    let reply = Message { content: reply_content, ..reply };
     let mut messages: Vec<Message> = c.messages.clone();
     if open.is_some() {
         messages.pop();
@@ -830,17 +862,7 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
         let held = build(store, &m, &Context { messages, ..c.clone() }, false);
         (json!(held.head), held.infos(store))
     };
-    let mut parts = Vec::new();
-    if let Some((mime, size)) = &output {
-        let bytes = output_bytes(&m, seed, mime, &prompt.tokens, *size);
-        let id = gogi_proto::content_id(&bytes);
-        let pending = format!("pending:{}", blake3::hash(format!("{}-{}", id, store.pending.len()).as_bytes()).to_hex());
-        store.objects.entry(id.clone()).or_insert_with(|| (mime.clone(), bytes.clone()));
-        store.pending.insert(pending.clone(), id.clone());
-        events.insert(0, StreamEvent::Part(PartEvent { index: 0, mime: mime.clone(), pending }));
-        parts.push(json!({"index": 0, "id": id, "mime": mime, "bytes": bytes.len()}));
-    }
-    let written: Vec<u64> = parts.iter().map(|p| p["bytes"].as_u64().unwrap_or(0)).collect();
+    let written: Vec<u64> = outputs.iter().map(|o| o["bytes"].as_u64().unwrap_or(0)).collect();
     let usage = Usage { prompt: prompt.tokens.len() as u64, kept: b.kept as u64, fed: (prompt.tokens.len() - b.kept) as u64, completion: n as u64, reasoning: thought, media: media_usage(store, &objects_of(&c.messages), &written) };
     let mut done = json!({
         "content": content, "reasoning": reasoning,
@@ -852,8 +874,8 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
     if finish == "max_tokens" {
         done["phase"] = json!(next);
     }
-    if !parts.is_empty() {
-        done["parts"] = json!(parts);
+    if !outputs.is_empty() {
+        done["outputs"] = json!(outputs);
     }
     if stream {
         events.push(StreamEvent::Done(Box::new(serde_json::from_value(done).expect("the fake's done decodes"))));
@@ -895,7 +917,7 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
         return invalid(e);
     }
     let mut objects = objects_in(&req.contexts);
-    objects.extend(req.case_media.iter().enumerate().map(|(i, o)| (format!("case_media[{}]", i), o.clone())));
+    objects.extend(req.case_media.iter().enumerate().map(|(i, o)| Named { at: format!("case_media[{}]", i), object: o.clone(), assistant: false }));
     if let Err(r) = check_objects(store, &m, &objects) {
         return r;
     }

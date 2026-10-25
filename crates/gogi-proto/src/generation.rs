@@ -92,19 +92,19 @@ impl Output {
     }
 }
 
-/// An object a reply wrote, sealed: its content id, media type, and size.
+/// An output of a reply, sealed: its content id, media type, and size.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReplyPart {
+pub struct SealedOutput {
     pub index: u64,
     pub id: crate::ids::ContentId,
     pub mime: String,
     pub bytes: u64,
 }
 
-/// The start of an object a reply writes: its index, media type, and the pending id that reads its
-/// bytes while it is made.
+/// The start of an output: its index, media type, and the pending id that reads its bytes while
+/// it is made.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PartEvent {
+pub struct OutputEvent {
     pub index: u64,
     pub mime: String,
     pub pending: String,
@@ -139,7 +139,9 @@ pub struct RideAnswers {
 }
 
 impl GenerationRequest {
-    /// Checks the context, a positive `max_tokens`, the sample, and each riding decision's `ask`.
+    /// Checks the context, a positive `max_tokens`, the sample, each riding decision's spec id and
+    /// `ask`, and the form of `output.mime`. Whether the served model writes that media type needs
+    /// its identity: a server calls [`Output::check`] too.
     pub fn validate(&self) -> Result<(), Invalid> {
         self.context.check()?;
         if self.max_tokens == 0 {
@@ -294,13 +296,14 @@ pub struct GenerationDone {
     /// when it is empty, for `content`. A reply cut in a `call` cannot be continued.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<Phase>,
-    /// The objects the reply wrote, sealed, in index order.
+    /// The outputs the reply wrote, sealed, in index order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub parts: Vec<ReplyPart>,
+    pub outputs: Vec<SealedOutput>,
 }
 
 impl GenerationDone {
-    /// The reply as the assistant message a client appends to its context.
+    /// The reply as the assistant message a client appends to its context. Its outputs follow its
+    /// text as object parts.
     /// `None` when a call did not parse: a client sends that as text, not as a call.
     pub fn as_message(&self) -> Option<crate::message::Message> {
         let mut calls = Vec::new();
@@ -312,9 +315,16 @@ impl GenerationDone {
                 ReplyToolCall::Unparsed { .. } => return None,
             }
         }
+        let content = if self.outputs.is_empty() {
+            Some(self.content.clone()).filter(|c| !c.is_empty()).map(crate::message::Content::Text)
+        } else {
+            let mut parts: Vec<crate::message::Part> = Some(self.content.clone()).filter(|c| !c.is_empty()).map(|text| crate::message::Part::Text { text }).into_iter().collect();
+            parts.extend(self.outputs.iter().map(|o| crate::message::Part::Object { id: o.id.to_string(), mime: o.mime.clone() }));
+            Some(crate::message::Content::Parts(parts))
+        };
         Some(crate::message::Message {
             role: crate::message::Role::Assistant,
-            content: Some(self.content.clone()).filter(|c| !c.is_empty()).map(crate::message::Content::Text),
+            content,
             reasoning: Some(self.reasoning.clone()).filter(|r| !r.is_empty()),
             tool_calls: calls,
             tool_call_id: None,
@@ -433,8 +443,8 @@ fn join_pieces(tokens: &[TokenEvent], parts: [(&str, bool); 2], where_: &str) ->
 #[derive(Clone, Debug, PartialEq)]
 pub enum StreamEvent {
     Token(TokenEvent),
-    /// An object of the reply begins; its pending id reads the bytes while they are made.
-    Part(PartEvent),
+    /// An output of the reply begins; its pending id reads the bytes while they are made.
+    Output(OutputEvent),
     /// Sent while nothing else is; it carries `{}`.
     Ping,
     Done(Box<GenerationDone>),
@@ -449,7 +459,7 @@ impl StreamEvent {
         let bad = |e: serde_json::Error| format!("a {} event does not decode: {}", name, e);
         Ok(Some(match name {
             "token" => StreamEvent::Token(serde_json::from_str(data).map_err(bad)?),
-            "part" => StreamEvent::Part(serde_json::from_str(data).map_err(bad)?),
+            "output" => StreamEvent::Output(serde_json::from_str(data).map_err(bad)?),
             "ping" => StreamEvent::Ping,
             "done" => StreamEvent::Done(Box::new(serde_json::from_str(data).map_err(bad)?)),
             "error" => StreamEvent::Error(serde_json::from_str(data).map_err(bad)?),
@@ -461,7 +471,7 @@ impl StreamEvent {
     pub fn name(&self) -> &'static str {
         match self {
             StreamEvent::Token(_) => "token",
-            StreamEvent::Part(_) => "part",
+            StreamEvent::Output(_) => "output",
             StreamEvent::Ping => "ping",
             StreamEvent::Done(_) => "done",
             StreamEvent::Error(_) => "error",
@@ -472,7 +482,7 @@ impl StreamEvent {
     pub fn data(&self) -> String {
         match self {
             StreamEvent::Token(t) => serde_json::to_string(t),
-            StreamEvent::Part(p) => serde_json::to_string(p),
+            StreamEvent::Output(o) => serde_json::to_string(o),
             StreamEvent::Ping => Ok("{}".to_string()),
             StreamEvent::Done(d) => serde_json::to_string(d),
             StreamEvent::Error(e) => serde_json::to_string(e),
@@ -496,6 +506,16 @@ mod tests {
                "tool_calls": [{"id": "c2", "name": "ls", "input": {"path": "/tmp", "all": true}}],
                "finish": "tool_use", "usage": {"prompt": 1852, "kept": 1840, "fed": 12, "completion": 30, "reasoning": 4},
                "head": snap("77aa"), "snapshots": [{"id": snap("9a1e"), "message": 1, "tokens": 412}]})
+    }
+
+    #[test]
+    fn a_reply_message_holds_its_outputs_after_its_text() {
+        let mut v = done();
+        v["tool_calls"] = json!([]);
+        v["content"] = json!("here");
+        v["outputs"] = json!([{"index": 0, "id": snap("bc"), "mime": "audio/wav", "bytes": 9}]);
+        let m = serde_json::from_value::<GenerationDone>(v).unwrap().as_message().unwrap();
+        assert_eq!(m.content, Some(crate::message::Content::Parts(vec![crate::message::Part::Text { text: "here".into() }, crate::message::Part::Object { id: snap("bc"), mime: "audio/wav".into() }])));
     }
 
     #[test]
@@ -656,6 +676,12 @@ mod tests {
         ride(Some(vec!["q".into()])).validate().unwrap();
         assert_eq!(ride(Some(vec![])).validate().unwrap_err().param.as_deref(), Some("decisions"));
         assert_eq!(ride(Some(vec!["q".into(), "q".into()])).validate().unwrap_err().param.as_deref(), Some("decisions"));
+        let model: crate::identity::ServedModel = serde_json::from_value(json!({"model": "m", "status": "ready", "weight_hash": "w", "tokenizer_hash": "t", "template": "x", "engine": "e",
+            "limits": {"context_tokens": 8, "decision_context_tokens": 8, "snapshot_bytes": 1, "contexts_per_decision": 8, "default_timeout_ms": 1}, "capabilities": [],
+            "media": {"inputs": [], "outputs": ["audio/*"]}})).unwrap();
+        Output { mime: "audio/wav".into(), options: Map::new() }.check(&model).unwrap();
+        let e = Output { mime: "image/png".into(), options: Map::new() }.check(&model).unwrap_err();
+        assert!(e.param.as_deref() == Some("output.mime") && e.message.contains("text and audio/*"), "{e:?}");
         let out = |mime: &str| GenerationRequest { output: Some(Output { mime: mime.into(), options: Map::new() }), ..r.clone() };
         out("image/png").validate().unwrap();
         assert_eq!(out("Image/PNG").validate().unwrap_err().param.as_deref(), Some("output.mime"));

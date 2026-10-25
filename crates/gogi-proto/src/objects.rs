@@ -59,15 +59,26 @@ impl ObjectRef {
     }
 }
 
-/// Each object that messages name, with the member that names it, such as
-/// `messages[2].content[1]`.
-pub fn objects_of(messages: &[crate::message::Message]) -> Vec<(String, ObjectRef)> {
+/// An object a request names: the member that names it, such as `messages[2].content[1]` or
+/// `case_media[0]`, the object, and whether an assistant message holds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Named {
+    pub at: String,
+    pub object: ObjectRef,
+    /// An assistant message may also hold an object of a type the served model writes, such as an
+    /// output sent back.
+    pub assistant: bool,
+}
+
+/// Each object that messages name.
+pub fn objects_of(messages: &[crate::message::Message]) -> Vec<Named> {
     let mut out = Vec::new();
     for (i, m) in messages.iter().enumerate() {
         if let Some(crate::message::Content::Parts(parts)) = &m.content {
             for (j, p) in parts.iter().enumerate() {
                 if let crate::message::Part::Object { id, mime } = p {
-                    out.push((format!("messages[{}].content[{}]", i, j), ObjectRef { id: id.clone(), mime: mime.clone() }));
+                    let object = ObjectRef { id: id.clone(), mime: mime.clone() };
+                    out.push(Named { at: format!("messages[{}].content[{}]", i, j), object, assistant: m.role == crate::message::Role::Assistant });
                 }
             }
         }
@@ -75,11 +86,12 @@ pub fn objects_of(messages: &[crate::message::Message]) -> Vec<(String, ObjectRe
     out
 }
 
-/// Checks that served model `model` reads the media type of each object: otherwise a `400`
-/// that names the member, the media type, and the types the served model reads.
-pub fn check_reads(model: &crate::identity::ServedModel, objects: &[(String, ObjectRef)]) -> Result<(), Invalid> {
-    for (at, o) in objects {
-        if !model.reads(&o.mime) {
+/// Checks that served model `model` reads the media type of each object, or writes it when an
+/// assistant message holds it: otherwise a `400` that names the member, the media type, and the
+/// types the served model reads.
+pub fn check_reads(model: &crate::identity::ServedModel, objects: &[Named]) -> Result<(), Invalid> {
+    for Named { at, object: o, assistant } in objects {
+        if !model.reads(&o.mime) && !(*assistant && model.writes(&o.mime)) {
             let inputs = model.inputs();
             let reads = if inputs.is_empty() { "text only".to_string() } else { format!("text and {}", inputs.join(", ")) };
             return Err(Invalid::param(at.clone(), format!("nothing ran: {} is {} of media type {}, and {} reads {}", at, o.id, o.mime, model.model, reads)));

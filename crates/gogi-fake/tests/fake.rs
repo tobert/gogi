@@ -707,3 +707,14 @@ fn a_damaged_object_file_drops_the_object_and_the_server_starts() {
     assert_eq!(code, 404);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn a_call_hook_reads_the_text_parts_of_the_last_message() {
+    let s = Server::start(Config::default()).unwrap();
+    let tools = json!([{"name": "shell", "input_schema": {"type": "object", "properties": {}}}]);
+    let id = put_object(&s, b"a sound");
+    let c = json!({"thinking": false, "tools": tools, "messages": [{"role": "user", "content": [{"type": "text", "text": "CALL the tool"}, {"type": "object", "id": id, "mime": "audio/wav"}]}]});
+    let (code, d) = post(&s, "/council/v2/generations", json!({"model": "toy", "context": c, "max_tokens": 64, "sample": {"temperature": 0}}));
+    assert_eq!(code, 200, "{d}");
+    assert_eq!(d["finish"], "tool_use", "{d}");
+}

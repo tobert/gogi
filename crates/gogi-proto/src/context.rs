@@ -133,10 +133,18 @@ impl Context {
     }
 
     /// Checks a context that a decision or a raw read reads, the `i`th of a request: an error
-    /// names `continue` when the context is open or breaks a rule of an open message, and
-    /// `contexts` otherwise. `what` names the request and its verb, such as "a decision reads".
+    /// names `continue` when the context is open or breaks a rule of an open message, the member
+    /// under `contexts[i]` when the error names one, such as `contexts[0].messages[2].content[1]`,
+    /// and `contexts` otherwise. `what` names the request and its verb, such as "a decision reads".
     pub fn check_read(&self, i: usize, what: &str) -> Result<(), Invalid> {
-        let named = |e: Invalid| Invalid::param(if e.param.as_deref() == Some("continue") { "continue" } else { "contexts" }, format!("contexts[{}]: {}", i, e.message));
+        let named = |e: Invalid| {
+            let param = match e.param.as_deref() {
+                Some("continue") => "continue".to_string(),
+                Some(p) if p.starts_with("messages[") => format!("contexts[{}].{}", i, p),
+                _ => "contexts".to_string(),
+            };
+            Invalid::param(param, format!("contexts[{}]: {}", i, e.message))
+        };
         self.check().map_err(named)?;
         if self.open().is_some() {
             return Err(Invalid::param("continue", format!("contexts[{}]: {} no open message; send continue: true only to a generation", i, what)));
@@ -241,6 +249,15 @@ mod tests {
 
     fn snap(p: &str) -> String {
         format!("blake3:{p}{}", "0".repeat(64 - p.len()))
+    }
+
+    #[test]
+    fn a_read_names_a_part_under_its_context() {
+        use crate::message::{Content, Part};
+        let bad = Message { content: Some(Content::Parts(vec![Part::Object { id: "blake3:ab".into(), mime: "image/png".into() }])), ..Message::user("") };
+        let c = Context { messages: vec![Message::user("u"), bad], ..Default::default() };
+        let e = c.check_read(3, "a decision reads").unwrap_err();
+        assert_eq!(e.param.as_deref(), Some("contexts[3].messages[1].content[0]"), "{e:?}");
     }
 
     #[test]

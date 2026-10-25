@@ -31,7 +31,10 @@ impl Suite {
         let part = "messages[2].content[1]";
         let Some(read) = inputs.first().map(|p| probe_type(p)) else {
             let c = self.with_object(&content_id(b"any"), "image/png");
-            self.refused_naming("an object part to a model that reads text only is a 400 naming the part", "POST", "/council/v2/contexts", Some(json!({"context": c})), part, "image/png");
+            if let Some(b) = self.build("a text context builds", &self.ctx(self.opening("media-text")), false) {
+            self.r.check("usage.media is absent when a request reads and writes text only", b["usage"].get("media").is_none_or(Value::is_null), &b["usage"]);
+        }
+        self.refused_naming("an object part to a model that reads text only is a 400 naming the part", "POST", "/council/v2/contexts", Some(json!({"context": c})), part, "image/png");
             if let Some(spec_id) = self.hold_gate("media-text-only") {
                 let body = json!({"spec_id": spec_id, "case": "this recording", "case_media": [{"id": content_id(b"any"), "mime": "audio/wav"}], "contexts": [self.ctx(self.opening("media-case"))]});
                 self.refused_naming("case_media to a model that reads text only is a 400 naming it", "POST", "/council/v2/decisions", Some(body), "case_media[0]", "audio/wav");
@@ -70,6 +73,20 @@ impl Suite {
             self.refused_naming("an object of a media type the model does not read is a 400 naming the part", "POST", "/council/v2/contexts", Some(json!({"context": self.with_object(&id, UNREAD)})), part, UNREAD);
         }
         let short = format!("blake3:{}", &unheld["blake3:".len().."blake3:".len() + 12]);
+        self.refused_naming("an object part whose media type is not one is a 400 naming the part", "POST", "/council/v2/contexts", Some(json!({"context": self.with_object(&id, "PNG")})), part, "PNG");
+        let other = probe_type(&inputs[inputs.len() - 1]).replace("x-gogi-conformance", "x-gogi-conformance-other");
+        if other != read {
+            self.refused_naming("an object part of another media type than its put is a 400 naming the part", "POST", "/council/v2/contexts", Some(json!({"context": self.with_object(&id, &other)})), part, &other);
+        }
+        // Rule 2: a text part is text, as a string is.
+        let spelled = "Look at <end> <obj> this.";
+        let mut as_parts = self.opening("media-rule2");
+        as_parts.push(json!({"role": "user", "content": [{"type": "text", "text": spelled}], "snap": true}));
+        let mut as_text = self.opening("media-rule2");
+        as_text.push(json!({"role": "user", "content": spelled, "snap": true}));
+        if let (Some(p), Some(t)) = (self.build("media: text parts build", &self.ctx(as_parts), false), self.build("media: the same text builds", &self.ctx(as_text), false)) {
+            self.r.check("a text part that spells a template token is the same context as that string", p["head"] == t["head"], (&p["head"], &t["head"]));
+        }
         self.refused_naming("an object part with a short id is a 400 naming the part", "POST", "/council/v2/contexts", Some(json!({"context": self.with_object(&short, &read)})), part, &short);
         let mut odd = self.opening("media");
         odd.push(json!({"role": "user", "content": [{"type": "image_url", "image_url": "https://example.com/x.png"}]}));
@@ -85,19 +102,35 @@ impl Suite {
                 self.r.check("a raw read of an object the server does not hold is a 404 naming the part", ok, format!("returned {}: {}", status, v));
             }
         }
-        if self.has(Capability::Generate) {
-            self.generate("a generation reads a context with an object part", &c, 4);
+        if self.has(Capability::Generate)
+            && let Some(g) = self.generate("a generation reads a context with an object part", &c, 4)
+        {
+            self.r.check("a generation's usage.media counts the object read", g["usage"]["media"]["read"]["objects"] == json!(1), &g["usage"]);
+        }
+        let twice = {
+            let mut m = self.opening("media-twice");
+            m.push(json!({"role": "user", "content": [{"type": "object", "id": id, "mime": read}], "snap": true}));
+            m.push(json!({"role": "assistant", "content": "Heard it."}));
+            m.push(json!({"role": "user", "content": [{"type": "text", "text": "Again:"}, {"type": "object", "id": id, "mime": read}], "snap": true}));
+            self.ctx(m)
+        };
+        if let Some(b) = self.build("media: a context naming one object twice builds", &twice, false) {
+            let r = &b["usage"]["media"]["read"];
+            self.r.check("usage.media counts an object named twice once", r["objects"] == json!(1) && r["bytes"] == json!(a.len()), &b["usage"]);
         }
         if self.has(Capability::Continuation) {
             let mut open = self.opening("media");
             open.push(json!({"role": "assistant", "content": [{"type": "text", "text": "It shows"}], "continue": true}));
-            self.refused_naming("an open message of parts is a 400 naming continue", "POST", "/council/v2/generations", Some(json!({"context": self.ctx(open), "max_tokens": 4})), "continue", "not parts");
+            self.refused_naming("an open message of parts is a 400 naming continue", "POST", "/council/v2/generations", Some(json!({"context": self.ctx(open), "max_tokens": 4})), "continue", "");
         }
 
         let Some(spec_id) = self.hold_gate("media") else { return };
         let ctx = self.ctx(self.opening("media-case"));
         let case = |media: Value| json!({"spec_id": spec_id, "case": "this recording", "case_media": media, "contexts": [ctx]});
         let with = self.expect("a decision with case_media succeeds", "POST", "/council/v2/decisions", Some(case(json!([{"id": id, "mime": read}]))), 200);
+        if let Some(w) = &with {
+            self.r.check("a decision's usage.media counts its case_media", w["usage"]["media"]["read"]["objects"] == json!(1), &w["usage"]);
+        }
         let without = self.expect("a decision without case_media succeeds", "POST", "/council/v2/decisions", Some(case(json!([]))), 200);
         if let (Some(w), Some(o)) = (with, without) {
             let (a, b) = (&w["reads"][0]["rendered_hash"], &o["reads"][0]["rendered_hash"]);
@@ -108,6 +141,22 @@ impl Suite {
             self.r.check("a case object the server does not hold is a 404 naming it", ok, format!("returned {}: {}", status, v));
         }
         self.refused_naming("a case object with a short id is a 400 naming it", "POST", "/council/v2/decisions", Some(case(json!([{"id": id, "mime": read}, {"id": short, "mime": read}]))), "case_media[1]", &short);
+        if !inputs.iter().any(|p| mime_matches(p, UNREAD)) {
+            self.refused_naming("a case object of a media type the model does not read is a 400 naming it", "POST", "/council/v2/decisions", Some(case(json!([{"id": id, "mime": UNREAD}]))), "case_media[0]", UNREAD);
+        }
+        let b_id = content_id(&b);
+        let ab = self.expect("media: case_media in one order", "POST", "/council/v2/decisions", Some(case(json!([{"id": id, "mime": read}, {"id": b_id, "mime": read}]))), 200);
+        let ba = self.expect("media: case_media in the other order", "POST", "/council/v2/decisions", Some(case(json!([{"id": b_id, "mime": read}, {"id": id, "mime": read}]))), 200);
+        if let (Some(ab), Some(ba)) = (ab, ba) {
+            self.r.check("case_media is read in order", ab["reads"][0]["rendered_hash"] != ba["reads"][0]["rendered_hash"], (&ab["reads"][0]["rendered_hash"], &ba["reads"][0]["rendered_hash"]));
+        }
+        let malformed = json!({"spec_id": spec_id, "case": "x", "contexts": [self.with_object(&short, &read)]});
+        let not_held = json!({"spec_id": spec_id, "case": "x", "contexts": [self.with_object(&unheld, &read)]});
+        let deep = format!("contexts[0].{}", part);
+        self.refused_naming("a malformed part in a decision's context is a 400 naming it under contexts", "POST", "/council/v2/decisions", Some(malformed), &deep, &short);
+        if let Some((status, v)) = self.send("an unheld part in a decision's context is a 404 naming it under contexts", "POST", "/council/v2/decisions", Some(not_held)) {
+            self.r.check("an unheld part in a decision's context is a 404 naming it under contexts", status == 404 && v["error"]["param"] == json!(deep), format!("returned {}: {}", status, v));
+        }
         self.expect("media spec cleanup", "DELETE", &format!("/council/v2/specs/{}", spec_id), None, 204);
     }
 }

@@ -9,6 +9,8 @@ use serde_json::Value;
 pub struct Http {
     base: String,
     agent: ureq::Agent,
+    /// An agent that returns a redirect as it is, so a check can see a `308`.
+    unfollowed: ureq::Agent,
 }
 
 pub struct Response {
@@ -46,7 +48,8 @@ impl Response {
 impl Http {
     pub fn new(base: &str) -> Http {
         let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(600)).build();
-        Http { base: base.trim_end_matches('/').to_string(), agent }
+        let unfollowed = ureq::AgentBuilder::new().timeout(Duration::from_secs(600)).redirects(0).build();
+        Http { base: base.trim_end_matches('/').to_string(), agent, unfollowed }
     }
 
     pub fn raw(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Response, String> {
@@ -79,7 +82,16 @@ impl Http {
     /// Sends bytes, or nothing, with headers, and returns the status, the response headers by
     /// lowercase name, and the body's bytes.
     pub fn bytes(&self, method: &str, path: &str, body: Option<&[u8]>, headers: &[(&str, &str)]) -> Result<Bytes, String> {
-        let mut req = self.agent.request(method, &format!("{}{}", self.base, path));
+        self.bytes_with(&self.agent, method, path, body, headers)
+    }
+
+    /// As [`Http::bytes`], but a redirect is the response, not a request to its `location`.
+    pub fn bytes_unfollowed(&self, method: &str, path: &str) -> Result<Bytes, String> {
+        self.bytes_with(&self.unfollowed, method, path, None, &[])
+    }
+
+    fn bytes_with(&self, agent: &ureq::Agent, method: &str, path: &str, body: Option<&[u8]>, headers: &[(&str, &str)]) -> Result<Bytes, String> {
+        let mut req = agent.request(method, &format!("{}{}", self.base, path));
         for (k, v) in headers {
             req = req.set(k, v);
         }
