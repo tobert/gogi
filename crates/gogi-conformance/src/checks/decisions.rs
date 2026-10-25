@@ -78,8 +78,12 @@ impl Suite {
     /// Posts the suite's spec (`verdict`, `undo`, `risky`) and returns its id.
     pub(crate) fn hold_gate(&mut self, label: &str) -> Option<String> {
         let spec = self.gate_spec(label);
-        let a = self.expect("spec post succeeds", "POST", "/council/v2/specs", Some(spec), 200)?;
-        a["spec_id"].as_str().map(String::from)
+        let a = self.expect(&format!("spec post for {} succeeds", label), "POST", "/council/v2/specs", Some(spec), 200)?;
+        let id = a["spec_id"].as_str().map(String::from);
+        if id.is_none() {
+            self.r.fail(&format!("spec post for {} returns a spec_id", label), a.to_string());
+        }
+        id
     }
 
     pub(crate) fn decisions(&mut self) {

@@ -121,6 +121,10 @@ impl Suite {
         let path = format!("/council/v2/keeps/{}", owner);
         let unheld = content_id(b"never put either");
         self.refused("an owner that keeps nothing is a 404", "GET", &path, None, 404);
+        for method in ["GET", "DELETE"] {
+            self.refused(&format!("{} of a keep owner of 129 characters is refused", method), method, &format!("/council/v2/keeps/{}", "k".repeat(129)), None, 400);
+        }
+        self.refused("a keep owner of 129 characters is refused", "PUT", &format!("/council/v2/keeps/{}", "k".repeat(129)), Some(json!({"objects": [], "ttl_s": 5})), 400);
         let Some(p) = self.expect("a keep succeeds", "PUT", &path, Some(json!({"objects": [id, unheld], "ttl_s": 120})), 200) else { return };
         if let Some(r) = self.decode::<KeepsPutResult>("a keep response has the contract's fields", &p) {
             self.r.check("a keep on an object the server does not hold reports held false", r.objects.len() == 2 && r.objects[0].held && !r.objects[1].held, &p);

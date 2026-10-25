@@ -86,7 +86,7 @@ pub struct RidingDecision {
 /// A riding decision's answers, in a decision read's shape.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RideAnswers {
-    pub spec_id: String,
+    pub spec_id: crate::ids::SpecId,
     pub when: RideWhen,
     pub answers: serde_json::Map<String, Value>,
 }

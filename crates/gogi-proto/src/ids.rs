@@ -99,6 +99,11 @@ prefixed_id!(
     SpecId,
     "spec id"
 );
+prefixed_id!(
+    /// The content id of other bytes, such as the text a decision read was conditioned on.
+    ContentId,
+    "content id"
+);
 
 #[cfg(test)]
 mod tests {

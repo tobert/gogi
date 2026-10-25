@@ -50,7 +50,7 @@ impl PinsPut {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PinHeld {
-    pub id: String,
+    pub id: SnapshotId,
     /// `false`: the server does not hold the snapshot, so the pin keeps nothing.
     pub held: bool,
 }
@@ -82,7 +82,11 @@ fn pinned_ids<'de, D: Deserializer<'de>>(de: D) -> Result<Vec<String>, D::Error>
         Id(String),
         Object { id: String },
     }
-    Ok(Vec::<Entry>::deserialize(de)?.into_iter().map(|e| match e { Entry::Id(id) | Entry::Object { id } => id }).collect())
+    let ids: Vec<String> = Vec::<Entry>::deserialize(de)?.into_iter().map(|e| match e { Entry::Id(id) | Entry::Object { id } => id }).collect();
+    match ids.iter().find_map(|id| crate::ids::content_id_problem(id)) {
+        Some(p) => Err(serde::de::Error::custom(format!("not a snapshot id: {}", p))),
+        None => Ok(ids),
+    }
 }
 
 /// An owner that pins a snapshot, and the seconds its pins have left.
@@ -110,6 +114,15 @@ pub struct SnapshotDetail {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_response_with_an_id_that_is_not_whole_does_not_decode() {
+        assert!(serde_json::from_value::<PinSet>(json!({"owner": "k", "snapshots": ["snap:abc"], "expires_in_s": 1})).is_err());
+        assert!(serde_json::from_value::<PinsPutResult>(json!({"owner": "k", "snapshots": [{"id": "blake3:ab", "held": true}], "expires_in_s": 1})).is_err());
+        let r = |hash: &str| serde_json::from_value::<crate::decision::Read>(json!({"context": 0, "snapshot": null, "answers": {}, "rendered_hash": hash}));
+        assert!(r(&format!("blake3:{}", "e".repeat(64))).is_ok());
+        assert!(r(&"e".repeat(64)).is_err() && r("sha256:ab").is_err());
+    }
 
     #[test]
     fn a_pin_on_an_id_that_is_not_a_whole_content_id_is_refused_by_name() {
@@ -148,15 +161,15 @@ mod tests {
 
     #[test]
     fn a_put_response_decodes_with_held_flags_and_a_null_expiry() {
-        let r: PinsPutResult = serde_json::from_value(json!({"owner": "k", "snapshots": [{"id": "blake3:x", "held": false}], "expires_in_s": null})).unwrap();
+        let r: PinsPutResult = serde_json::from_value(json!({"owner": "k", "snapshots": [{"id": "blake3:1111111111111111111111111111111111111111111111111111111111111111", "held": false}], "expires_in_s": null})).unwrap();
         assert_eq!((r.snapshots[0].held, r.expires_in_s), (false, None));
     }
 
     #[test]
     fn a_get_response_accepts_ids_or_objects() {
-        for snapshots in [json!(["blake3:a"]), json!([{"id": "blake3:a", "held": true}])] {
+        for snapshots in [json!(["blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]), json!([{"id": "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "held": true}])] {
             let s: PinSet = serde_json::from_value(json!({"owner": "k", "snapshots": snapshots, "expires_in_s": 9})).unwrap();
-            assert_eq!(s.snapshots, ["blake3:a"]);
+            assert_eq!(s.snapshots, ["blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
         }
     }
 }

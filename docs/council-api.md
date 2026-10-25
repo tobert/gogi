@@ -317,6 +317,7 @@ PUT /council/v2/pins/kernel-7f3a
   the same context built twice may get two ids.
 - **An owner is any printable name a client chooses,** up to 128
   characters and without a slash, such as a kernel id. It names pins only.
+  Any other owner is a `400` naming `owner`, on `PUT`, `GET`, and `DELETE`.
 - **`PUT` replaces the owner's whole set** and renews its time, so a client
   that restarts sends its set again and drops what it does not need.
   `DELETE` drops the set; `GET` lists it as `{owner, snapshots: [<id>…],

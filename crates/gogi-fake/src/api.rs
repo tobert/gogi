@@ -64,6 +64,16 @@ fn path_id(id: &str) -> Result<String, Resp> {
     }
 }
 
+/// An owner from a path, or the `400` that names it.
+fn path_owner(owner: &str) -> Result<String, Resp> {
+    let owner = unescape(owner);
+    if is_owner(&owner) {
+        Ok(owner)
+    } else {
+        Err(bad_param("owner", format!("nothing changed: the owner {:?} is not printable text of 1 to 128 characters without a slash", owner)))
+    }
+}
+
 fn invalid(e: gogi_proto::Invalid) -> Resp {
     match e.param {
         Some(p) => bad_param(&p, e.message),
@@ -170,13 +180,20 @@ pub fn handle(store: &mut Store, method: &str, path: &str, headers: &[(String, S
             Err(r) => r,
         },
         ("PUT", ["pins", owner]) => pins_put(store, &unescape(owner), body),
-        ("GET", ["pins", owner]) => match store.pins.get(&unescape(owner)) {
-            Some(p) => Resp::Json(200, json!({"owner": unescape(owner), "snapshots": p.snapshots, "expires_in_s": store.expires_in(p.expires)})),
-            None => not_found(format!("{} pins nothing", unescape(owner))),
+        ("GET", ["pins", owner]) => match path_owner(owner) {
+            Ok(owner) => match store.pins.get(&owner) {
+                Some(p) => Resp::Json(200, json!({"owner": owner, "snapshots": p.snapshots, "expires_in_s": store.expires_in(p.expires)})),
+                None => not_found(format!("{} pins nothing", owner)),
+            },
+            Err(r) => r,
         },
         ("DELETE", ["pins", owner]) => {
-            if store.pins.remove(&unescape(owner)).is_none() {
-                return not_found(format!("{} pins nothing", unescape(owner)));
+            let owner = match path_owner(owner) {
+                Ok(o) => o,
+                Err(r) => return r,
+            };
+            if store.pins.remove(&owner).is_none() {
+                return not_found(format!("{} pins nothing", owner));
             }
             store.save();
             Resp::Empty(204)
@@ -184,13 +201,20 @@ pub fn handle(store: &mut Store, method: &str, path: &str, headers: &[(String, S
         ("PUT", ["objects", id]) => objects_put(store, &unescape(id), header("content-type"), body),
         ("GET" | "HEAD", ["objects", id]) => objects_get(store, &unescape(id), header("range")),
         ("PUT", ["keeps", owner]) => keeps_put(store, &unescape(owner), body),
-        ("GET", ["keeps", owner]) => match store.keeps.get(&unescape(owner)) {
-            Some(k) => Resp::Json(200, json!({"owner": unescape(owner), "objects": k.objects, "expires_in_s": store.expires_in(k.expires)})),
-            None => not_found(format!("{} keeps nothing", unescape(owner))),
+        ("GET", ["keeps", owner]) => match path_owner(owner) {
+            Ok(owner) => match store.keeps.get(&owner) {
+                Some(k) => Resp::Json(200, json!({"owner": owner, "objects": k.objects, "expires_in_s": store.expires_in(k.expires)})),
+                None => not_found(format!("{} keeps nothing", owner)),
+            },
+            Err(r) => r,
         },
         ("DELETE", ["keeps", owner]) => {
-            if store.keeps.remove(&unescape(owner)).is_none() {
-                return not_found(format!("{} keeps nothing", unescape(owner)));
+            let owner = match path_owner(owner) {
+                Ok(o) => o,
+                Err(r) => return r,
+            };
+            if store.keeps.remove(&owner).is_none() {
+                return not_found(format!("{} keeps nothing", owner));
             }
             store.save();
             Resp::Empty(204)

@@ -7,7 +7,7 @@ use serde_json::{Map, Value};
 use crate::context::{Context, Tool, Usage};
 use crate::error::Invalid;
 use crate::identity::Class;
-use crate::ids::{SnapshotId, SpecId};
+use crate::ids::{ContentId, SnapshotId, SpecId};
 use crate::required_nullable;
 
 pub type QuestionId = String;
@@ -290,7 +290,7 @@ pub struct Read {
     pub described: Option<IndexMap<QuestionId, String>>,
     pub answers: IndexMap<QuestionId, ReadAnswer>,
     /// The content id of the rendered text this read was conditioned on.
-    pub rendered_hash: String,
+    pub rendered_hash: ContentId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thought: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -476,7 +476,7 @@ mod tests {
 
     #[test]
     fn a_read_names_its_context_by_index_or_null() {
-        let r = |c: Value| json!({"context": c, "snapshot": null, "answers": {}, "rendered_hash": "x"});
+        let r = |c: Value| json!({"context": c, "snapshot": null, "answers": {}, "rendered_hash": "blake3:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"});
         assert_eq!(serde_json::from_value::<Read>(r(json!(3))).unwrap().context, Some(3));
         assert_eq!(serde_json::from_value::<Read>(r(json!(null))).unwrap().context, None);
         assert!(serde_json::from_value::<Read>(r(json!("abc"))).is_err());

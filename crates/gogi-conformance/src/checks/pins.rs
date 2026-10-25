@@ -70,6 +70,9 @@ impl Suite {
         }
         self.refused("a pin body with an unknown member is refused", "PUT", &path, Some(json!({"snapshots": [], "ttl_s": 5, "extra": 1})), 400);
         self.refused("an owner of 129 characters is refused", "PUT", &format!("/council/v2/pins/{}", "k".repeat(129)), Some(json!({"snapshots": [], "ttl_s": 5})), 400);
+        for method in ["GET", "DELETE"] {
+            self.refused(&format!("{} of an owner of 129 characters is refused", method), method, &format!("/council/v2/pins/{}", "k".repeat(129)), None, 400);
+        }
 
         // An empty set pins nothing.
         if let Some(p) = self.expect("an empty pin set succeeds", "PUT", &path, Some(json!({"snapshots": [], "ttl_s": 60})), 200) {

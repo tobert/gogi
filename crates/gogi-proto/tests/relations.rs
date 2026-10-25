@@ -343,7 +343,7 @@ fn response(lps: &[Vec<f64>], method: PoolMethod, weights: PoolWeights, given: O
         .iter()
         .enumerate()
         .map(|(i, row)| {
-            json!({"context": i, "snapshot": null, "rendered_hash": "x", "answers": {"q": {"type": "choice", "choice": keys[argmax(&row.probs)],
+            json!({"context": i, "snapshot": null, "rendered_hash": "blake3:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "answers": {"q": {"type": "choice", "choice": keys[argmax(&row.probs)],
                 "probabilities": map_of(&keys, &row.probs), "confidence": math::confidence(row.mass, &row.probs),
                 "logprobs": map_of(&keys, &lps[i]), "mass": row.mass}}})
         })
