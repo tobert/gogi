@@ -46,6 +46,7 @@ fn status_line(code: u16) -> &'static str {
         201 => "201 Created",
         204 => "204 No Content",
         206 => "206 Partial Content",
+        308 => "308 Permanent Redirect",
         400 => "400 Bad Request",
         404 => "404 Not Found",
         413 => "413 Payload Too Large",
@@ -127,6 +128,7 @@ fn connection(conn: TcpStream, store: &Mutex<Store>) -> std::io::Result<()> {
                 out.write_all(&body)?;
             }
         }
+        Resp::Redirect(to) => write!(out, "HTTP/1.1 308 Permanent Redirect\r\n{}: {}\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", REQUEST_ID_HEADER, id, to)?,
         Resp::Empty(code) => write!(out, "HTTP/1.1 {}\r\n{}: {}\r\nConnection: close\r\n\r\n", status_line(code), REQUEST_ID_HEADER, id)?,
         Resp::Sse(events) => {
             write!(out, "HTTP/1.1 200 OK\r\n{}: {}\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", REQUEST_ID_HEADER, id)?;

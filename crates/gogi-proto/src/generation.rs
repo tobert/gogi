@@ -61,6 +61,53 @@ pub struct GenerationRequest {
     /// Higher runs first within its class. Absent: 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
+    /// An object the reply writes, of a media type the served model writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<Output>,
+}
+
+/// The object a generation writes: its media type and the served model's options for it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Output {
+    pub mime: String,
+    /// Members the served model defines, such as `width` or `seconds`. An unknown member is a `400`
+    /// naming it.
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub options: Map<String, Value>,
+}
+
+impl Output {
+    /// Checks the media type, and that served model `model` writes it.
+    pub fn check(&self, model: &crate::identity::ServedModel) -> Result<(), Invalid> {
+        if let Some(p) = crate::objects::mime_problem(&self.mime) {
+            return Err(Invalid::param("output.mime", format!("nothing ran: output.mime {}", p)));
+        }
+        if !model.writes(&self.mime) {
+            let outputs = model.outputs();
+            let writes = if outputs.is_empty() { "text only".to_string() } else { format!("text and {}", outputs.join(", ")) };
+            return Err(Invalid::param("output.mime", format!("nothing ran: output.mime is {}, and {} writes {}", self.mime, model.model, writes)));
+        }
+        Ok(())
+    }
+}
+
+/// An object a reply wrote, sealed: its content id, media type, and size.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyPart {
+    pub index: u64,
+    pub id: crate::ids::ContentId,
+    pub mime: String,
+    pub bytes: u64,
+}
+
+/// The start of an object a reply writes: its index, media type, and the pending id that reads its
+/// bytes while it is made.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartEvent {
+    pub index: u64,
+    pub mime: String,
+    pub pending: String,
 }
 
 /// When a riding decision is asked: `before`, after the context and before the reply, or `after`,
@@ -100,6 +147,11 @@ impl GenerationRequest {
         }
         if let Some(s) = &self.sample {
             s.validate()?;
+        }
+        if let Some(o) = &self.output
+            && let Some(p) = crate::objects::mime_problem(&o.mime)
+        {
+            return Err(Invalid::param("output.mime", format!("nothing ran: output.mime {}", p)));
         }
         for (i, d) in self.decisions.iter().enumerate() {
             if let Some(problem) = crate::ids::content_id_problem(&d.spec_id) {
@@ -242,6 +294,9 @@ pub struct GenerationDone {
     /// when it is empty, for `content`. A reply cut in a `call` cannot be continued.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<Phase>,
+    /// The objects the reply wrote, sealed, in index order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<ReplyPart>,
 }
 
 impl GenerationDone {
@@ -378,6 +433,8 @@ fn join_pieces(tokens: &[TokenEvent], parts: [(&str, bool); 2], where_: &str) ->
 #[derive(Clone, Debug, PartialEq)]
 pub enum StreamEvent {
     Token(TokenEvent),
+    /// An object of the reply begins; its pending id reads the bytes while they are made.
+    Part(PartEvent),
     /// Sent while nothing else is; it carries `{}`.
     Ping,
     Done(Box<GenerationDone>),
@@ -392,6 +449,7 @@ impl StreamEvent {
         let bad = |e: serde_json::Error| format!("a {} event does not decode: {}", name, e);
         Ok(Some(match name {
             "token" => StreamEvent::Token(serde_json::from_str(data).map_err(bad)?),
+            "part" => StreamEvent::Part(serde_json::from_str(data).map_err(bad)?),
             "ping" => StreamEvent::Ping,
             "done" => StreamEvent::Done(Box::new(serde_json::from_str(data).map_err(bad)?)),
             "error" => StreamEvent::Error(serde_json::from_str(data).map_err(bad)?),
@@ -403,6 +461,7 @@ impl StreamEvent {
     pub fn name(&self) -> &'static str {
         match self {
             StreamEvent::Token(_) => "token",
+            StreamEvent::Part(_) => "part",
             StreamEvent::Ping => "ping",
             StreamEvent::Done(_) => "done",
             StreamEvent::Error(_) => "error",
@@ -413,6 +472,7 @@ impl StreamEvent {
     pub fn data(&self) -> String {
         match self {
             StreamEvent::Token(t) => serde_json::to_string(t),
+            StreamEvent::Part(p) => serde_json::to_string(p),
             StreamEvent::Ping => Ok("{}".to_string()),
             StreamEvent::Done(d) => serde_json::to_string(d),
             StreamEvent::Error(e) => serde_json::to_string(e),
@@ -583,7 +643,7 @@ mod tests {
     #[test]
     fn the_request_rules_each_refuse() {
         let ctx = Context { messages: vec![crate::message::Message::user("u")], ..Default::default() };
-        let r = GenerationRequest { model: "m".into(), context: ctx, max_tokens: 8, sample: Some(Sample { temperature: Some(0.0), ..Default::default() }), stream: None, decisions: Vec::new(), class: None, priority: None };
+        let r = GenerationRequest { model: "m".into(), context: ctx, max_tokens: 8, sample: Some(Sample { temperature: Some(0.0), ..Default::default() }), stream: None, decisions: Vec::new(), class: None, priority: None, output: None };
         r.validate().unwrap();
         assert!(GenerationRequest { max_tokens: 0, ..r.clone() }.validate().is_err());
         let v = json!({"model": "m", "context": {"messages": [{"role": "user", "content": "u"}]}});
@@ -596,6 +656,9 @@ mod tests {
         ride(Some(vec!["q".into()])).validate().unwrap();
         assert_eq!(ride(Some(vec![])).validate().unwrap_err().param.as_deref(), Some("decisions"));
         assert_eq!(ride(Some(vec!["q".into(), "q".into()])).validate().unwrap_err().param.as_deref(), Some("decisions"));
+        let out = |mime: &str| GenerationRequest { output: Some(Output { mime: mime.into(), options: Map::new() }), ..r.clone() };
+        out("image/png").validate().unwrap();
+        assert_eq!(out("Image/PNG").validate().unwrap_err().param.as_deref(), Some("output.mime"));
         let short = GenerationRequest { decisions: vec![RidingDecision { spec_id: "blake3:5d61eaa8fab8".into(), ask: None, when: RideWhen::After }], ..r.clone() };
         let e = short.validate().unwrap_err();
         assert!(e.param.as_deref() == Some("decisions") && e.message.contains("decisions[0].spec_id \"blake3:5d61eaa8fab8\""), "{e:?}");

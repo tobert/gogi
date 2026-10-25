@@ -43,6 +43,8 @@ impl Suite {
         let Some(id) = self.put_object("media: object put succeeds", &a, &read) else { return };
         let c = self.with_object(&id, &read);
         let Some(first) = self.build("a context with an object part builds", &c, false) else { return };
+        let read_count = &first["usage"]["media"]["read"];
+        self.r.check("usage.media counts the object read", read_count["objects"] == json!(1) && read_count["bytes"] == json!(a.len()), &first["usage"]);
         if let Some(again) = self.build("media: build again", &c, false) {
             self.r.check("a context with an object part builds again with nothing fed", num(&again["usage"]["fed"]) == 0 && again["head"] == first["head"], &again);
         }

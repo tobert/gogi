@@ -136,6 +136,16 @@ impl ServedModel {
         self.media.as_ref().is_some_and(|m| m.inputs.iter().any(|p| mime_matches(p, mime)))
     }
 
+    /// Whether the served model writes objects of media type `mime` in a reply.
+    pub fn writes(&self, mime: &str) -> bool {
+        self.media.as_ref().is_some_and(|m| m.outputs.iter().any(|p| mime_matches(p, mime)))
+    }
+
+    /// The media types it writes, for an error message.
+    pub fn outputs(&self) -> Vec<String> {
+        self.media.as_ref().map(|m| m.outputs.clone()).unwrap_or_default()
+    }
+
     /// The media types it reads, for an error message.
     pub fn inputs(&self) -> Vec<String> {
         self.media.as_ref().map(|m| m.inputs.clone()).unwrap_or_default()

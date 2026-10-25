@@ -8,6 +8,7 @@ mod ids;
 mod media;
 mod models;
 mod objects;
+mod outputs;
 mod pins;
 mod reads;
 mod restart;

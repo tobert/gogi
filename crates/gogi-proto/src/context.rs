@@ -40,6 +40,32 @@ pub struct Usage {
     pub fed: u64,
     pub completion: u64,
     pub reasoning: u64,
+    /// The objects the request read and the reply wrote. Absent when it read and wrote text only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<MediaUsage>,
+}
+
+/// What a request read and wrote that is not text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaUsage {
+    pub read: MediaCount,
+    pub written: MediaCount,
+}
+
+/// A count of objects and their bytes, with the measures a served model reports for its media:
+/// milliseconds of audio, pixels of images, frames of video, and denoising steps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaCount {
+    pub objects: u64,
+    pub bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pixels: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<u64>,
 }
 
 impl Usage {
@@ -254,7 +280,7 @@ mod tests {
 
     #[test]
     fn usage_relations() {
-        Usage { prompt: 10, kept: 4, fed: 6, completion: 3, reasoning: 2 }.check().unwrap();
+        Usage { prompt: 10, kept: 4, fed: 6, completion: 3, reasoning: 2, media: None }.check().unwrap();
         assert!(Usage { prompt: 10, kept: 4, fed: 5, ..Default::default() }.check().is_err());
         assert!(Usage { completion: 1, reasoning: 2, ..Default::default() }.check().is_err());
         assert!(serde_json::from_value::<Usage>(json!({"prompt": 1, "kept": 0, "fed": 1, "completion": 0})).is_err());

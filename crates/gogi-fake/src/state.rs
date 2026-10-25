@@ -54,12 +54,14 @@ pub struct Config {
     /// The media types every served model reads, as identity's `media.inputs` lists them. Empty:
     /// the served models read text only.
     pub media_inputs: Vec<String>,
+    /// The media types every served model writes, as identity's `media.outputs` lists them.
+    pub media_outputs: Vec<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         let toy = FakeModel { aliases: vec!["toy".into()], ..FakeModel::ready("gogi-toy-1", 0) };
-        Config { addr: "127.0.0.1:0".into(), models: vec![toy], state_dir: None, context_tokens: 4096, decision_context_tokens: 3072, pin_bytes: 1 << 20, max_snapshots: 10_000, seal_cut_heads: false, object_bytes: 1 << 20, keep_bytes: 8 << 20, media_inputs: vec!["image/*".into(), "audio/*".into()] }
+        Config { addr: "127.0.0.1:0".into(), models: vec![toy], state_dir: None, context_tokens: 4096, decision_context_tokens: 3072, pin_bytes: 1 << 20, max_snapshots: 10_000, seal_cut_heads: false, object_bytes: 1 << 20, keep_bytes: 8 << 20, media_inputs: vec!["image/*".into(), "audio/*".into()], media_outputs: vec!["application/x-gogi-toy".into()] }
     }
 }
 
@@ -93,6 +95,8 @@ pub struct Store {
     /// Object id to its media type and bytes. The fake never evicts an object.
     pub objects: HashMap<String, (String, Vec<u8>)>,
     pub keeps: BTreeMap<String, Keeps>,
+    /// A pending id to the content id of the part it named, once sealed.
+    pub pending: HashMap<String, String>,
     /// Seconds added to the clock, so a test can make a pin expire without waiting.
     pub skew: u64,
     next_born: u64,
@@ -120,7 +124,7 @@ pub fn snapshot_id(model: &FakeModel, tokens: &[u32], counts: &[usize]) -> Strin
 
 impl Store {
     pub fn new(cfg: Config) -> Result<Store, String> {
-        let mut s = Store { cfg, snaps: HashMap::new(), pins: BTreeMap::new(), specs: Default::default(), objects: HashMap::new(), keeps: BTreeMap::new(), skew: 0, next_born: 0 };
+        let mut s = Store { cfg, snaps: HashMap::new(), pins: BTreeMap::new(), specs: Default::default(), objects: HashMap::new(), keeps: BTreeMap::new(), pending: HashMap::new(), skew: 0, next_born: 0 };
         s.load()?;
         Ok(s)
     }

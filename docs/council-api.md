@@ -86,7 +86,9 @@ thing, and each thing has one term.
 | response | The HTTP body a server returns for any request. |
 | request id | The id a server gives one request, sent in the `request-id` header of its response and in every error body. |
 | trace context | The client's W3C `traceparent` header, which joins the server's spans to the client's trace. It travels only as a header. |
-| usage | The token counts a response reports: `prompt`, `kept`, `fed`, `completion`, and `reasoning`. |
+| usage | The counts a response reports: the tokens `prompt`, `kept`, `fed`, `completion`, and `reasoning`, and `media`, the objects read and written. |
+| output | The object a generation writes, of a media type the served model writes. |
+| pending id | `pending:` and 64 lowercase hex digits that the server chose. It names an output while the server makes it; a content id names it once it is sealed. |
 | phase | The part of a reply a token belongs to: `reasoning`, `content`, or `call`. |
 | identity | The model, weights, tokenizer, template, and engine that produced a number. Each served model has one. A threshold fitted under one identity does not carry to another. |
 | served model | One identity a server serves, with its own limits, capabilities, and status. A request names it with `model`. |
@@ -127,6 +129,9 @@ the 64 lowercase hex digits of a BLAKE3 hash. This document shortens them with
   member. The message quotes the id and says what is wrong with it, such as
   its digit count. In a cluster that copies objects between machines, a
   prefix that names one object today can name two tomorrow.
+- **A pending id is not a content id.** It names an output that is not
+  sealed yet (see Outputs), and no request but a `GET` or `HEAD` of an
+  object takes one.
 - **A whole id the server does not hold is a `404`.** The client sends what
   the id names again.
 - **BLAKE3, not SHA-256.** BLAKE3 is a tree hash, so a reader can check one
@@ -662,7 +667,8 @@ POST /council/v2/generations
   default.
 - **`done` is the reply.** It has `model`, the reply's `content`,
   `reasoning`, and `tool_calls`, `finish`, `usage`, `head`, the context's
-  `snapshots`, and `seed`. A reply that ends with `max_tokens` also has
+  `snapshots`, and `seed`, and `parts` when it wrote an output (see
+  Outputs). A reply that ends with `max_tokens` also has
   `phase`, the phase its next token would have (see Continuations).
   Without `stream`, `done` is the JSON response.
 - **`finish`** says why the reply ended:
@@ -679,6 +685,10 @@ POST /council/v2/generations
   continued, and it has no `phase`. Decided by senpai 2026-10-21
   (vetoable).
 
+- **`usage.media`**, in every response with `usage`, counts what was not
+  text: `{read, written}`, each `{objects, bytes}`, with `audio_ms`,
+  `pixels`, `frames`, or `steps` when the served model reports them. It is
+  absent when the request read and wrote text only.
 - **`usage`** counts the prompt in `prompt`, `kept`, and `fed`, and the
   reply in `completion`, with its thinking also in `reasoning`.
 - **`seed`** in `done` is the seed the server sampled with: the request's
@@ -742,6 +752,7 @@ data: {"model": "gemma-4-26b-a4b", "content": "…", "finish": "end_turn", …}
 | Event | `data` |
 |---|---|
 | `token` | One sampled token: its `id`; `piece`, the text it adds; `phase`, `reasoning`, `content`, or `call`; `p`, its untempered probability; `h`, the entropy in nats of the distribution it came from; `n`, the reply's sampled tokens so far, this one included, without a continuation's open text; and `tps`, reply tokens per second so far, when the server reports it. |
+| `part` | An output begins: `{index, mime, pending}`. `GET` on the pending id reads the bytes while the server makes them (see Outputs). |
 | `ping` | `{}`. A server may send it at any time, such as while it feeds a long prompt. |
 | `done` | The reply, as above. The last event of a stream that succeeds. |
 | `error` | An error body, as a status response's: `{error, request_id}`. The last event of a stream that fails; no `done` follows it. |
@@ -765,6 +776,49 @@ data: {"model": "gemma-4-26b-a4b", "content": "…", "finish": "end_turn", …}
   without breaking clients.
 - **Closing the stream cancels the reply.** The server sends nothing more
   and holds no head for it.
+
+### Outputs
+
+```json
+POST /council/v2/generations
+{"model": "foley", "context": {"messages": [{"role": "user", "content": "Vinyl crackle, light rain, 8 bars at 90 bpm."}]},
+ "max_tokens": 64, "sample": {"seed": 7}, "output": {"mime": "audio/wav", "options": {"seconds": 21.333}},
+ "stream": true}
+```
+
+```text
+event: part
+data: {"index": 0, "mime": "audio/wav", "pending": "pending:8c1e…41d0"}
+
+event: done
+data: {"content": "", "finish": "end_turn",
+       "parts": [{"index": 0, "id": "blake3:bcce…caf8", "mime": "audio/wav", "bytes": 2048044}],
+       "usage": {"prompt": 31, "kept": 0, "fed": 31, "completion": 0, "reasoning": 0,
+                 "media": {"read": {"objects": 0, "bytes": 0}, "written": {"objects": 1, "bytes": 2048044, "audio_ms": 21333}}}, …}
+```
+
+- **`output` asks the reply to write an object:** `{mime, options}`. `mime`
+  is a media type that the served model's `media.outputs` covers; any other
+  is a `400` naming `output.mime`, and the message lists what the served
+  model writes. `options` holds the members the served model defines, such
+  as `seconds`, `width`, or `steps`; an unknown member or a value out of
+  range is a `400` naming it, such as `output.options.seconds`. Any other
+  member of `output` is a `400`. Capability `objects` on the server.
+- **`done.parts` is each object the reply wrote, sealed:** `{index, id,
+  mime, bytes}`, in index order. `id` is the content id of the bytes, and
+  the server holds the object as any object a client puts: it can evict it
+  unless a keep holds it, so a client keeps the outputs it uses. A reply
+  can also carry text.
+- **A stream sends a `part` event when an output begins,** with a pending
+  id. `GET` on the pending id streams the bytes as the server makes them,
+  and ends when the part is sealed. Once the part is sealed, `GET` and
+  `HEAD` on the pending id are a `308` to the object's content id, for as
+  long as the server holds the object. A pending id the server never gave
+  is a `404`; a malformed one is a `400` naming `id`.
+- **The same request with the same seed usually writes the same bytes,**
+  under the same terms as a reply's text (see `seed`).
+- **`max_tokens` bounds the text of the reply,** as for any generation. A
+  reply with an output and no text has `completion` 0.
 
 ### Continuations
 

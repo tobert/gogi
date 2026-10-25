@@ -3,10 +3,10 @@
 use std::collections::{HashSet, VecDeque};
 
 use gogi_proto::canon::spec_id_of;
-use gogi_proto::context::{Context, Usage};
+use gogi_proto::context::{Context, MediaCount, MediaUsage, Usage};
 use gogi_proto::decision::{DecisionRequest, PoolMethod, PoolWeights, check_queue_schema, queue_call};
 use gogi_proto::error::{ErrorBody, ErrorType};
-use gogi_proto::generation::{GenerationRequest, Phase as EventPhase, StreamEvent, TokenEvent};
+use gogi_proto::generation::{GenerationRequest, PartEvent, Phase as EventPhase, StreamEvent, TokenEvent};
 use gogi_proto::identity::{ModelStatus, ServerIdentity};
 use gogi_proto::math::{self, Row, WeightSpec};
 use gogi_proto::message::{Message, ToolCall};
@@ -34,6 +34,8 @@ pub enum Resp {
     Sse(Vec<StreamEvent>),
     /// An object's bytes, with its media type and other headers. A `HEAD` sends the headers only.
     Bytes { code: u16, mime: String, body: Vec<u8>, headers: Vec<(String, String)> },
+    /// A `308` to another path, such as a sealed part's object.
+    Redirect(String),
 }
 
 fn err(status: u16, kind: &str, message: impl Into<String>, param: Option<&str>) -> Resp {
@@ -156,8 +158,8 @@ pub fn identity(store: &Store) -> Value {
             v["limits"] = json!({"context_tokens": store.cfg.context_tokens, "decision_context_tokens": store.cfg.decision_context_tokens,
                                  "snapshot_bytes": BYTES_PER_TOKEN, "contexts_per_decision": 8, "default_timeout_ms": 30000});
             v["capabilities"] = json!(["reads", "generate", "continuation", "dry_run", "leave_one_out"]);
-            if !store.cfg.media_inputs.is_empty() {
-                v["media"] = json!({"inputs": store.cfg.media_inputs, "outputs": []});
+            if !store.cfg.media_inputs.is_empty() || !store.cfg.media_outputs.is_empty() {
+                v["media"] = json!({"inputs": store.cfg.media_inputs, "outputs": store.cfg.media_outputs});
             }
             v
         })
@@ -183,6 +185,33 @@ fn check_objects(store: &Store, m: &FakeModel, objects: &[(String, ObjectRef)]) 
         }
     }
     Ok(())
+}
+
+/// What a request read and wrote that is not text, or `None` when it read and wrote text only.
+fn media_usage(store: &Store, read: &[(String, ObjectRef)], written: &[u64]) -> Option<MediaUsage> {
+    if read.is_empty() && written.is_empty() {
+        return None;
+    }
+    let bytes = |id: &str| store.objects.get(id).map_or(0, |(_, b)| b.len() as u64);
+    Some(MediaUsage {
+        read: MediaCount { objects: read.len() as u64, bytes: read.iter().map(|(_, o)| bytes(&o.id)).sum(), ..Default::default() },
+        written: MediaCount { objects: written.len() as u64, bytes: written.iter().sum(), ..Default::default() },
+    })
+}
+
+/// The bytes the toy writes for an output: a BLAKE3 stream of the served model's seed, the sample
+/// seed, the media type, and the prompt, so the same request writes the same bytes.
+fn output_bytes(m: &FakeModel, seed: u64, mime: &str, prompt: &[u32], n: usize) -> Vec<u8> {
+    let mut h = blake3::Hasher::new_derive_key("gogi-fake output v1");
+    h.update(&m.seed.to_le_bytes());
+    h.update(&seed.to_le_bytes());
+    h.update(mime.as_bytes());
+    for t in prompt {
+        h.update(&t.to_le_bytes());
+    }
+    let mut out = vec![0u8; n];
+    h.finalize_xof().fill(&mut out);
+    out
 }
 
 /// The objects of each context of a request with several, named `contexts[k].messages[i]...`.
@@ -233,6 +262,13 @@ pub fn handle(store: &mut Store, method: &str, path: &str, headers: &[(String, S
             Resp::Empty(204)
         }
         ("PUT", ["objects", id]) => objects_put(store, &unescape(id), header("content-type"), body),
+        ("GET" | "HEAD", ["objects", id]) if unescape(id).starts_with("pending:") => match store.pending.get(&unescape(id)) {
+            Some(sealed) => Resp::Redirect(format!("/council/v2/objects/{}", sealed)),
+            None => match gogi_proto::ids::pending_id_problem(&unescape(id)) {
+                Some(p) => bad_param("id", format!("nothing was looked up: {}", p)),
+                None => not_found(format!("no part is pending as {}", unescape(id))),
+            },
+        },
         ("GET" | "HEAD", ["objects", id]) => objects_get(store, &unescape(id), header("range")),
         ("PUT", ["keeps", owner]) => keeps_put(store, &unescape(owner), body),
         ("GET", ["keeps", owner]) => match path_owner(owner) {
@@ -446,7 +482,7 @@ fn build_route(store: &mut Store, body: &[u8]) -> Resp {
     }
     let b = build(store, &m, &req.context, dry_run);
     let snapshots = if dry_run { vec![] } else { b.infos(store) };
-    let usage = Usage { prompt: n as u64, kept: b.kept as u64, fed: (n - b.kept) as u64, completion: 0, reasoning: 0 };
+    let usage = Usage { prompt: n as u64, kept: b.kept as u64, fed: (n - b.kept) as u64, completion: 0, reasoning: 0, media: media_usage(store, &objects_of(&req.context.messages), &[]) };
     Resp::Json(200, json!({"model": m.name, "head": b.head, "usage": usage, "from": b.from, "dry_run": dry_run, "snapshots": snapshots}))
 }
 
@@ -553,6 +589,7 @@ fn reads(store: &mut Store, body: &[u8]) -> Resp {
             out.push(json!({"context": ci, "snapshot": b.head, "suffix": si, "logprobs": logprobs, "mass": math::log_sum_exp(&ls), "top": tops}));
         }
     }
+    usage.media = media_usage(store, &objects_in(&req.contexts), &[]);
     Resp::Json(200, json!({"model": m.name, "reads": out, "signals": {"control_text": control}, "usage": usage}))
 }
 
@@ -630,6 +667,27 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
     if !req.decisions.is_empty() {
         return bad_param("decisions", "nothing ran: riding decisions need the ride capability, which this model does not have; send the generation without decisions");
     }
+    let output = match &req.output {
+        None => None,
+        Some(o) => {
+            let id: ServerIdentity = serde_json::from_value(identity(store)).expect("the fake's identity decodes");
+            let served = id.models.iter().find(|s| s.model == m.name).expect("identity lists the config's models");
+            if let Err(e) = o.check(served) {
+                return invalid(e);
+            }
+            if let Some(k) = o.options.keys().find(|k| k.as_str() != "bytes") {
+                return bad_param(&format!("output.options.{}", k), format!("nothing ran: output.options.{} is not an option of {}; it takes bytes, the size of the object", k, m.name));
+            }
+            let n = match o.options.get("bytes") {
+                None => 4096,
+                Some(v) => match v.as_u64().filter(|n| (1..=store.cfg.object_bytes).contains(n)) {
+                    Some(n) => n,
+                    None => return bad_param("output.options.bytes", format!("nothing ran: output.options.bytes is {}; it is 1 to object_bytes, {}", v, store.cfg.object_bytes)),
+                },
+            };
+            Some((o.mime.clone(), n as usize))
+        }
+    };
     let limit = store.cfg.context_tokens;
     let max_tokens = req.max_tokens as usize;
     if max_tokens > limit {
@@ -772,7 +830,18 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
         let held = build(store, &m, &Context { messages, ..c.clone() }, false);
         (json!(held.head), held.infos(store))
     };
-    let usage = Usage { prompt: prompt.tokens.len() as u64, kept: b.kept as u64, fed: (prompt.tokens.len() - b.kept) as u64, completion: n as u64, reasoning: thought };
+    let mut parts = Vec::new();
+    if let Some((mime, size)) = &output {
+        let bytes = output_bytes(&m, seed, mime, &prompt.tokens, *size);
+        let id = gogi_proto::content_id(&bytes);
+        let pending = format!("pending:{}", blake3::hash(format!("{}-{}", id, store.pending.len()).as_bytes()).to_hex());
+        store.objects.entry(id.clone()).or_insert_with(|| (mime.clone(), bytes.clone()));
+        store.pending.insert(pending.clone(), id.clone());
+        events.insert(0, StreamEvent::Part(PartEvent { index: 0, mime: mime.clone(), pending }));
+        parts.push(json!({"index": 0, "id": id, "mime": mime, "bytes": bytes.len()}));
+    }
+    let written: Vec<u64> = parts.iter().map(|p| p["bytes"].as_u64().unwrap_or(0)).collect();
+    let usage = Usage { prompt: prompt.tokens.len() as u64, kept: b.kept as u64, fed: (prompt.tokens.len() - b.kept) as u64, completion: n as u64, reasoning: thought, media: media_usage(store, &objects_of(&c.messages), &written) };
     let mut done = json!({
         "content": content, "reasoning": reasoning,
         "tool_calls": wire_calls,
@@ -782,6 +851,9 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
     });
     if finish == "max_tokens" {
         done["phase"] = json!(next);
+    }
+    if !parts.is_empty() {
+        done["parts"] = json!(parts);
     }
     if stream {
         events.push(StreamEvent::Done(Box::new(serde_json::from_value(done).expect("the fake's done decodes"))));
@@ -993,6 +1065,7 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
         .enumerate()
         .map(|(i, (head, _, _, rendered))| json!({"context": if named[i].is_some() { json!(i) } else { Value::Null }, "snapshot": head, "answers": read_answers[i], "rendered_hash": rendered, "tokens": 0, "ms": 0.0}))
         .collect();
+    usage.media = media_usage(store, &objects, &[]);
     let mut identity = identity_of(&m);
     identity["spec_id"] = json!(spec_id);
     Resp::Json(

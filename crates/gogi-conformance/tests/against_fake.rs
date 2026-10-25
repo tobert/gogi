@@ -13,7 +13,7 @@ fn the_fake_passes_every_check() {
     let r = run(Opts { url: server.url(), restart: None, model: None }, false);
     assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
     assert!(r.checks.len() > 150, "{}", r.checks.len());
-    for name in ["an object reads back bit for bit", "a range reads its bytes", "a keep list names the held objects only", "an object past object_bytes is a 413", "another object is another context", "a decision reads its case_media", "a keep set past keep_bytes is a 413", "a PUT replaces the owner's whole keep set"] {
+    for name in ["an object reads back bit for bit", "a range reads its bytes", "a keep list names the held objects only", "an object past object_bytes is a 413", "another object is another context", "a decision reads its case_media", "a keep set past keep_bytes is a 413", "a PUT replaces the owner's whole keep set", "a pending id reads the sealed part", "usage.media counts the object written", "usage.media counts the object read"] {
         assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name} did not pass");
     }
 }
@@ -142,8 +142,9 @@ fn the_fake_passes_with_sealed_cut_heads() {
 
 #[test]
 fn the_fake_passes_as_a_model_that_reads_text_only() {
-    let server = Server::start(Config { media_inputs: vec![], ..Config::default() }).unwrap();
+    let server = Server::start(Config { media_inputs: vec![], media_outputs: vec![], ..Config::default() }).unwrap();
     let r = run(Opts { url: server.url(), restart: None, model: None }, false);
     assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
     assert!(r.checks.iter().any(|c| c.name == "an object part to a model that reads text only is a 400 naming the part" && c.status == Status::Ok));
+    assert!(r.checks.iter().any(|c| c.name == "an output to a model that writes text only is a 400 naming output.mime" && c.status == Status::Ok));
 }

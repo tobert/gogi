@@ -27,7 +27,7 @@ pub mod reads;
 pub mod spec;
 
 pub use canon::{canonical_json, content_id, spec_id_of};
-pub use context::{Context, ContextBuild, ContextBuilt, SnapshotInfo, Tier, Tool, Usage};
+pub use context::{Context, ContextBuild, ContextBuilt, MediaCount, MediaUsage, SnapshotInfo, Tier, Tool, Usage};
 pub use error::{ErrorBody, ErrorDetail, ErrorType, Invalid};
 pub use ids::{ContentId, SnapshotId, SpecId, content_id_problem};
 pub use message::{Content, Message, Part, Role, ToolCall};

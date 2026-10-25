@@ -58,6 +58,10 @@ open message        <asst> [<think> reasoning [<endthink>]] [content]
   toy reads an object by its id; its media type is not rendered. A decision's `case_media`
   renders the same way after the case. Every served model reads `image/*` and `audio/*`
   (`Config::media_inputs`); an empty list makes them read text only.
+- Every served model writes `application/x-gogi-toy` (`Config::media_outputs`). An output's
+  bytes are a BLAKE3 stream of the served model's seed, the sample seed, the media type, and the
+  prompt; `output.options.bytes` sets their count, 4096 by default, up to `object_bytes`. The
+  fake makes the bytes at once, so a pending id is already sealed when the stream sends it.
 - The thinking rule: an assistant message without tool calls loses its `reasoning` once a later
   user message follows. A message with tool calls keeps it.
 - A marked message is a boundary only when its own rendering is a prefix of the whole

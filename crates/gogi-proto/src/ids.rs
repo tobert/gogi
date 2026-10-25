@@ -105,6 +105,18 @@ prefixed_id!(
     "content id"
 );
 
+/// Why `s` is not a pending id, or `None` when it is one. A pending id is `pending:` and 64
+/// lowercase hex digits that the server chose. It names an output part while the part is made, and
+/// a content id names it once it is sealed.
+pub fn pending_id_problem(s: &str) -> Option<String> {
+    let rule = "a pending id is `pending:` and 64 lowercase hex digits";
+    match s.strip_prefix("pending:") {
+        None => Some(format!("{:?} is not a pending id: {}", s, rule)),
+        Some(hex) if hex.len() != HEX_DIGITS || !is_lower_hex(hex) => Some(format!("{:?} is not a pending id: {}", s, rule)),
+        Some(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,6 +153,14 @@ mod tests {
             assert!(!is_content_id(&bad), "{bad:?}");
             assert!(SnapshotId::parse(bad.clone()).is_err(), "{bad:?}");
             assert!(SpecId::parse(bad.clone()).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_pending_id_is_pending_and_64_lowercase_hex_digits() {
+        assert_eq!(pending_id_problem(&format!("pending:{}", "a".repeat(64))), None);
+        for bad in [format!("pending:{}", "a".repeat(63)), format!("pending:{}", "A".repeat(64)), format!("blake3:{}", "a".repeat(64))] {
+            assert!(pending_id_problem(&bad).is_some(), "{bad}");
         }
     }
 
