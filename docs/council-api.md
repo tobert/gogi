@@ -1067,8 +1067,10 @@ specs, which every served model shares.
   a generation without one is a `400` naming `output`. A build, a decision,
   or a raw read that names it is a `400` naming `model`, because each of
   them reads text answers or builds for them. Its decision limits are 0;
-  `context_tokens` and `default_timeout_ms` are above 0. Its snapshots and
-  pins are the server's, as any served model's. Decided 2026-10-27 (Amy,
+  `context_tokens` and `default_timeout_ms` are above 0. Its
+  `snapshot_bytes` is 0 when it holds no snapshot, such as an image model
+  whose requests start with no state. Its snapshots and pins are the
+  server's, as any served model's. Decided 2026-10-27 (Amy,
   by interview), for nagaya's speech model.
 
 | Limit | Where | Means |
