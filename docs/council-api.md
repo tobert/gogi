@@ -1008,7 +1008,7 @@ next step when one is known.
 | `429` | `busy` | The server has more requests than it runs. `Retry-After` when known. |
 | `500` | `internal` | The server failed. A decision's numbers that fail `gogi-proto`'s check are a `500`, never a response. |
 | `503` | `model_unavailable` | The served model is not `ready`; the body has `model` and `status`. `Retry-After` when known. |
-| `503` | `unavailable` | The server is stopping or stopped. |
+| `503` | `unavailable` | The server is starting, stopping or stopped. Decided 2026-10-27 (Amy): a start is not one model's state. |
 | `504` | `timeout` | A decision's `timeout_ms` passed. No partial answer is returned. |
 
 - **Every capability a request needs must be declared.** A request that uses
@@ -1068,8 +1068,8 @@ specs, which every served model shares.
   or a raw read that names it is a `400` naming `model`, because each of
   them reads text answers or builds for them. Its decision limits are 0;
   `context_tokens` and `default_timeout_ms` are above 0. Its snapshots and
-  pins are the server's, as any served model's. Proposed 2026-10-25 by
-  senpai (Claude Opus 5.5), for nagaya's speech model; Amy decides.
+  pins are the server's, as any served model's. Decided 2026-10-27 (Amy,
+  by interview), for nagaya's speech model.
 
 | Limit | Where | Means |
 |---|---|---|
