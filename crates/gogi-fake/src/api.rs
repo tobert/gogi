@@ -6,7 +6,7 @@ use gogi_proto::canon::spec_id_of;
 use gogi_proto::context::{Context, MediaCount, MediaUsage, Usage};
 use gogi_proto::decision::{DecisionRequest, PoolMethod, PoolWeights, check_queue_schema, queue_call};
 use gogi_proto::error::{ErrorBody, ErrorType};
-use gogi_proto::generation::{GenerationRequest, OutputEvent, Phase as EventPhase, StreamEvent, TokenEvent};
+use gogi_proto::generation::{GenerationRequest, OutputEvent, Phase as EventPhase, PreviewEvent, ProgressEvent, StreamEvent, TokenEvent};
 use gogi_proto::identity::{ModelStatus, ServerIdentity};
 use gogi_proto::math::{self, Row, WeightSpec};
 use gogi_proto::message::{Message, ToolCall};
@@ -818,6 +818,19 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
             let pending = format!("pending:{}", blake3::hash(format!("{}-{}", id, store.pending.len()).as_bytes()).to_hex());
             store.pending.insert(pending.clone(), id.clone());
             events.insert(0, StreamEvent::Output(OutputEvent { index: 0, mime: mime.clone(), pending }));
+            // The fake makes an output in 2 steps. A preview is the first 16 bytes of the output.
+            let mut steps = Vec::new();
+            for step in 1..=2 {
+                steps.push(StreamEvent::Progress(ProgressEvent { index: Some(0), step, of: 2 }));
+                if req.previews == Some(true) {
+                    let preview = bytes[..bytes.len().min(16)].to_vec();
+                    let id = gogi_proto::content_id(&preview);
+                    store.objects.entry(id.clone()).or_insert_with(|| (mime.clone(), preview));
+                    let id = gogi_proto::ids::ContentId::parse(id).expect("a content id parses");
+                    steps.push(StreamEvent::Preview(PreviewEvent { index: Some(0), step, of: 2, id: Some(id), mime: Some(mime.clone()), text: None }));
+                }
+            }
+            events.splice(0..0, steps);
         }
         outputs.push(json!({"index": 0, "id": id, "mime": mime, "bytes": bytes.len()}));
     }

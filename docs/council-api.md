@@ -79,6 +79,8 @@ thing, and each thing has one term.
 | pool | The answers combined over a decision's reads, `linear` or `loglinear`. |
 | generation | A request that samples a reply after a context. |
 | prompt | The rendered context a generation starts from, with the template's start of the reply and a continuation's open text. `usage.prompt` and `context_full` count it. |
+| step | One pass of a served model that makes its reply by refining it, such as one step of a diffusion model. |
+| preview | An output, or the reply's text, as it is after a step: not final, and replaced by the next preview. |
 | riding decision | A spec's questions asked during a generation, `before` or `after` the reply. Capability `ride`. |
 | reply | The assistant message a generation writes, with a continuation's open text at its start. |
 | continuation | A generation whose last message is an open assistant message: the model goes on from the open text. Capability `continuation`. |
@@ -738,6 +740,9 @@ POST /council/v2/generations
   shape. A spec the server does not hold is a `404`. Like `stats`, the
   answers are the model's account of its own work; nothing means anything
   by them until they are calibrated against outcomes.
+- **`previews: true` asks for a preview after each step** of a served
+  model that runs in steps (see Steps and previews). It needs `stream:
+  true`; without it, the request is a `400` naming `previews`.
 - **A reply can go on from text the client wrote.** A last assistant
   message with `continue: true` is open, and the model continues it (see
   Continuations).
@@ -762,6 +767,8 @@ data: {"model": "gemma-4-26b-a4b", "content": "…", "finish": "end_turn", …}
 |---|---|
 | `token` | One sampled token: its `id`; `piece`, the text it adds; `phase`, `reasoning`, `content`, or `call`; `p`, its untempered probability; `h`, the entropy in nats of the distribution it came from; `n`, the reply's sampled tokens so far, this one included, without a continuation's open text; and `tps`, reply tokens per second so far, when the server reports it. |
 | `output` | An output begins: `{index, mime, pending}`. `GET` on the pending id reads the bytes while the server makes them (see Outputs). |
+| `progress` | A step of a reply that runs in steps ended: `{index, step, of}` (see Steps and previews). |
+| `preview` | An output, or the reply's text, before it is done: `{index, step, of, id, mime}` or `{step, of, text}` (see Steps and previews). |
 | `ping` | `{}`. A server may send it at any time, such as while it feeds a long prompt. |
 | `done` | The reply, as above. The last event of a stream that succeeds. |
 | `error` | An error body, as a status response's: `{error, request_id}`. The last event of a stream that fails; no `done` follows it. |
@@ -837,6 +844,50 @@ data: {"content": "", "finish": "end_turn",
   under the same terms as a reply's text (see `seed`).
 - **`max_tokens` bounds the text of the reply,** as for any generation. A
   reply with an output and no text has `completion` 0.
+
+### Steps and previews
+
+```text
+event: progress
+data: {"index": 0, "step": 12, "of": 30}
+
+event: preview
+data: {"index": 0, "step": 12, "of": 30, "id": "blake3:51f0…9e2a", "mime": "image/png"}
+```
+
+Decided 2026-10-29 (Amy): the two events and their shapes. Proposed by
+senpai (Claude Opus 5.5), 2026-10-29: the request member `previews`, so a
+client asks for previews the same way for every served model.
+
+- **A served model can make a reply in steps.** A diffusion model refines a
+  whole image, a video, or a stretch of text one step at a time. A stream
+  of such a reply sends a `progress` event after each step, with or without
+  `previews`.
+- **`progress` is `{index, step, of}`.** `index` names the output that the
+  step made; a step of the reply's text has no `index`. `of` is the number
+  of steps, and it is the same in each event of one `index`. `step` counts
+  from 1 and rises by 1. The last `step` is less than `of` when a reply
+  ends early.
+- **`preview` shows an output, or the reply's text, before it is done.** A
+  preview of an output is `{index, step, of, id, mime}`. `id` is the
+  content id of a small object, such as a PNG at one eighth of the size,
+  and `mime` is its media type, which can differ from the output's. A
+  preview of the reply's text is `{step, of, text}`, with no `index`.
+- **A preview follows the `progress` event of its step,** and only a
+  stream with `previews: true` sends one. A served model that makes no
+  previews sends none, and that is not an error.
+- **Each preview replaces the one before it** for the same `index`, or for
+  the reply's text. A preview is never final: `done` holds the reply. A
+  later step can change any part that a preview showed.
+- **The server holds a preview object as any object,** with no keep, and
+  `usage.media` does not count it. A client reads it soon; a later `GET`
+  can be a `404`.
+- **Preview text is display text,** as a `piece` is. The served model
+  chooses how it shows tokens that are not chosen yet.
+- **Final text streams as `token` events,** as in any reply. A model that
+  finishes its text one block at a time sends the tokens of each finished
+  block as `token` events. Its text previews then hold only the text after
+  them.
 
 ### Continuations
 

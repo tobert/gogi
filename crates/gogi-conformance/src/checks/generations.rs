@@ -1,4 +1,4 @@
-use gogi_proto::generation::{check_pieces, Finish, GenerationDone, Phase, StreamEvent};
+use gogi_proto::generation::{check_pieces, check_steps, Finish, GenerationDone, Phase, StreamEvent};
 use serde_json::{Value, json};
 
 use super::continue_after;
@@ -115,6 +115,8 @@ impl Suite {
                 let tokens: Vec<_> = events.iter().filter_map(|e| if let StreamEvent::Token(t) = e { Some(t) } else { None }).collect();
                 self.r.check("stream token events count up by 1 from 1", tokens.iter().enumerate().all(|(i, t)| t.n == i as u64 + 1), tokens.iter().map(|t| t.n).take(8).collect::<Vec<_>>());
                 self.r.check("stream token events name a phase the contract defines", tokens.iter().all(|t| t.phase != Phase::Unknown), tokens.iter().map(|t| t.phase).find(|p| *p == Phase::Unknown));
+                let steps = check_steps(&events, false);
+                self.r.check("a stream with no previews sends no preview, and its steps count up", steps.is_ok(), steps.err());
                 match events.last() {
                     Some(StreamEvent::Done(d)) => {
                         self.r.check("stream sends one token event for each completion token", tokens.len() as u64 == d.usage.completion, (tokens.len(), d.usage));
@@ -158,6 +160,7 @@ impl Suite {
         let over = self.limits().map_or(0, |l| l.context_tokens) + 1;
         self.refused("a generation refuses max_tokens past context_tokens", "POST", "/council/v2/generations", Some(json!({"context": ctx, "max_tokens": over})), 400);
         self.refused("a generation refuses a negative temperature", "POST", "/council/v2/generations", Some(json!({"context": ctx, "max_tokens": 8, "sample": {"temperature": -1}})), 400);
+        self.refused_naming("previews with no stream is a 400 naming previews", "POST", "/council/v2/generations", Some(json!({"context": ctx, "max_tokens": 8, "previews": true})), "previews", "stream");
         self.refused("a generation refuses an unknown member", "POST", "/council/v2/generations", Some(json!({"context": ctx, "max_tokens": 8, "from": {}})), 400);
 
         // A reply cut off by max_tokens says so.

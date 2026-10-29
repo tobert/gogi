@@ -64,6 +64,10 @@ pub struct GenerationRequest {
     /// An object the reply writes, of a media type the served model writes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Output>,
+    /// Asks for a `preview` event after each step of a served model that runs in steps. It needs
+    /// `stream: true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previews: Option<bool>,
 }
 
 /// The object a generation writes: its media type and the served model's options for it.
@@ -110,6 +114,82 @@ pub struct OutputEvent {
     pub pending: String,
 }
 
+/// A `progress` event: a step of a reply that runs in steps ended. `index` names the output that
+/// the step made; a step of the reply's text has none. `of` is the number of steps.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProgressEvent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<u64>,
+    pub step: u64,
+    pub of: u64,
+}
+
+/// A `preview` event: an output, or the reply's text, as it is after a step. It is never final,
+/// and the next preview of the same `index` replaces it. A preview of an output names a small
+/// object by `id` and `mime`; a preview of the reply's text has no `index` and holds `text`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreviewEvent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<u64>,
+    pub step: u64,
+    pub of: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<crate::ids::ContentId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    /// Display text: the served model chooses how it shows tokens that are not chosen yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+impl PreviewEvent {
+    /// Checks the two shapes: `index`, `id` and `mime` together, or `text` alone.
+    pub fn check(&self) -> Result<(), String> {
+        match (self.index, &self.id, &self.mime, &self.text) {
+            (Some(_), Some(_), Some(mime), None) => match crate::objects::mime_problem(mime) {
+                Some(p) => Err(format!("a preview's mime {}", p)),
+                None => Ok(()),
+            },
+            (None, None, None, Some(_)) => Ok(()),
+            _ => Err(format!("a preview has index, id and mime, or text alone; this one is {}", serde_json::to_string(self).expect("a preview encodes"))),
+        }
+    }
+}
+
+/// Checks the `progress` and `preview` events of one stream. For each `index`, and for the reply's
+/// text: `step` counts from 1 and rises by 1, `of` stays the same, and no `step` passes `of`. Each
+/// preview has one of its two shapes and follows the `progress` event of its step. A stream that
+/// did not ask for `previews` has no `preview` event.
+pub fn check_steps(events: &[StreamEvent], previews: bool) -> Result<(), String> {
+    let name = |index: Option<u64>| index.map_or("the reply's text".to_string(), |i| format!("output {}", i));
+    // For each index: the last step that a progress event named, and its `of`.
+    let mut last: std::collections::BTreeMap<Option<u64>, (u64, u64)> = std::collections::BTreeMap::new();
+    for event in events {
+        match event {
+            StreamEvent::Progress(p) => {
+                let (step, of) = last.get(&p.index).copied().unwrap_or((0, p.of));
+                if p.step != step + 1 || p.of != of || p.step > p.of {
+                    return Err(format!("after step {} of {} of {}, a progress event names step {} of {}", step, of, name(p.index), p.step, p.of));
+                }
+                last.insert(p.index, (p.step, p.of));
+            }
+            StreamEvent::Preview(p) => {
+                if !previews {
+                    return Err(format!("a stream with no previews: true sent a preview of {} at step {}", name(p.index), p.step));
+                }
+                p.check()?;
+                if last.get(&p.index) != Some(&(p.step, p.of)) {
+                    return Err(format!("a preview of {} at step {} of {} does not follow the progress event of its step", name(p.index), p.step, p.of));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// When a riding decision is asked: `before`, after the context and before the reply, or `after`,
 /// after the reply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,13 +219,16 @@ pub struct RideAnswers {
 }
 
 impl GenerationRequest {
-    /// Checks the context, a positive `max_tokens`, the sample, each riding decision's spec id and
-    /// `ask`, and the form of `output.mime`. Whether the served model writes that media type needs
-    /// its identity: a server calls [`Output::check`] too.
+    /// Checks the context, a positive `max_tokens`, the sample, `previews` only with `stream`, each
+    /// riding decision's spec id and `ask`, and the form of `output.mime`. Whether the served model
+    /// writes that media type needs its identity: a server calls [`Output::check`] too.
     pub fn validate(&self) -> Result<(), Invalid> {
         self.context.check()?;
         if self.max_tokens == 0 {
             return Err(Invalid::param("max_tokens", "max_tokens is at least 1"));
+        }
+        if self.previews == Some(true) && self.stream != Some(true) {
+            return Err(Invalid::param("previews", "nothing ran: previews are stream events; send previews: true with stream: true"));
         }
         if let Some(s) = &self.sample {
             s.validate()?;
@@ -445,6 +528,10 @@ pub enum StreamEvent {
     Token(TokenEvent),
     /// An output of the reply begins; its pending id reads the bytes while they are made.
     Output(OutputEvent),
+    /// A step of a reply that runs in steps ended.
+    Progress(ProgressEvent),
+    /// An output, or the reply's text, before it is done.
+    Preview(PreviewEvent),
     /// Sent while nothing else is; it carries `{}`.
     Ping,
     Done(Box<GenerationDone>),
@@ -460,6 +547,8 @@ impl StreamEvent {
         Ok(Some(match name {
             "token" => StreamEvent::Token(serde_json::from_str(data).map_err(bad)?),
             "output" => StreamEvent::Output(serde_json::from_str(data).map_err(bad)?),
+            "progress" => StreamEvent::Progress(serde_json::from_str(data).map_err(bad)?),
+            "preview" => StreamEvent::Preview(serde_json::from_str(data).map_err(bad)?),
             "ping" => StreamEvent::Ping,
             "done" => StreamEvent::Done(Box::new(serde_json::from_str(data).map_err(bad)?)),
             "error" => StreamEvent::Error(serde_json::from_str(data).map_err(bad)?),
@@ -472,6 +561,8 @@ impl StreamEvent {
         match self {
             StreamEvent::Token(_) => "token",
             StreamEvent::Output(_) => "output",
+            StreamEvent::Progress(_) => "progress",
+            StreamEvent::Preview(_) => "preview",
             StreamEvent::Ping => "ping",
             StreamEvent::Done(_) => "done",
             StreamEvent::Error(_) => "error",
@@ -483,6 +574,8 @@ impl StreamEvent {
         match self {
             StreamEvent::Token(t) => serde_json::to_string(t),
             StreamEvent::Output(o) => serde_json::to_string(o),
+            StreamEvent::Progress(p) => serde_json::to_string(p),
+            StreamEvent::Preview(p) => serde_json::to_string(p),
             StreamEvent::Ping => Ok("{}".to_string()),
             StreamEvent::Done(d) => serde_json::to_string(d),
             StreamEvent::Error(e) => serde_json::to_string(e),
@@ -567,7 +660,7 @@ mod tests {
         let Some(StreamEvent::Token(e)) = StreamEvent::parse("token", t).unwrap() else { panic!() };
         assert_eq!((e.id, e.phase, e.n), (42, Phase::Content, 1));
         assert_eq!(StreamEvent::parse("ping", "{}").unwrap(), Some(StreamEvent::Ping));
-        assert_eq!(StreamEvent::parse("progress", "{}").unwrap(), None);
+        assert_eq!(StreamEvent::parse("gogi_unknown", "{}").unwrap(), None);
         let err = r#"{"error": {"type": "internal", "message": "the engine failed; nothing more is sent"}, "request_id": "req_1"}"#;
         let Some(StreamEvent::Error(b)) = StreamEvent::parse("error", err).unwrap() else { panic!() };
         assert_eq!(b.request_id.as_deref(), Some("req_1"));
@@ -660,11 +753,63 @@ mod tests {
         }
     }
 
+    fn progress(index: Option<u64>, step: u64, of: u64) -> StreamEvent {
+        StreamEvent::Progress(ProgressEvent { index, step, of })
+    }
+
+    fn image(index: u64, step: u64, of: u64) -> StreamEvent {
+        StreamEvent::Preview(PreviewEvent { index: Some(index), step, of, id: Some(crate::ids::ContentId::parse(snap("51f0")).unwrap()), mime: Some("image/png".into()), text: None })
+    }
+
+    fn draft(step: u64, of: u64, text: &str) -> StreamEvent {
+        StreamEvent::Preview(PreviewEvent { index: None, step, of, id: None, mime: None, text: Some(text.into()) })
+    }
+
+    #[test]
+    fn progress_and_preview_events_decode_and_encode() {
+        for (name, data) in [("progress", r#"{"index":0,"step":12,"of":30}"#), ("progress", r#"{"step":3,"of":64}"#),
+                             ("preview", &format!(r#"{{"index":1,"step":2,"of":30,"id":"{}","mime":"image/png"}}"#, snap("51f0"))),
+                             ("preview", r#"{"step":3,"of":64,"text":"the ░░ fox"}"#)] {
+            let e = StreamEvent::parse(name, data).unwrap().unwrap();
+            assert_eq!((e.name(), e.data().as_str()), (name, data));
+        }
+        assert!(StreamEvent::parse("progress", r#"{"step":1,"of":2,"pct":50}"#).is_err(), "an unknown member");
+    }
+
+    #[test]
+    fn steps_of_two_outputs_and_of_text_pass() {
+        let events = [progress(Some(0), 1, 2), progress(Some(1), 1, 2), image(0, 1, 2), image(1, 1, 2), progress(Some(0), 2, 2), image(0, 2, 2),
+                      progress(None, 1, 64), draft(1, 64, "░░"), progress(None, 2, 64)];
+        check_steps(&events, true).unwrap();
+        check_steps(&[progress(None, 1, 3), progress(None, 2, 3)], false).unwrap();
+    }
+
+    #[test]
+    fn each_rule_of_the_steps_refuses() {
+        let cases: [(&str, Vec<StreamEvent>, bool); 8] = [
+            ("a preview with no previews", vec![progress(Some(0), 1, 2), image(0, 1, 2)], false),
+            ("a step that skips", vec![progress(Some(0), 1, 3), progress(Some(0), 3, 3)], true),
+            ("a first step of 2", vec![progress(Some(0), 2, 3)], true),
+            ("an of that changes", vec![progress(Some(0), 1, 3), progress(Some(0), 2, 4)], true),
+            ("a step past of", vec![progress(None, 1, 1), progress(None, 2, 1)], true),
+            ("a preview before its progress", vec![image(0, 1, 2)], true),
+            ("a text preview with an index", vec![progress(Some(0), 1, 2), StreamEvent::Preview(PreviewEvent { index: Some(0), step: 1, of: 2, id: None, mime: None, text: Some("x".into()) })], true),
+            ("an object preview with text too", vec![progress(Some(0), 1, 2), StreamEvent::Preview(PreviewEvent { text: Some("x".into()), ..match image(0, 1, 2) { StreamEvent::Preview(p) => p, _ => unreachable!() } })], true),
+        ];
+        for (what, events, previews) in cases {
+            assert!(check_steps(&events, previews).is_err(), "{what} passes");
+        }
+    }
+
     #[test]
     fn the_request_rules_each_refuse() {
         let ctx = Context { messages: vec![crate::message::Message::user("u")], ..Default::default() };
-        let r = GenerationRequest { model: "m".into(), context: ctx, max_tokens: 8, sample: Some(Sample { temperature: Some(0.0), ..Default::default() }), stream: None, decisions: Vec::new(), class: None, priority: None, output: None };
+        let r = GenerationRequest { model: "m".into(), context: ctx, max_tokens: 8, sample: Some(Sample { temperature: Some(0.0), ..Default::default() }), stream: None, decisions: Vec::new(), class: None, priority: None, output: None, previews: None };
         r.validate().unwrap();
+        let e = GenerationRequest { previews: Some(true), ..r.clone() }.validate().unwrap_err();
+        assert_eq!(e.param.as_deref(), Some("previews"), "previews with no stream: {e:?}");
+        GenerationRequest { previews: Some(true), stream: Some(true), ..r.clone() }.validate().unwrap();
+        GenerationRequest { previews: Some(false), ..r.clone() }.validate().unwrap();
         assert!(GenerationRequest { max_tokens: 0, ..r.clone() }.validate().is_err());
         let v = json!({"model": "m", "context": {"messages": [{"role": "user", "content": "u"}]}});
         assert!(serde_json::from_value::<GenerationRequest>(v).is_err(), "a generation sends max_tokens");

@@ -1,4 +1,4 @@
-use gogi_proto::generation::{GenerationDone, StreamEvent};
+use gogi_proto::generation::{check_steps, GenerationDone, StreamEvent};
 use gogi_proto::identity::Capability;
 use gogi_proto::{content_id, content_id_problem};
 use serde_json::json;
@@ -12,7 +12,7 @@ const UNWRITTEN: &str = "application/x-gogi-conformance-unwritten";
 impl Suite {
     /// Checks a generation that writes an output: the `output` event's pending id, the sealed
     /// output in `done`, its bytes and their id, the `308` of the pending id once sealed, the
-    /// reply's message with its output, and `usage.media`.
+    /// reply's message with its output, `usage.media`, and the steps and previews of the stream.
     pub(crate) fn outputs(&mut self) {
         if !self.has(Capability::Generate) {
             self.r.skip("outputs", "the served model does not declare generate");
@@ -33,7 +33,7 @@ impl Suite {
             self.r.fail("a served model that writes media is on a server with objects", format!("it writes {:?}, but the server does not declare the objects capability", outputs));
             return;
         }
-        let body = json!({"context": ctx, "max_tokens": 256, "sample": {"temperature": 0, "seed": 5}, "output": {"mime": mime}, "stream": true});
+        let body = json!({"context": ctx, "max_tokens": 256, "sample": {"temperature": 0, "seed": 5}, "output": {"mime": mime}, "stream": true, "previews": true});
         let sent = self.routed("POST", "/council/v2/generations", Some(body.clone())).expect("a body stays a body");
         let r = match self.http.raw("POST", "/council/v2/generations", Some(&sent)) {
             Ok(r) => r,
@@ -60,6 +60,25 @@ impl Suite {
             return;
         };
         self.r.ok_with("a generation with an output sends an output event and done", "");
+        let steps = check_steps(&events, true);
+        self.r.check("a stream's progress and preview events follow their rules", steps.is_ok(), steps.err());
+        let previews: Vec<_> = events.iter().filter_map(|e| if let StreamEvent::Preview(p) = e { Some(p.clone()) } else { None }).collect();
+        let progress = events.iter().filter(|e| matches!(e, StreamEvent::Progress(_))).count();
+        match previews.last() {
+            None => self.r.skip("a preview object reads back with its media type", format!("the served model sent {} progress events and no preview", progress)),
+            Some(p) => {
+                self.r.ok_with("a stream with previews: true sends previews", format!("{} progress events, {} previews", progress, previews.len()));
+                if let (Some(id), Some(pmime)) = (&p.id, &p.mime) {
+                    // The server holds a preview with no keep, so it may be gone already.
+                    if let Some(g) = self.send_bytes("a preview object reads back with its media type", "GET", &format!("/council/v2/objects/{}", id), None, &[]) {
+                        let ok = g.status == 404 || (g.status == 200 && content_id(&g.body) == id.as_str() && g.header("content-type") == Some(pmime.as_str()));
+                        self.r.check("a preview object reads back with its media type", ok, (g.status, g.header("content-type"), pmime));
+                    }
+                }
+                let media = done.usage.media.unwrap_or_default();
+                self.r.check("usage.media does not count previews", media.written.objects == done.outputs.len() as u64, done.usage);
+            }
+        }
         self.r.check("an output event names a pending id", started.index == 0 && started.mime == mime && gogi_proto::ids::pending_id_problem(&started.pending).is_none(), &started);
         let Some(sealed) = done.outputs.first().cloned() else {
             self.r.fail("done names the sealed output", format!("{:?}", done.outputs));
@@ -103,6 +122,7 @@ impl Suite {
 
         let mut plain = body.clone();
         plain["stream"] = json!(false);
+        plain["previews"] = json!(false);
         if let Some(v) = self.expect("a generation with an output and no stream succeeds", "POST", "/council/v2/generations", Some(plain), 200)
             && let Some(d) = self.decode::<GenerationDone>("a generation with an output decodes", &v)
         {
@@ -113,6 +133,7 @@ impl Suite {
         if !outputs.iter().any(|p| gogi_proto::identity::mime_matches(p, UNWRITTEN)) {
             self.refused_naming("an output of a media type the model does not write is a 400 naming output.mime", "POST", "/council/v2/generations", Some(with(json!({"mime": UNWRITTEN}))), "output.mime", UNWRITTEN);
         }
+        self.refused_naming("previews with no stream is a 400 naming previews", "POST", "/council/v2/generations", Some(json!({"context": base, "max_tokens": 4, "output": {"mime": mime}, "previews": true})), "previews", "stream");
         self.refused_naming("an output media type in capitals is a 400 naming output.mime", "POST", "/council/v2/generations", Some(with(json!({"mime": "Image/PNG"}))), "output.mime", "Image/PNG");
         self.refused("an output with an unknown member is a 400", "POST", "/council/v2/generations", Some(with(json!({"mime": mime, "size": 3}))), 400);
         let unknown = format!("gogi_conformance_{}", self.nonce);
