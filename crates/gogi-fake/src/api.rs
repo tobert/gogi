@@ -4,7 +4,8 @@ use std::collections::{HashSet, VecDeque};
 
 use gogi_proto::canon::spec_id_of;
 use gogi_proto::context::{Context, MediaCount, MediaUsage, Usage};
-use gogi_proto::decision::{DecisionRequest, PoolMethod, PoolWeights, check_queue_schema, queue_call};
+use gogi_proto::decision::{DecisionIdentity, DecisionRequest, PoolMethod, PoolWeights, check_queue_schema, queue_call};
+use gogi_proto::embeddings::{Embedding, EmbeddingsRequest, EmbeddingsResponse};
 use gogi_proto::error::{ErrorBody, ErrorType};
 use gogi_proto::generation::{GenerationRequest, OutputEvent, Phase as EventPhase, PreviewEvent, ProgressEvent, StreamEvent, TokenEvent};
 use gogi_proto::identity::{ModelStatus, ServerIdentity};
@@ -17,6 +18,7 @@ use gogi_proto::spec::{Question, QuestionKind, SpecRules, parse_spec};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
+use gogi_toy::embed;
 use gogi_toy::read;
 use gogi_toy::reply::{Call, Reply, ReplyParser, Step};
 use gogi_toy::{self as model, State, VOCAB};
@@ -26,6 +28,9 @@ pub const TEMPLATE: &str = "gogi-toy-chat-3";
 
 /// The longest case, in bytes.
 const CASE_BYTES: usize = 65536;
+
+/// The most inputs one embedding request may send.
+const EMBED_INPUTS: u32 = 32;
 
 pub enum Resp {
     Json(u16, Value),
@@ -141,7 +146,8 @@ fn unescape(s: &str) -> String {
 
 /// The identity fields a served model's numbers depend on.
 fn identity_of(m: &FakeModel) -> Value {
-    json!({"model": m.name, "weight_hash": format!("0x{:016X}", m.seed), "tokenizer_hash": "bytes-v1", "template": TEMPLATE,
+    let template = if m.embeds { embed::TEMPLATE } else { TEMPLATE };
+    json!({"model": m.name, "weight_hash": format!("0x{:016X}", m.seed), "tokenizer_hash": "bytes-v1", "template": template,
            "engine": format!("gogi-fake:{}", env!("CARGO_PKG_VERSION"))})
 }
 
@@ -155,6 +161,14 @@ pub fn identity(store: &Store) -> Value {
             v["aliases"] = json!(m.aliases);
             v["status"] = json!(m.status);
             v["device"] = json!("cpu");
+            if m.embeds {
+                // A served model that only embeds has no text replies, no decision limits, and no snapshot.
+                v["limits"] = json!({"context_tokens": store.cfg.embed_tokens, "decision_context_tokens": 0, "snapshot_bytes": 0, "contexts_per_decision": 0, "default_timeout_ms": 30000});
+                v["capabilities"] = json!(["embed", "dry_run"]);
+                v["media"] = json!({"inputs": [], "outputs": [], "text_replies": false});
+                v["embeddings"] = json!({"tasks": embed::TASKS.iter().map(|(t, _)| *t).collect::<Vec<_>>(), "dimensions": embed::DIMENSIONS, "inputs_per_request": EMBED_INPUTS});
+                return v;
+            }
             v["limits"] = json!({"context_tokens": store.cfg.context_tokens, "decision_context_tokens": store.cfg.decision_context_tokens,
                                  "snapshot_bytes": BYTES_PER_TOKEN, "contexts_per_decision": 8, "default_timeout_ms": 30000});
             v["capabilities"] = json!(["reads", "generate", "continuation", "dry_run", "leave_one_out"]);
@@ -232,7 +246,11 @@ fn route(store: &Store, model: &str) -> Result<FakeModel, Resp> {
     if m.status != ModelStatus::Ready {
         return Err(Resp::Json(503, serde_json::to_value(ErrorBody::unavailable(m)).unwrap()));
     }
-    Ok(store.cfg.models.iter().find(|f| f.name == m.model).cloned().expect("identity lists the config's models"))
+    let f = store.cfg.models.iter().find(|f| f.name == m.model).cloned().expect("identity lists the config's models");
+    if f.embeds {
+        return Err(bad_param("model", format!("nothing ran: model {} only embeds and has no text replies; send POST /council/v2/embeddings, or name a model that reads contexts", f.name)));
+    }
+    Ok(f)
 }
 
 pub fn handle(store: &mut Store, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Resp {
@@ -318,6 +336,7 @@ pub fn handle(store: &mut Store, method: &str, path: &str, headers: &[(String, S
         ("POST", ["decisions"]) => decisions(store, body),
         ("POST", ["reads"]) => reads(store, body),
         ("POST", ["generations"]) => generations(store, body),
+        ("POST", ["embeddings"]) => embeddings(store, body),
         _ => not_found("unknown route"),
     }
 }
@@ -1111,4 +1130,55 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
                "usage": usage,
                "queue_ms": 0.0, "ms": t0.elapsed().as_secs_f64() * 1000.0}),
     )
+}
+
+// ---- embeddings
+
+fn embeddings(store: &mut Store, body: &[u8]) -> Resp {
+    let req: EmbeddingsRequest = match parse(body, "embeddings") {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let id: ServerIdentity = serde_json::from_value(identity(store)).expect("the fake's identity decodes");
+    let served = match id.route(&req.model) {
+        Ok(m) => m.clone(),
+        Err(e) => return invalid(e),
+    };
+    if served.status != ModelStatus::Ready {
+        return Resp::Json(503, serde_json::to_value(ErrorBody::unavailable(&served)).unwrap());
+    }
+    let d = match req.check(&served) {
+        Ok(d) => d,
+        Err(e) => return invalid(e),
+    };
+    let m = store.cfg.models.iter().find(|f| f.name == served.model).cloned().expect("identity lists the config's models");
+    if let Err(r) = check_objects(store, &m, &req.objects()) {
+        return r;
+    }
+    let limit = store.cfg.embed_tokens;
+    let tokens: Vec<Vec<u32>> = req.inputs.iter().map(|input| embed::tokens(&req.task, input)).collect();
+    if !req.dry_run
+        && let Some((i, t)) = tokens.iter().enumerate().find(|(_, t)| t.len() > limit)
+    {
+        let message = format!("nothing was embedded: inputs[{}] is {} tokens with its task prompt; context_tokens is {}; split the input", i, t.len(), limit);
+        return Resp::Json(413, json!({"error": {"type": "too_large", "message": message, "param": "context_tokens", "prompt_tokens": t.len(), "context_tokens": limit}}));
+    }
+    let embeddings: Vec<Embedding> = tokens
+        .iter()
+        .enumerate()
+        .map(|(i, t)| Embedding { index: i as u64, tokens: t.len() as u64, vector: (!req.dry_run).then(|| embed::vector(m.seed, t, d as usize)) })
+        .collect();
+    let all: u64 = embeddings.iter().map(|e| e.tokens).sum();
+    let ident = identity_of(&m);
+    let identity = DecisionIdentity {
+        model: m.name.clone(),
+        weight_hash: ident["weight_hash"].as_str().unwrap_or_default().into(),
+        tokenizer_hash: ident["tokenizer_hash"].as_str().unwrap_or_default().into(),
+        template: ident["template"].as_str().unwrap_or_default().into(),
+        engine: ident["engine"].as_str().unwrap_or_default().into(),
+        spec_id: None,
+    };
+    let usage = Usage { prompt: all, kept: 0, fed: if req.dry_run { 0 } else { all }, completion: 0, reasoning: 0, media: media_usage(store, &req.objects(), &[]) };
+    let resp = EmbeddingsResponse { model: m.name.clone(), task: req.task.clone(), dimensions: d, embeddings, identity, usage };
+    Resp::Json(200, serde_json::to_value(resp).expect("an embeddings response encodes"))
 }

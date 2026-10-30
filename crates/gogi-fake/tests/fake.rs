@@ -718,3 +718,113 @@ fn a_call_hook_reads_the_text_parts_of_the_last_message() {
     assert_eq!(code, 200, "{d}");
     assert_eq!(d["finish"], "tool_use", "{d}");
 }
+
+fn with_embedder() -> Server {
+    let embed = FakeModel { aliases: vec!["toy-embed".into()], ..FakeModel::embedding("gogi-toy-embed-1", 0) };
+    Server::start(Config { models: vec![FakeModel::ready("gogi-toy-1", 0), embed], ..Config::default() }).unwrap()
+}
+
+fn embed(s: &Server, body: Value) -> (u16, Value) {
+    post(s, "/council/v2/embeddings", body)
+}
+
+fn vector(v: &Value) -> Vec<f32> {
+    v["vector"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap() as f32).collect()
+}
+
+#[test]
+fn identity_lists_a_model_that_only_embeds() {
+    let s = with_embedder();
+    let (_, id) = call(&s, "GET", "/council/v2/identity", None);
+    let m = &id["models"][1];
+    assert_eq!(m["model"], "gogi-toy-embed-1");
+    assert_eq!(m["capabilities"], json!(["embed", "dry_run"]));
+    assert_eq!(m["media"], json!({"inputs": [], "outputs": [], "text_replies": false}));
+    assert_eq!(m["embeddings"], json!({"tasks": ["query", "document", "similarity"], "dimensions": [64, 32, 16], "inputs_per_request": 32}));
+    assert_eq!((m["limits"]["context_tokens"].as_u64(), m["limits"]["decision_context_tokens"].as_u64()), (Some(512), Some(0)));
+    assert!(!id["models"][0]["capabilities"].as_array().unwrap().contains(&json!("embed")));
+}
+
+#[test]
+fn an_embedding_is_a_unit_vector_per_input_that_replays_alone() {
+    let s = with_embedder();
+    let (code, a) = embed(&s, json!({"model": "toy-embed", "task": "query", "inputs": ["pin a snapshot", "evict"]}));
+    assert_eq!(code, 200, "{a}");
+    assert_eq!((a["model"].as_str(), a["dimensions"].as_u64(), a["task"].as_str()), (Some("gogi-toy-embed-1"), Some(64), Some("query")));
+    let e = a["embeddings"].as_array().unwrap();
+    assert_eq!((e.len(), e[0]["index"].as_u64(), e[1]["index"].as_u64()), (2, Some(0), Some(1)));
+    assert_eq!(e[1]["tokens"].as_u64(), Some(1 + "task: search result | query: ".len() as u64 + 5));
+    let n: f64 = vector(&e[0]).iter().map(|x| f64::from(*x).powi(2)).sum::<f64>().sqrt();
+    assert!((n - 1.0).abs() < 1e-6, "{n}");
+    assert_eq!(a["usage"], json!({"prompt": e[0]["tokens"].as_u64().unwrap() + e[1]["tokens"].as_u64().unwrap(), "kept": 0, "fed": e[0]["tokens"].as_u64().unwrap() + e[1]["tokens"].as_u64().unwrap(), "completion": 0, "reasoning": 0}));
+    assert_eq!(a["identity"]["template"], "gogi-toy-embed-1");
+    let (_, alone) = embed(&s, json!({"model": "gogi-toy-embed-1", "task": "query", "inputs": ["evict"]}));
+    assert_eq!(alone["embeddings"][0]["vector"], e[1]["vector"], "a vector does not depend on the other inputs");
+    let (_, doc) = embed(&s, json!({"model": "gogi-toy-embed-1", "task": "document", "inputs": ["evict"]}));
+    assert_ne!(doc["embeddings"][0]["vector"], e[1]["vector"], "the task changes the vector");
+}
+
+#[test]
+fn a_cut_is_the_whole_vector_cut_and_normalized_again() {
+    let s = with_embedder();
+    let (_, whole) = embed(&s, json!({"model": "toy-embed", "task": "document", "inputs": ["a chunk of a file"]}));
+    let (code, cut) = embed(&s, json!({"model": "toy-embed", "task": "document", "inputs": ["a chunk of a file"], "dimensions": 16}));
+    assert_eq!((code, cut["dimensions"].as_u64()), (200, Some(16)), "{cut}");
+    let want = gogi_proto::embeddings::cut(&vector(&whole["embeddings"][0]), 16);
+    let got = vector(&cut["embeddings"][0]);
+    assert!(got.iter().zip(&want).all(|(a, b)| (a - b).abs() < 1e-6), "{got:?} {want:?}");
+}
+
+#[test]
+fn a_dry_run_counts_tokens_past_the_limit_and_a_real_run_refuses_them() {
+    let s = with_embedder();
+    let long = "x".repeat(600);
+    let (code, dry) = embed(&s, json!({"model": "toy-embed", "task": "query", "inputs": ["short", long], "dry_run": true}));
+    assert_eq!(code, 200, "{dry}");
+    let e = &dry["embeddings"];
+    assert!(e[0].get("vector").is_none() && e[1].get("vector").is_none(), "{dry}");
+    assert_eq!(e[1]["tokens"].as_u64(), Some(1 + "task: search result | query: ".len() as u64 + 600));
+    assert_eq!(dry["usage"]["fed"], 0);
+    let (code, v) = embed(&s, json!({"model": "toy-embed", "task": "query", "inputs": ["short", long]}));
+    assert_eq!((code, v["error"]["type"].as_str(), v["error"]["param"].as_str()), (413, Some("too_large"), Some("context_tokens")), "{v}");
+    assert_eq!((v["error"]["prompt_tokens"].as_u64(), v["error"]["context_tokens"].as_u64()), (e[1]["tokens"].as_u64(), Some(512)));
+    assert!(v["error"]["message"].as_str().unwrap().contains("inputs[1]"), "{v}");
+}
+
+#[test]
+fn embedding_refusals_name_the_member() {
+    let s = with_embedder();
+    let id = format!("blake3:{}", "a".repeat(64));
+    for (body, code, param) in [
+        (json!({"task": "query", "inputs": ["a"]}), 400, "model"),
+        (json!({"model": "gogi-toy-1", "task": "query", "inputs": ["a"]}), 400, "model"),
+        (json!({"model": "toy-embed", "task": "rerank", "inputs": ["a"]}), 400, "task"),
+        (json!({"model": "toy-embed", "task": "query", "inputs": []}), 400, "inputs"),
+        (json!({"model": "toy-embed", "task": "query", "inputs": vec!["a"; 33]}), 400, "inputs"),
+        (json!({"model": "toy-embed", "task": "query", "inputs": ["a", ""]}), 400, "inputs[1]"),
+        (json!({"model": "toy-embed", "task": "query", "inputs": ["a"], "dimensions": 48}), 400, "dimensions"),
+        (json!({"model": "toy-embed", "task": "query", "inputs": [[{"type": "object", "id": id, "mime": "image/png"}]]}), 400, "inputs[0][0]"),
+        (json!({"model": "toy-embed", "task": "query", "inputs": ["a"], "normalize": false}), 400, "normalize"),
+    ] {
+        let (got, v) = embed(&s, body.clone());
+        assert_eq!((got, v["error"]["param"].as_str()), (code, Some(param)), "{body} -> {v}");
+    }
+    s.set_status("gogi-toy-embed-1", ModelStatus::Loading).unwrap();
+    let (got, v) = embed(&s, json!({"model": "toy-embed", "task": "query", "inputs": ["a"]}));
+    assert_eq!((got, v["error"]["type"].as_str()), (503, Some("model_unavailable")), "{v}");
+}
+
+#[test]
+fn a_model_that_only_embeds_refuses_contexts_naming_model() {
+    let s = with_embedder();
+    let c = ctx(json!([{"role": "user", "content": "u"}]));
+    for (path, body) in [
+        ("/council/v2/contexts", json!({"model": "toy-embed", "context": c})),
+        ("/council/v2/reads", json!({"model": "toy-embed", "contexts": [c], "suffixes": ["A"], "letters": ["A", "B"]})),
+        ("/council/v2/generations", json!({"model": "toy-embed", "context": c, "max_tokens": 4})),
+        ("/council/v2/decisions", json!({"model": "toy-embed", "spec_id": format!("blake3:{}", "0".repeat(64)), "case": "x", "contexts": [c]})),
+    ] {
+        let (code, v) = post(&s, path, body);
+        assert_eq!((code, v["error"]["param"].as_str()), (400, Some("model")), "{path}: {v}");
+    }
+}

@@ -23,11 +23,20 @@ pub struct FakeModel {
     pub aliases: Vec<String>,
     pub seed: u64,
     pub status: ModelStatus,
+    /// It only embeds, with the toy embedding model (`gogi_toy::embed`): it declares `embed` and
+    /// no `generate`, and a build, a decision, a raw read, or a generation that names it is a
+    /// `400` naming `model`.
+    pub embeds: bool,
 }
 
 impl FakeModel {
     pub fn ready(name: &str, seed: u64) -> FakeModel {
-        FakeModel { name: name.into(), aliases: vec![], seed, status: ModelStatus::Ready }
+        FakeModel { name: name.into(), aliases: vec![], seed, status: ModelStatus::Ready, embeds: false }
+    }
+
+    /// A ready served model that only embeds.
+    pub fn embedding(name: &str, seed: u64) -> FakeModel {
+        FakeModel { embeds: true, ..FakeModel::ready(name, seed) }
     }
 }
 
@@ -56,12 +65,15 @@ pub struct Config {
     pub media_inputs: Vec<String>,
     /// The media types every served model writes, as identity's `media.outputs` lists them.
     pub media_outputs: Vec<String>,
+    /// The longest input a served model that embeds reads, with its task prompt: its
+    /// `limits.context_tokens`.
+    pub embed_tokens: usize,
 }
 
 impl Default for Config {
     fn default() -> Self {
         let toy = FakeModel { aliases: vec!["toy".into()], ..FakeModel::ready("gogi-toy-1", 0) };
-        Config { addr: "127.0.0.1:0".into(), models: vec![toy], state_dir: None, context_tokens: 4096, decision_context_tokens: 3072, pin_bytes: 1 << 20, max_snapshots: 10_000, seal_cut_heads: false, object_bytes: 1 << 20, keep_bytes: 8 << 20, media_inputs: vec!["image/*".into(), "audio/*".into()], media_outputs: vec!["application/x-gogi-toy".into()] }
+        Config { addr: "127.0.0.1:0".into(), models: vec![toy], embed_tokens: 512, state_dir: None, context_tokens: 4096, decision_context_tokens: 3072, pin_bytes: 1 << 20, max_snapshots: 10_000, seal_cut_heads: false, object_bytes: 1 << 20, keep_bytes: 8 << 20, media_inputs: vec!["image/*".into(), "audio/*".into()], media_outputs: vec!["application/x-gogi-toy".into()] }
     }
 }
 

@@ -121,7 +121,7 @@ mod _gogi {
             if let Some(dup) = names.clone().find(|n| out.iter().any(|o| o.name == *n || o.aliases.iter().any(|a| a == n))) {
                 return Err(bad(&format!("{} already names another served model", dup)));
             }
-            out.push(gogi_fake::FakeModel { name: name.into(), aliases, seed, status });
+            out.push(gogi_fake::FakeModel { name: name.into(), aliases, seed, status, embeds: false });
         }
         Ok(out)
     }

@@ -78,6 +78,28 @@ open message        <asst> [<think> reasoning [<endthink>]] [content]
 - Each open field tokenizes on its own, because a token is a byte, so the seam check
   (`gogi_toy::check_open`) never refuses a toy context.
 
+## Embeddings
+
+`gogi_toy::embed` is a toy embedding model. `Config::models` serves it as a `FakeModel` from
+`FakeModel::embedding(name, seed)`, and `gogi-fake --embed-model NAME` serves one more such
+model, ready. Such a model only embeds: it declares `embed` and `dry_run`, its `media` has
+`text_replies: false` and no outputs, and a build, a decision, a raw read, or a generation that
+names it is a `400` naming `model`. Its template id is `gogi-toy-embed-1`.
+
+- It has three tasks, with prompts in the shape of EmbeddingGemma's: `query` (`task: search
+  result | query: `), `document` (`title: none | text: `), and `similarity` (`task: sentence
+  similarity | query: `).
+- An input reads as `<bos>`, the task's prompt as bytes, and the content as a message's content
+  renders. `tokens` counts all of them.
+- The vector is the mean, over each token position, of the first 64 logits of the model state
+  after that position, each divided by 6. Its dimensions are 64, 32, and 16: a cut takes the
+  first components of the mean. The vector is then normalized in float64 and written as
+  float32. So a cut is the whole vector cut and normalized again, within float32 rounding.
+- An input's vector depends on its served model's seed, its task, and its tokens only, never on
+  the other inputs.
+- `Config::embed_tokens`, 512 by default, is its `context_tokens`. A request takes at most 32
+  inputs.
+
 ## Reply parser
 
 `gogi_toy::reply::ReplyParser` reads a reply's token ids, one at a time, after the generation

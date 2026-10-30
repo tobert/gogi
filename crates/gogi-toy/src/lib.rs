@@ -36,6 +36,7 @@
 //! the tokens, and the logits are a deterministic function of that hash. The same served model and
 //! prefix give the same bits; two seeds are two models.
 
+pub mod embed;
 pub mod read;
 pub mod reply;
 

@@ -1,10 +1,11 @@
-//! `gogi-fake [--listen ADDR] [--state-dir DIR] [--context-tokens N] [--seal-cut-heads] [--model NAME]...`
+//! `gogi-fake [--listen ADDR] [--state-dir DIR] [--context-tokens N] [--seal-cut-heads] [--model NAME]... [--embed-model NAME]...`
 
 use gogi_fake::{Config, FakeModel, Server};
 
 fn main() {
     let mut cfg = Config { addr: "127.0.0.1:8091".into(), ..Config::default() };
     let mut models = Vec::new();
+    let mut embeds = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut value = |name: &str| args.next().unwrap_or_else(|| usage(&format!("{} needs a value", name)));
@@ -17,12 +18,17 @@ fn main() {
                 let name = value("--model");
                 models.push(FakeModel::ready(&name, models.len() as u64));
             }
+            "--embed-model" => {
+                let name = value("--embed-model");
+                embeds.push(FakeModel::embedding(&name, embeds.len() as u64));
+            }
             _ => usage(&format!("unknown argument {}", a)),
         }
     }
     if !models.is_empty() {
         cfg.models = models;
     }
+    cfg.models.extend(embeds);
     let server = Server::start(cfg).unwrap_or_else(|e| usage(&e));
     println!("gogi-fake listening on {}", server.url());
     loop {
@@ -31,6 +37,6 @@ fn main() {
 }
 
 fn usage(msg: &str) -> ! {
-    eprintln!("gogi-fake: {}\nusage: gogi-fake [--listen ADDR] [--state-dir DIR] [--context-tokens N] [--seal-cut-heads] [--model NAME]...\n\n  --model NAME      serve a model named NAME, ready; repeat it to serve more than one. Default: gogi-toy-1, alias toy\n  --seal-cut-heads  hold a cut reply's head sealed, so a continuation from it reads a rounded model state", msg);
+    eprintln!("gogi-fake: {}\nusage: gogi-fake [--listen ADDR] [--state-dir DIR] [--context-tokens N] [--seal-cut-heads] [--model NAME]... [--embed-model NAME]...\n\n  --model NAME      serve a model named NAME, ready; repeat it to serve more than one. Default: gogi-toy-1, alias toy\n  --embed-model NAME  also serve a model named NAME that only embeds, ready\n  --seal-cut-heads  hold a cut reply's head sealed, so a continuation from it reads a rounded model state", msg);
     std::process::exit(2)
 }
