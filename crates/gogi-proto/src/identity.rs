@@ -33,6 +33,8 @@ pub enum Capability {
     /// Requests are scheduled by `class` and `priority`. Every client is trusted with
     /// `priority`.
     Classes,
+    /// `POST /council/v2/embeddings`, as the served model's `embeddings` describes.
+    Embed,
     #[serde(other)]
     Unknown,
 }
@@ -140,6 +142,9 @@ pub struct ServedModel {
     pub capabilities: Vec<Capability>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media: Option<Media>,
+    /// What it embeds, with `embed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embeddings: Option<crate::embeddings::Embeddings>,
 }
 
 impl ServedModel {

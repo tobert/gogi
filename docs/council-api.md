@@ -98,6 +98,8 @@ thing, and each thing has one term.
 | template | How a server renders messages, specs, and cases into tokens. It is part of identity. |
 | capability | An optional part of the contract a server declares in identity, such as `reads` or `pins`: for the server, or for one served model. A client ignores a capability it does not know. |
 | class | How a request is scheduled: `interactive` or `batch`. It never changes a number. |
+| embedding | A vector a served model computes for one input, so a client can compare inputs by meaning. Capability `embed`. |
+| task | What an embedding is for, such as `query` or `document`. The server renders the task's prompt before the input. |
 
 ## Endpoints
 
@@ -115,6 +117,7 @@ thing, and each thing has one term.
 | `POST /council/v2/decisions` | Reads a case after each context and pools the reads. |
 | `POST /council/v2/reads` | Raw reads: letter log probabilities after a suffix. Capability `reads`. |
 | `POST /council/v2/generations` | A sampled reply after a context. Capability `generate`. |
+| `POST /council/v2/embeddings` | A vector for each input. Capability `embed`. |
 
 ## Content ids
 
@@ -1026,6 +1029,111 @@ POST /council/v2/generations
 - **A server declares capability `continuation`.** Without it, an open
   message is a `400` naming `continue`.
 
+## Embeddings
+
+```json
+POST /council/v2/embeddings
+{"model": "embeddinggemma-2", "task": "query", "dimensions": 256,
+ "inputs": ["how does the gate pick a verdict?", "pin a snapshot for an hour"]}
+-> {"model": "embeddinggemma-2", "task": "query", "dimensions": 256,
+    "embeddings": [{"index": 0, "tokens": 17, "vector": [0.0132, -0.0871, …]},
+                   {"index": 1, "tokens": 15, "vector": [-0.0410, 0.0026, …]}],
+    "identity": {"model": "embeddinggemma-2", "weight_hash": "…", "tokenizer_hash": "…",
+                 "template": "…", "engine": "…"},
+    "usage": {"prompt": 32, "kept": 0, "fed": 32, "completion": 0, "reasoning": 0}}
+```
+
+An embedding is a vector a served model computes for one input, so a
+client can compare inputs by meaning, as kaijutsu's semantic search does.
+Capability `embed`.
+
+Decided 2026-10-30 (Amy, by interview): the route is native to the council
+API; the request names its `task`, and the server, not the client, renders
+the task's prompt; `dimensions` asks for a shorter vector; inputs are text
+now, and objects later. Each rule marked (Proposed) is Claude Opus 5.5's,
+2026-10-30, for Amy to decide.
+
+- **A request takes `model`, `task`, `inputs`, `dimensions`, `dry_run`,
+  `class`, and `priority`.** `model`, `task`, and `inputs` are required.
+  Any other member is a `400` naming it.
+- **`task` says what the embeddings are for,** such as `query` or
+  `document` for search. It is one of the served model's
+  `embeddings.tasks`; any other is a `400` naming `task`, and the message
+  lists the tasks. The server renders the task's prompt, such as
+  EmbeddingGemma's `task: search result | query: `, before each input, as
+  the template renders a chat. The prompts are part of `template`. A client
+  never writes them, so a client that wrote one would embed it twice. A
+  served model for search names its tasks `query` and `document`, so a
+  client asks every such model the same way. (Proposed)
+- **`inputs` is 1 to `embeddings.inputs_per_request` inputs,** each content
+  as a message's content is: a string or an array of parts. A request with
+  no inputs or more inputs is a `400` naming `inputs`. An empty input, an
+  empty string or an empty array, is a `400` naming it, such as
+  `inputs[2]`. (Proposed: an empty input is usually a chunker's fault.)
+- **An object part is checked as a message's object part is,** with the
+  part named `inputs[i][j]`. A served model whose `media.inputs` is empty
+  embeds text only, so an object part is a `400` naming it. An embedding
+  model that reads images or audio lists them in `media.inputs`.
+- **`dimensions` asks for the first so many components,** one of the
+  served model's `embeddings.dimensions`; any other value is a `400`
+  naming `dimensions`. Absent, it is the largest. A model trained for it,
+  such as EmbeddingGemma with Matryoshka training, keeps most of its
+  quality in the first components. The server cuts the whole vector, then
+  normalizes the cut again.
+- **Every vector has an L2 norm of 1,** within float32 rounding, so the
+  cosine of two vectors is their dot product. A server normalizes the
+  vectors of a model that does not. (Proposed)
+- **The response has one embedding for each input,** in input order:
+  `{index, tokens, vector}`. `tokens` counts the input as the served model
+  reads it, with its task prompt and its special tokens. `vector` is
+  `dimensions` float32 values, each written as the shortest decimal that
+  reads back as the same float32. (Proposed: JSON numbers only. A base64
+  encoding of the float32 bytes can come later, if the size of a response
+  matters.)
+- **`identity` is the identity fields the vectors depend on,** as a
+  decision's are. A vector of one identity is not comparable with a vector
+  of another, even for the same model name: a client that stores vectors
+  stores the identity with them, and embeds again when it changes.
+  (Proposed)
+- **Vectors replay bit for bit, as rule 1 says.** The same identity, task,
+  dimensions, and input give the same vector. An input's vector does not
+  depend on the other inputs of its request or on their order, so a client
+  can cache vectors by input. (Proposed: a server that batches inputs pads
+  them so that each one computes as if alone.)
+- **An input past `limits.context_tokens` is a `413`** with `error.type`
+  `too_large`, `param` `context_tokens`, `prompt_tokens`, and
+  `context_tokens`, and the message names the first such input. Nothing is
+  embedded. The server never cuts an input, because a vector of part of an
+  input looks like a vector of all of it. The client splits the input.
+  (Proposed)
+- **`dry_run: true` counts the tokens of each input and embeds nothing.**
+  Each embedding then has `index` and `tokens` and no `vector`, and
+  `usage.fed` is 0. A dry run never refuses an input for its length, so a
+  chunker learns how far past the limit an input is. Capability `dry_run`.
+  (Proposed: this is all that a chunker needs from the server, so the
+  contract adds no `tokenize`. See below.)
+- **`usage`** counts every input's `tokens` in `prompt` and `fed`; `kept`,
+  `completion`, and `reasoning` are 0. An embedding request starts from no
+  snapshot and holds none.
+- **A served model that only embeds** has capability `embed` and no
+  `generate`, and its `media` has `text_replies: false` and no outputs. A
+  build, a decision, a raw read, or a generation that names it is a `400`
+  naming `model`. Its decision limits and `snapshot_bytes` are 0;
+  `context_tokens` is the longest input it embeds. (Proposed: this reuses
+  the rules of a model with no text replies, so a server needs no new
+  refusal.)
+- **An embedding request that names a served model without `embed`** is a
+  `400` naming `model`. A chat model can also declare `embed`, such as one
+  that pools its last hidden state, under its own identity.
+
+**Why the contract has no `tokenize` (Proposed).** A chunker splits a
+document into inputs that fit `context_tokens`. It needs the token count of
+a candidate chunk, with the task prompt counted, and a dry run gives that.
+It does not need token ids or text pieces: a chunk is text, and the server
+tokenizes it again. Token ids are part of one tokenizer, so a client that
+kept them would break when `tokenizer_hash` changes. A server that serves
+`tokenize` for its own tools keeps it as an extension, as mkviolet does.
+
 ## Request ids and tracing
 
 - **Every response carries a `request-id` header,** a status response, an
@@ -1053,7 +1161,7 @@ next step when one is known.
 |---|---|---|
 | `400` | `invalid_request` | The body is outside the schema, including a missing `model` or an unknown field; `model` names no served model; `ask` or `options` names what the spec lacks; a needed capability is missing; an id is not a whole content id. `param` names the field, or `id` for an id in the path. |
 | `404` | `not_found` | An unknown spec id, snapshot id, object id, pin owner, or keep owner; an object a part or `case_media` names that the server does not hold, with `param` naming it. |
-| `413` | `too_large` | A case, spec, context, pin set, object, or keep set is past a limit in identity; `param` names the limit, such as `case_bytes`, `pin_bytes`, `object_bytes`, or `keep_bytes`. Nothing is held. |
+| `413` | `too_large` | A case, spec, context, pin set, object, keep set, or embedding input is past a limit in identity; `param` names the limit, such as `case_bytes`, `pin_bytes`, `object_bytes`, `keep_bytes`, or `context_tokens`. Nothing is held. |
 | `416` | `invalid_request` | A `Range` on an object starts past its end; `param` is `range`. |
 | `413` | `context_full` | A generation's prompt leaves no room for a reply; the body has `prompt_tokens` and `context_tokens`. |
 | `429` | `busy` | The server has more requests than it runs. `Retry-After` when known. |
@@ -1101,7 +1209,8 @@ next step when one is known.
 `aliases`, `weight_hash`, `tokenizer_hash`, `template`, `engine`, `device`,
 and, with `describe`, `text_stop`, plus `status`, `limits`, and
 `capabilities`, and `media` when it reads or writes more than text:
-`{inputs, outputs}`, each a list of `type/subtype` or `type/*`. A limit or capability belongs to the served model when it
+`{inputs, outputs}`, each a list of `type/subtype` or `type/*`, and
+`embeddings` when it declares `embed`. A limit or capability belongs to the served model when it
 depends on the model, and to the server when it depends on the store or on
 specs, which every served model shares.
 
@@ -1124,9 +1233,21 @@ specs, which every served model shares.
   server's, as any served model's. Decided 2026-10-27 (Amy,
   by interview), for nagaya's speech model.
 
+- **`embeddings` describes what a served model embeds** (Proposed):
+  `{tasks, dimensions, inputs_per_request}`. `tasks` lists the task names
+  a request may send. `dimensions` lists the vector lengths it offers,
+  largest first. `inputs_per_request` is the most inputs one request may
+  send, at least 1. A served model that declares `embed` has it, and one
+  that does not has none.
+
+  ```json
+  "embeddings": {"tasks": ["query", "document", "classification", "clustering", "similarity"],
+                 "dimensions": [768, 512, 256, 128], "inputs_per_request": 64}
+  ```
+
 | Limit | Where | Means |
 |---|---|---|
-| `context_tokens` | served model | The longest context, or a generation's prompt and reply. |
+| `context_tokens` | served model | The longest context, or a generation's prompt and reply, or an embedding input with its task prompt. |
 | `decision_context_tokens` | served model | The longest context a decision reads, not counting the spec and the case rendered after it. |
 | `snapshot_bytes` | served model | What one token of a snapshot costs. |
 | `contexts_per_decision` | served model | The most contexts one decision reads, at most 8. |
@@ -1147,7 +1268,8 @@ specs, which every served model shares.
 | `ride` | served model | Generations accept `decisions`. |
 | `continuation` | served model | Generations accept an open last message, `continue: true`. |
 | `infill` | served model | Reserved for a later top-level `infill` member of a generation. No server declares it yet. |
-| `dry_run` | served model | Builds accept `dry_run`. |
+| `dry_run` | served model | Builds accept `dry_run`, and embeddings too with `embed`. |
+| `embed` | served model | `POST /council/v2/embeddings`, as its `embeddings` member describes. |
 | `leave_one_out` | served model | Pooled answers carry `leave_one_out`. |
 | `describe` | served model | Specs may hold `text` questions. |
 | `pins` | server | `/council/v2/pins`. |
@@ -1164,7 +1286,7 @@ A server serves the model-specific rest under its own prefix and lists it in
 |---|---|
 | `render`, `tokenize`, `detokenize` | The template and tokenizer, for debugging and bench tools. |
 | `cases` | The last 32 decisions' cases and answers, for labeling. |
-| `embeddings` | Gemma 4's last hidden state; quality unmeasured. |
+| `embeddings` | Gemma 4's last hidden state; quality unmeasured. It came before the council API's own `POST /embeddings`. |
 | `status` (event stream), `metrics` | Engine passes per card. |
 | `traces` | Residual and attention traces. |
 | `jlens`, `steer`, `routing` | Jacobian Lens, residual steering, and MoE routing introspection (mkviolet's `docs/06-council-jlens-extensions.md`). |
