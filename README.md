@@ -79,7 +79,9 @@ cargo run -p gogi-conformance -- http://127.0.0.1:8091 --allow-restart 'systemct
 
 Each check prints `ok`, `skip`, or `FAIL`. The exit code is 1 when any check
 fails. With `--allow-restart <cmd>` the suite also restarts the server and
-checks that specs and pins survive. The suite checks one served model:
+checks that specs and pins survive. A served model that declares `embed`
+also gets the embedding checks; `gogi-fake --embed-model NAME` serves one.
+The suite checks one served model:
 `--model <name>`, or else the first one identity reports `ready`. It checks
 routing against the other served models without assuming which are loaded.
 

@@ -2,6 +2,7 @@
 
 mod continuation;
 mod decisions;
+mod embeddings;
 mod generations;
 mod headers;
 mod ids;
@@ -92,7 +93,7 @@ impl Suite {
     /// Names the checked served model in a body for a route that reads a context, unless the body
     /// names a model already. Other bodies pass unchanged.
     pub(crate) fn routed(&self, method: &str, path: &str, body: Option<Value>) -> Option<Value> {
-        let reads = ["/council/v2/contexts", "/council/v2/decisions", "/council/v2/reads", "/council/v2/generations"];
+        let reads = ["/council/v2/contexts", "/council/v2/decisions", "/council/v2/reads", "/council/v2/generations", "/council/v2/embeddings"];
         match body {
             Some(Value::Object(mut b)) if method == "POST" && reads.contains(&path) => {
                 b.entry("model").or_insert_with(|| json!(self.model_name()));
@@ -226,7 +227,19 @@ impl Suite {
                     l.context_tokens > 0 && l.default_timeout_ms > 0 && l.decision_context_tokens == 0 && l.contexts_per_decision == 0,
                     l,
                 );
-                self.r.check(&format!("{}: a model with no text replies writes media", m.model), !m.outputs().is_empty(), &m.media);
+                self.r.check(&format!("{}: a model with no text replies writes media or only embeds", m.model), !m.outputs().is_empty() || (m.has(Capability::Embed) && !m.has(Capability::Generate)), &m.media);
+            }
+            match (&m.embeddings, m.has(Capability::Embed)) {
+                (Some(e), true) => {
+                    let largest_first = e.dimensions.windows(2).all(|w| w[0] > w[1]);
+                    self.r.check(
+                        &format!("{}: its embeddings list tasks, dimensions largest first, and inputs_per_request", m.model),
+                        !e.tasks.is_empty() && !e.dimensions.is_empty() && e.dimensions.iter().all(|d| *d > 0) && largest_first && e.inputs_per_request > 0,
+                        e,
+                    );
+                }
+                (None, false) => {}
+                (e, embed) => self.r.fail(&format!("{}: a served model has embeddings exactly when it declares embed", m.model), format!("embed {}, embeddings {:?}", embed, e)),
             }
             self.r.check(&format!("{}: decision_context_tokens is at most context_tokens", m.model), l.decision_context_tokens <= l.context_tokens, l);
             self.r.check(&format!("{}: its status is one the contract names", m.model), m.status != ModelStatus::Unknown, m.status);

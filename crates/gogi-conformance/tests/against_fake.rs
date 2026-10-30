@@ -149,3 +149,43 @@ fn the_fake_passes_as_a_model_that_reads_text_only() {
     assert!(r.checks.iter().any(|c| c.name == "an output to a model that writes text only is a 400 naming output.mime" && c.status == Status::Ok));
     assert!(r.checks.iter().any(|c| c.name == "case_media to a model that reads text only is a 400 naming it" && c.status == Status::Ok));
 }
+
+#[test]
+fn the_fake_passes_as_a_model_that_only_embeds() {
+    let embed = FakeModel { aliases: vec!["toy-embed".into()], ..FakeModel::embedding("gogi-toy-embed-1", 0) };
+    let server = Server::start(Config { models: vec![FakeModel::ready("gogi-toy-1", 0), embed], ..Config::default() }).unwrap();
+    let r = run(Opts { url: server.url(), restart: None, model: Some("toy-embed".into()) }, false);
+    assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
+    for name in [
+        "a build naming a model that only embeds is a 400 naming model",
+        "a generation naming a model that only embeds is a 400 naming model",
+        "each vector has an L2 norm of 1",
+        "the same request gives the same vectors bit for bit",
+        "an input's vector does not depend on the other inputs",
+        "an input's vector does not depend on the order of the inputs",
+        "the task changes the vector: query and document",
+        "a vector of 32 dimensions is the whole vector cut and normalized again",
+        "a vector of 16 dimensions is the whole vector cut and normalized again",
+        "a dry run counts each input's tokens and embeds nothing",
+        "a dry run counts an input past context_tokens",
+        "an input past context_tokens is a 413 too_large naming context_tokens, with both counts",
+        "embeddings with an empty input is a 400 naming inputs[1]",
+        "embeddings with more than inputs_per_request inputs is a 400 naming inputs",
+        "embeddings without model is a 400 naming model",
+        "an object part to a model that embeds text only is a 400 naming inputs[0][0]",
+        "gogi-toy-embed-1: its embeddings list tasks, dimensions largest first, and inputs_per_request",
+    ] {
+        assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name} did not pass");
+    }
+}
+
+#[test]
+fn a_chat_model_beside_one_that_only_embeds_refuses_embeddings() {
+    let embed = FakeModel::embedding("gogi-toy-embed-1", 0);
+    let server = Server::start(Config { models: vec![FakeModel::ready("gogi-toy-1", 0), embed], ..Config::default() }).unwrap();
+    let r = run(Opts { url: server.url(), restart: None, model: Some("gogi-toy-1".into()) }, false);
+    assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
+    for name in ["embeddings to a served model without embed is a 400 naming model", "a build naming gogi-toy-embed-1, which has no text replies, is a 400 naming model"] {
+        assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name} did not pass");
+    }
+}
