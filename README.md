@@ -81,6 +81,8 @@ Each check prints `ok`, `skip`, or `FAIL`. The exit code is 1 when any check
 fails. With `--allow-restart <cmd>` the suite also restarts the server and
 checks that specs and pins survive. A served model that declares `embed`
 also gets the embedding checks; `gogi-fake --embed-model NAME` serves one.
+A served model that declares `control_vectors` gets the control vector
+checks; one without it gets the checks of its refusals.
 The suite checks one served model:
 `--model <name>`, or else the first one identity reports `ready`. It checks
 routing against the other served models without assuming which are loaded.

@@ -213,3 +213,49 @@ fn the_fake_passes_as_a_model_that_thinks_beside_one_that_does_not() {
     assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
     assert!(r.checks.iter().any(|c| c.name == "gogi-toy-plain builds the same context into a snapshot of its own" && c.status == Status::Ok));
 }
+
+#[test]
+fn the_fake_passes_the_control_vector_checks() {
+    let server = Server::start(Config::default()).unwrap();
+    let r = run(Opts { url: server.url(), restart: None, model: None }, false);
+    assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
+    for name in [
+        "a control vector response names its served model and counts each side",
+        "a control vector response carries the served model's identity",
+        "the same contexts give the same vector",
+        "the control vector reads back with its media type",
+        "the control vector's bytes hash to its id",
+        "the control vector names its served model and weights",
+        "the control vector has the layers and width the response names",
+        "add and ablate at strength 0 give the numbers of no control",
+        "a list that changes nothing still has model state of its own",
+        "a list that changes the model never reuses the plain model state",
+        "a build with an unknown op in control is a 400 naming control[1].op",
+        "a build with a strength that is not a number in control is a 400 naming control[0].strength",
+        "a build with a short vector id in control is a 400 naming control[0].vector",
+        "raw reads with an unknown op are a 400 naming contexts[1].control[0].op",
+        "a control vector the server does not hold is a 404 naming control[0].vector",
+        "a control vector for other weights is a 400 naming control[0].vector",
+        "a control vector of another width is a 400 naming control[0].vector",
+        "a control vector request with a context with a control of its own is a 400 naming negative[1].control",
+        "a side past control_vector_contexts is a 400 naming it",
+        "a dry run of a control vector request makes no vector",
+    ] {
+        assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name}: {:?}", r.checks.iter().find(|c| c.name == name));
+    }
+}
+
+#[test]
+fn the_fake_passes_as_a_model_without_control_vectors() {
+    let server = Server::start(Config { models: vec![FakeModel::ready("gogi-toy-1", 0), FakeModel::without_control_vectors("gogi-toy-plain", 3)], ..Config::default() }).unwrap();
+    let r = run(Opts { url: server.url(), restart: None, model: Some("gogi-toy-plain".into()) }, false);
+    assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
+    for name in [
+        "a build with control to a model without control_vectors is a 400 naming control",
+        "a generation with control to a model without control_vectors is a 400 naming control",
+        "a control vector from a model without control_vectors is a 400 naming model",
+    ] {
+        assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name}: {:?}", r.checks.iter().find(|c| c.name == name));
+    }
+    assert!(r.checks.iter().any(|c| c.name == "control vectors" && c.status == Status::Skip));
+}

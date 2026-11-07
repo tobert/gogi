@@ -1,6 +1,7 @@
 //! The checks, grouped by what they test.
 
 mod continuation;
+mod control;
 mod decisions;
 mod embeddings;
 mod generations;
@@ -93,7 +94,7 @@ impl Suite {
     /// Names the checked served model in a body for a route that reads a context, unless the body
     /// names a model already. Other bodies pass unchanged.
     pub(crate) fn routed(&self, method: &str, path: &str, body: Option<Value>) -> Option<Value> {
-        let reads = ["/council/v2/contexts", "/council/v2/decisions", "/council/v2/reads", "/council/v2/generations", "/council/v2/embeddings"];
+        let reads = ["/council/v2/contexts", "/council/v2/decisions", "/council/v2/reads", "/council/v2/generations", "/council/v2/embeddings", "/council/v2/control-vectors"];
         match body {
             Some(Value::Object(mut b)) if method == "POST" && reads.contains(&path) => {
                 b.entry("model").or_insert_with(|| json!(self.model_name()));
