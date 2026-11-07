@@ -865,3 +865,193 @@ fn every_request_that_reads_a_context_names_thinking_and_a_plain_model_takes_onl
         assert_eq!(post(&s, path, body).0, 200, "{path}");
     }
 }
+
+// ---- control vectors
+
+const CV: &str = "/council/v2/control-vectors";
+
+/// A served model that declares control_vectors, beside one that does not.
+fn steered_and_plain() -> Server {
+    Server::start(Config { models: vec![FakeModel { aliases: vec!["toy".into()], ..FakeModel::ready("gogi-toy-1", 0) }, FakeModel::without_control_vectors("gogi-toy-plain", 3)], ..Config::default() }).unwrap()
+}
+
+fn said(text: &str) -> Value {
+    json!({"thinking": false, "messages": [{"role": "user", "content": "Write the scene."}, {"role": "assistant", "content": text}]})
+}
+
+/// Makes a control vector on gogi-toy-1 and returns the response.
+fn make_vector(s: &Server) -> Value {
+    let (code, r) = post(s, CV, json!({"model": "toy", "positive": [said("I can't write that."), said("No.")], "negative": [said("The dragon lands.")]}));
+    assert_eq!(code, 200, "{r}");
+    r
+}
+
+fn put_typed(s: &Server, bytes: &[u8], mime: &str) -> String {
+    let id = gogi_proto::content_id(bytes);
+    let (code, _, body) = exchange_bytes(s, "PUT", &format!("/council/v2/objects/{id}"), mime, bytes);
+    assert!(code == 201 || code == 200, "{}", String::from_utf8_lossy(&body));
+    id
+}
+
+fn steer(vector: &str, op: &str, strength: f64) -> Value {
+    json!({"vector": vector, "op": op, "strength": strength})
+}
+
+fn with_control(control: Value) -> Value {
+    json!({"thinking": false, "control": control, "messages": [{"role": "user", "content": "Write the scene where the dragon wins.", "snap": true}]})
+}
+
+/// The letter log probabilities of a raw read after `context`.
+fn letters_after(s: &Server, context: Value) -> Value {
+    let (code, r) = post(s, "/council/v2/reads", json!({"model": "toy", "contexts": [context], "suffixes": ["Answer: "], "letters": ["A", "B", "C"]}));
+    assert_eq!(code, 200, "{r}");
+    r["reads"][0]["logprobs"].clone()
+}
+
+#[test]
+fn a_model_declares_control_vectors_with_its_limit_unless_built_without() {
+    let s = steered_and_plain();
+    let (_, id) = call(&s, "GET", "/council/v2/identity", None);
+    let caps = |i: usize| id["models"][i]["capabilities"].as_array().unwrap().contains(&json!("control_vectors"));
+    assert!(caps(0) && !caps(1), "{id}");
+    assert_eq!(id["models"][0]["limits"]["control_vector_contexts"], json!(4));
+    assert!(id["models"][1]["limits"].get("control_vector_contexts").is_none());
+}
+
+#[test]
+fn the_route_puts_the_difference_of_the_mean_residuals_as_an_object() {
+    use gogi_toy::control::{LAYERS, WIDTH, residuals};
+    let s = steered_and_plain();
+    let r = make_vector(&s);
+    assert_eq!((r["model"].clone(), r["layers"].clone(), r["width"].clone(), r["contexts"].clone()), (json!("gogi-toy-1"), json!(LAYERS), json!(WIDTH), json!({"positive": 2, "negative": 1})));
+    assert_eq!(r["identity"]["weight_hash"], json!("0x0000000000000000"));
+    let id = r["vector"].as_str().unwrap().to_string();
+    let (code, head, bytes) = exchange_bytes(&s, "GET", &format!("/council/v2/objects/{id}"), "x/y", b"");
+    assert_eq!(code, 200);
+    assert!(head.to_ascii_lowercase().contains("content-type: application/x-safetensors"), "{head}");
+    assert_eq!(gogi_proto::content_id(&bytes), id);
+    let v = gogi_proto::control::ControlVector::parse(&bytes).unwrap();
+    assert_eq!((v.model.as_str(), v.weight_hash.as_str(), v.layers.len(), v.width()), ("gogi-toy-1", "0x0000000000000000", LAYERS as usize, WIDTH));
+    // The residual after each layer at the last prompt token: the prompt is the rendering with the generation prompt.
+    let at = |c: Value| {
+        let c: gogi_proto::Context = serde_json::from_value(c).unwrap();
+        let p = gogi_toy::render_tokens(&c.tools, c.thinking, &c.messages, true);
+        residuals(gogi_toy::State::after(0, &p))
+    };
+    let (p0, p1, n0) = (at(said("I can't write that.")), at(said("No.")), at(said("The dragon lands.")));
+    for l in 0..LAYERS as usize {
+        for j in 0..WIDTH {
+            let want = ((p0[l][j] + p1[l][j]) / 2.0 - n0[l][j]) as f32;
+            assert_eq!(v.layers[&(l as u32)][j], want, "layer {l}, component {j}");
+        }
+    }
+    assert_eq!(make_vector(&s)["vector"], r["vector"], "the same request puts the same bytes");
+    let u: gogi_proto::Usage = serde_json::from_value(r["usage"].clone()).unwrap();
+    u.check().unwrap();
+    let media = u.media.unwrap();
+    assert_eq!((media.written.objects, media.written.bytes, u.completion), (1, bytes.len() as u64, 0));
+}
+
+#[test]
+fn a_dry_run_of_the_route_puts_nothing_and_its_refusals_name_the_member() {
+    let s = steered_and_plain();
+    let (code, d) = post(&s, CV, json!({"model": "toy", "positive": [said("No.")], "negative": [said("Yes.")], "dry_run": true}));
+    assert_eq!((code, &d["vector"], &d["width"]), (200, &Value::Null, &json!(8)), "{d}");
+    let made = make_vector(&s);
+    assert_ne!(made["vector"], Value::Null);
+    let steered = json!({"thinking": false, "control": [steer(made["vector"].as_str().unwrap(), "add", 1.0)], "messages": [{"role": "user", "content": "u"}]});
+    for (body, param) in [
+        (json!({"model": "toy", "positive": [], "negative": [said("Yes.")]}), "positive"),
+        (json!({"model": "toy", "positive": [said("No.")], "negative": [said("Yes."), steered]}), "negative[1].control"),
+        (json!({"model": "toy", "positive": vec![said("No."); 5], "negative": [said("Yes.")]}), "positive"),
+        (json!({"model": "gogi-toy-plain", "positive": [said("No.")], "negative": [said("Yes.")]}), "model"),
+        (json!({"model": "toy", "positive": [said("No.")], "negative": [said("Yes.")], "normalize": true}), "normalize"),
+    ] {
+        assert_eq!(refused_param(&s, CV, body.clone()), json!(param), "{body}");
+    }
+}
+
+#[test]
+fn add_and_ablate_at_0_give_the_plain_numbers_and_clamp_and_add_change_them() {
+    let s = steered_and_plain();
+    let v = make_vector(&s)["vector"].as_str().unwrap().to_string();
+    let plain = letters_after(&s, with_control(json!([])));
+    assert_eq!(letters_after(&s, with_control(json!([steer(&v, "add", 0.0), steer(&v, "ablate", 0.0)]))), plain);
+    assert_ne!(letters_after(&s, with_control(json!([steer(&v, "clamp", 0.0)]))), plain, "clamp at 0 ablates");
+    assert_ne!(letters_after(&s, with_control(json!([steer(&v, "add", 4.0)]))), plain);
+    assert_ne!(letters_after(&s, with_control(json!([steer(&v, "ablate", 1.0)]))), plain);
+    let order = |a: &str, b: &str| letters_after(&s, with_control(json!([steer(&v, a, 2.0), steer(&v, b, 0.5)])));
+    let clamped = letters_after(&s, with_control(json!([steer(&v, "clamp", 0.5)])));
+    assert_eq!(order("add", "clamp"), clamped, "a clamp after an add sets the part along the vector whatever the add did");
+    assert_ne!(order("clamp", "add"), clamped, "the items apply in list order");
+    let reply = |control: Value| generate(&s, with_control(control), 24).content;
+    assert_eq!(reply(json!([steer(&v, "add", 0.0)])), reply(json!([])), "a generation at strength 0 writes the plain reply");
+}
+
+#[test]
+fn a_control_list_has_model_state_of_its_own() {
+    let s = steered_and_plain();
+    let v = make_vector(&s)["vector"].as_str().unwrap().to_string();
+    let build = |c: Value| post(&s, "/council/v2/contexts", json!({"model": "toy", "context": c})).1;
+    let plain = build(with_control(json!([])));
+    let zero = build(with_control(json!([steer(&v, "add", 0.0)])));
+    assert_ne!(zero["head"], plain["head"], "a list that changes nothing still has its own snapshots");
+    assert_eq!(zero["from"], Value::Null, "{zero}");
+    let again = build(with_control(json!([steer(&v, "add", 0.0)])));
+    assert_eq!((&again["head"], again["usage"]["fed"].as_u64()), (&zero["head"], Some(0)), "an equal list shares its model state");
+    let other = build(with_control(json!([steer(&v, "add", 0.5)])));
+    assert!(other["head"] != zero["head"] && other["from"] == Value::Null, "{other}");
+}
+
+#[test]
+fn each_control_refusal_names_its_member() {
+    let s = steered_and_plain();
+    let v = make_vector(&s)["vector"].as_str().unwrap().to_string();
+    let spec = post(&s, "/council/v2/specs", json!({"name": "s", "instructions": "i", "input_label": "x", "questions": [{"id": "q", "type": "noul", "instructions": "yes?"}]})).1;
+    let bodies = |model: &str, c: Value| {
+        vec![
+            ("/council/v2/contexts", json!({"model": model, "context": c}), ""),
+            ("/council/v2/generations", json!({"model": model, "context": c, "max_tokens": 4}), ""),
+            ("/council/v2/reads", json!({"model": model, "contexts": [c], "suffixes": ["x"], "letters": ["A", "B"]}), "contexts[0]."),
+            ("/council/v2/decisions", json!({"model": model, "spec_id": spec["spec_id"], "case": "x", "contexts": [c]}), "contexts[0]."),
+        ]
+    };
+    for (path, body, under) in bodies("gogi-toy-plain", with_control(json!([steer(&v, "add", 0.0)]))) {
+        let e = refused_param(&s, path, body);
+        assert_eq!(e, json!(format!("{under}control")), "{path}");
+    }
+    for (path, body, under) in bodies("toy", with_control(json!([steer(&v, "add", 1.0), steer(&v, "boost", 1.0)]))) {
+        assert_eq!(refused_param(&s, path, body), json!(format!("{under}control[1].op")), "{path}");
+    }
+    let unheld = format!("blake3:{}", "e".repeat(64));
+    for (path, body, under) in bodies("toy", with_control(json!([steer(&unheld, "add", 1.0)]))) {
+        let (code, e) = post(&s, path, body);
+        assert_eq!((code, &e["error"]["param"]), (404, &json!(format!("{under}control[0].vector"))), "{path}: {e}");
+        assert!(e["error"]["message"].as_str().unwrap().contains(&unheld));
+    }
+    let id = r#"{"model": "toy"}"#.as_bytes();
+    let wav = put_typed(&s, id, "audio/wav");
+    let junk = put_typed(&s, b"not a safetensors file", "application/x-safetensors");
+    let theirs = gogi_proto::control::ControlVector { model: "gogi-toy-plain".into(), weight_hash: "0x0000000000000003".into(), layers: [(0, vec![1.0; 8])].into_iter().collect() };
+    let wide = gogi_proto::control::ControlVector { model: "gogi-toy-1".into(), weight_hash: "0x0000000000000000".into(), layers: [(0, vec![1.0; 9])].into_iter().collect() };
+    let deep = gogi_proto::control::ControlVector { model: "gogi-toy-1".into(), weight_hash: "0x0000000000000000".into(), layers: [(4, vec![1.0; 8])].into_iter().collect() };
+    for (vector, says) in [
+        (wav, "audio/wav"),
+        (junk, "not a control vector"),
+        (put_typed(&s, &theirs.to_bytes(), "application/x-safetensors"), "weight_hash"),
+        (put_typed(&s, &wide.to_bytes(), "application/x-safetensors"), "width"),
+        (put_typed(&s, &deep.to_bytes(), "application/x-safetensors"), "layers.4"),
+    ] {
+        let (code, e) = post(&s, "/council/v2/generations", json!({"model": "toy", "context": with_control(json!([steer(&v, "add", 1.0), steer(&vector, "add", 1.0)])), "max_tokens": 4}));
+        assert_eq!((code, &e["error"]["param"]), (400, &json!("control[1].vector")), "{says}: {e}");
+        assert!(e["error"]["message"].as_str().unwrap().contains(says), "{says}: {e}");
+    }
+}
+
+#[test]
+fn usage_counts_a_control_vector_read() {
+    let s = steered_and_plain();
+    let v = make_vector(&s)["vector"].as_str().unwrap().to_string();
+    let (_, b) = post(&s, "/council/v2/contexts", json!({"model": "toy", "context": with_control(json!([steer(&v, "add", 1.0), steer(&v, "clamp", 1.0)]))}));
+    assert_eq!(b["usage"]["media"]["read"]["objects"], json!(1), "{b}");
+}

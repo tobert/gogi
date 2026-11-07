@@ -45,16 +45,31 @@ def verify_decision(request, response):
     _gogi.verify_decision(_text(request), _text(response))
 
 
+def parse_control_vector(data):
+    """Reads a control vector object's bytes: ``{model, weight_hash, layers}``, with ``layers``
+    from each layer number (an int) to its vector."""
+    v = _json.loads(_gogi.parse_control_vector(bytes(data)))
+    v["layers"] = {int(k): x for k, x in v["layers"].items()}
+    return v
+
+
+def control_vector_bytes(model, weight_hash, layers):
+    """The bytes of a control vector object, from ``layers``, each layer number to its vector."""
+    v = {"model": model, "weight_hash": weight_hash, "layers": {str(k): list(x) for k, x in layers.items()}}
+    return bytes(_gogi.control_vector_bytes(_json.dumps(v)))
+
+
 STATUSES = ("ready", "loading", "draining", "unloaded")
 
 
 def _served_model(m, i):
     if isinstance(m, str):
         m = {"name": m}
-    unknown = set(m) - {"name", "aliases", "seed", "status", "thinking"}
+    unknown = set(m) - {"name", "aliases", "seed", "status", "thinking", "control_vectors"}
     if unknown:
-        raise ValueError(f"models[{i}]: unknown members {sorted(unknown)}; a served model has name, aliases, seed, status, and thinking")
-    return {"name": m.get("name"), "aliases": list(m.get("aliases", [])), "seed": m.get("seed", i), "status": m.get("status", "ready"), "thinking": m.get("thinking", True)}
+        raise ValueError(f"models[{i}]: unknown members {sorted(unknown)}; a served model has name, aliases, seed, status, thinking, and control_vectors")
+    return {"name": m.get("name"), "aliases": list(m.get("aliases", [])), "seed": m.get("seed", i), "status": m.get("status", "ready"),
+            "thinking": m.get("thinking", True), "control_vectors": m.get("control_vectors", True)}
 
 
 class FakeServer:
@@ -66,7 +81,8 @@ class FakeServer:
 
     ``models`` lists the served models, each a name or a dict with ``name`` and, optionally,
     ``aliases`` (default none), ``seed`` (default its position; two seeds are two models), and
-    ``status`` (default ``"ready"``). Without ``models`` the fake serves ``gogi-toy-1``, alias
+    ``status`` (default ``"ready"``), ``thinking`` (default true), and ``control_vectors``
+    (default true: its contexts take ``control``, and it makes control vectors). Without ``models`` the fake serves ``gogi-toy-1``, alias
     ``toy``. Every request names its served model with ``model``. ``set_status`` changes one
     while it serves.
 

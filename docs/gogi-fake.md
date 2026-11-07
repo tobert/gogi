@@ -33,6 +33,12 @@ A served model declares capability `thinking` unless it is built with
 `thinking: true` with a `400` naming `thinking` (`contexts[i].thinking` in a decision or a raw
 read). Its numbers come from the same template as any other served model.
 
+A served model declares capability `control_vectors` unless it is built with
+`FakeModel::without_control_vectors`, or with `"control_vectors": false` in Python. Such a model
+refuses a non-empty `control` with a `400` naming `control` (`contexts[i].control` in a decision
+or a raw read), and `POST /council/v2/control-vectors` with a `400` naming `model`. A served
+model that only embeds does not declare it.
+
 ## Tokens
 
 A token is one of the 256 byte values, or one of 16 template markers (ids 256 to 271).
@@ -104,6 +110,31 @@ names it is a `400` naming `model`. Its template id is `gogi-toy-embed-1`.
   the other inputs.
 - `Config::embed_tokens`, 512 by default, is its `context_tokens`. A request takes at most 32
   inputs.
+
+## Control vectors
+
+`gogi_toy::control` gives the toy a residual and the effect of a context's `control`. The toy
+has 4 layers and a residual of width 8. Its `limits.control_vector_contexts` is 4.
+
+- The residual after layer `l` at a model state is 8 numbers between -1 and 1, a hash of the
+  state and `l`. It depends on the served model's seed through the state.
+- A `control` list changes the logits, never the model state. For each layer, the items apply
+  to that layer's residual in list order, by the formulas of the contract
+  (`gogi_proto::control::ControlOp::apply`). Each component's change `d` adds `d·w` to each
+  logit, with `w` a fixed weight between -1 and 1 for the layer, the component, and the token.
+  The toy does not carry a change at one layer into the next.
+- A layer whose residual does not change adds nothing. So `add` and `ablate` at strength 0 give
+  the plain logits bit for bit, and `clamp` at strength 0 changes them.
+- Raw reads, decisions, and generations read the logits under the context's `control`.
+- A snapshot id hashes the control list as well as the tokens, and a build starts only from a
+  snapshot of an equal list: the same vectors, ops, and strength bits in the same order. A
+  plain context's ids hash no list, so they are the same as before control vectors.
+- `POST /council/v2/control-vectors` renders each context with its generation prompt, builds it
+  as `POST /contexts` does, and reads the residuals at the model state after the whole prompt.
+  Each layer's tensor is the mean over `positive` minus the mean over `negative`, in float64,
+  written as float32. The vector has all 4 layers. The fake holds it as an object of
+  `application/x-safetensors`, as it holds an output, and never evicts it.
+- `usage.media.read` counts each control vector a context names, once.
 
 ## Reply parser
 

@@ -34,8 +34,10 @@
 //!
 //! The model: its model state after a token prefix is a hash folded over a served model's seed and
 //! the tokens, and the logits are a deterministic function of that hash. The same served model and
-//! prefix give the same bits; two seeds are two models.
+//! prefix give the same bits; two seeds are two models. [`control`] gives its residual, and the
+//! logits under a context's control vectors.
 
+pub mod control;
 pub mod embed;
 pub mod read;
 pub mod reply;
@@ -311,7 +313,7 @@ pub fn render(tools: &[Tool], thinking: bool, messages: &[Message], generation_p
 
 // ---- the model
 
-fn mix(mut z: u64) -> u64 {
+pub(crate) fn mix(mut z: u64) -> u64 {
     z = z.wrapping_add(0x9E3779B97F4A7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);

@@ -100,6 +100,33 @@ mod _gogi {
         math::verify(&resp, &req.expect()).map_err(value_err)
     }
 
+    /// Reads a control vector from the bytes of its object, as JSON: `{model, weight_hash, layers}`,
+    /// with `layers` from each layer number to its vector. Raises `ValueError` saying what is wrong.
+    #[pyfunction]
+    fn parse_control_vector(bytes: &[u8]) -> PyResult<String> {
+        let v = gogi_proto::control::ControlVector::parse(bytes).map_err(value_err)?;
+        let layers: serde_json::Map<String, Value> = v.layers.iter().map(|(l, x)| (l.to_string(), json!(x))).collect();
+        Ok(json!({"model": v.model, "weight_hash": v.weight_hash, "layers": layers}).to_string())
+    }
+
+    /// The bytes of a control vector object, from `{model, weight_hash, layers}` as JSON, with
+    /// `layers` from each layer number to its vector, all of one width.
+    #[pyfunction]
+    fn control_vector_bytes(vector_json: &str) -> PyResult<Vec<u8>> {
+        let v = json_of(vector_json)?;
+        let text = |k: &str| v[k].as_str().map(String::from).ok_or_else(|| value_err(format!("{} is a string", k)));
+        let mut layers = std::collections::BTreeMap::new();
+        for (l, x) in v["layers"].as_object().ok_or_else(|| value_err("layers maps each layer number to its vector"))? {
+            let l: u32 = l.parse().map_err(|_| value_err(format!("layer {:?} is not a layer number", l)))?;
+            let x: Vec<f32> = serde_json::from_value(x.clone()).map_err(value_err)?;
+            layers.insert(l, x);
+        }
+        let cv = gogi_proto::control::ControlVector { model: text("model")?, weight_hash: text("weight_hash")?, layers };
+        let bytes = cv.to_bytes();
+        gogi_proto::control::ControlVector::parse(&bytes).map_err(value_err)?;
+        Ok(bytes)
+    }
+
     fn model_status(s: &str) -> PyResult<gogi_fake::ModelStatus> {
         match serde_json::from_value(json!(s)) {
             Ok(gogi_fake::ModelStatus::Unknown) | Err(_) => Err(value_err(format!("status {:?} is not one of ready, loading, draining, unloaded", s))),
@@ -107,7 +134,8 @@ mod _gogi {
         }
     }
 
-    /// The served models from `[{name, aliases, seed, status, thinking}]`, every member required.
+    /// The served models from `[{name, aliases, seed, status, thinking, control_vectors}]`, every
+    /// member required.
     fn fake_models(v: &Value) -> PyResult<Vec<gogi_fake::FakeModel>> {
         let list = v.as_array().filter(|l| !l.is_empty()).ok_or_else(|| value_err("models is a non-empty list"))?;
         let mut out: Vec<gogi_fake::FakeModel> = Vec::new();
@@ -118,11 +146,12 @@ mod _gogi {
             let seed = m["seed"].as_u64().ok_or_else(|| bad("seed is a non-negative integer"))?;
             let status = model_status(m["status"].as_str().ok_or_else(|| bad("status is a string"))?)?;
             let thinks = m["thinking"].as_bool().ok_or_else(|| bad("thinking is true or false"))?;
+            let controls = m["control_vectors"].as_bool().ok_or_else(|| bad("control_vectors is true or false"))?;
             let names = std::iter::once(name).chain(aliases.iter().map(String::as_str));
             if let Some(dup) = names.clone().find(|n| out.iter().any(|o| o.name == *n || o.aliases.iter().any(|a| a == n))) {
                 return Err(bad(&format!("{} already names another served model", dup)));
             }
-            out.push(gogi_fake::FakeModel { name: name.into(), aliases, seed, status, embeds: false, thinks });
+            out.push(gogi_fake::FakeModel { name: name.into(), aliases, seed, status, embeds: false, thinks, controls });
         }
         Ok(out)
     }

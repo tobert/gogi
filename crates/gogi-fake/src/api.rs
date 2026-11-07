@@ -4,6 +4,7 @@ use std::collections::{HashSet, VecDeque};
 
 use gogi_proto::canon::spec_id_of;
 use gogi_proto::context::{Context, MediaCount, MediaUsage, Usage};
+use gogi_proto::control::{ControlOp, ControlVector, ControlVectorContexts, ControlVectorRequest, ControlVectorResponse, MEDIA_TYPE};
 use gogi_proto::decision::{DecisionIdentity, DecisionRequest, PoolMethod, PoolWeights, check_queue_schema, queue_call};
 use gogi_proto::embeddings::{Embedding, EmbeddingsRequest, EmbeddingsResponse};
 use gogi_proto::error::{ErrorBody, ErrorType};
@@ -11,13 +12,14 @@ use gogi_proto::generation::{GenerationRequest, OutputEvent, Phase as EventPhase
 use gogi_proto::identity::{ModelStatus, ServerIdentity};
 use gogi_proto::math::{self, Row, WeightSpec};
 use gogi_proto::message::{Message, ToolCall};
-use gogi_proto::objects::{Named, objects_of};
+use gogi_proto::objects::{Named, ObjectRef, objects_of};
 use gogi_proto::pins::{PinsPut, is_owner};
 use gogi_proto::reads::ReadsRequest;
 use gogi_proto::spec::{Question, QuestionKind, SpecRules, parse_spec};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
+use gogi_toy::control::{self as toy_control, LAYERS, WIDTH};
 use gogi_toy::embed;
 use gogi_toy::read;
 use gogi_toy::reply::{Call, Reply, ReplyParser, Step};
@@ -31,6 +33,9 @@ const CASE_BYTES: usize = 65536;
 
 /// The most inputs one embedding request may send.
 const EMBED_INPUTS: u32 = 32;
+
+/// The most contexts on each side of a control-vector request.
+const CONTROL_CONTEXTS: u64 = 4;
 
 pub enum Resp {
     Json(u16, Value),
@@ -144,10 +149,15 @@ fn unescape(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// A served model's `weight_hash`, from its seed.
+fn weight_hash(m: &FakeModel) -> String {
+    format!("0x{:016X}", m.seed)
+}
+
 /// The identity fields a served model's numbers depend on.
 fn identity_of(m: &FakeModel) -> Value {
     let template = if m.embeds { embed::TEMPLATE } else { TEMPLATE };
-    json!({"model": m.name, "weight_hash": format!("0x{:016X}", m.seed), "tokenizer_hash": "bytes-v1", "template": template,
+    json!({"model": m.name, "weight_hash": weight_hash(m), "tokenizer_hash": "bytes-v1", "template": template,
            "engine": format!("gogi-fake:{}", env!("CARGO_PKG_VERSION"))})
 }
 
@@ -174,6 +184,10 @@ pub fn identity(store: &Store) -> Value {
             v["capabilities"] = json!(["reads", "generate", "continuation", "dry_run", "leave_one_out"]);
             if m.thinks {
                 v["capabilities"].as_array_mut().expect("an array").push(json!("thinking"));
+            }
+            if m.controls {
+                v["capabilities"].as_array_mut().expect("an array").push(json!("control_vectors"));
+                v["limits"]["control_vector_contexts"] = json!(CONTROL_CONTEXTS);
             }
             if !store.cfg.media_inputs.is_empty() || !store.cfg.media_outputs.is_empty() {
                 v["media"] = json!({"inputs": store.cfg.media_inputs, "outputs": store.cfg.media_outputs});
@@ -237,18 +251,76 @@ fn output_bytes(m: &FakeModel, seed: u64, mime: &str, prompt: &[u32], n: usize) 
     out
 }
 
+/// Served model `m` as identity lists it.
+fn served(store: &Store, m: &FakeModel) -> gogi_proto::identity::ServedModel {
+    let id: ServerIdentity = serde_json::from_value(identity(store)).expect("the fake's identity decodes");
+    id.models.into_iter().find(|s| s.model == m.name).expect("identity lists the config's models")
+}
+
 /// Refuses `thinking: true` in a context of a served model without `thinking`, a `400` naming
 /// `thinking`, or `contexts[k].thinking` for a request with several contexts.
 fn check_thinking(store: &Store, m: &FakeModel, contexts: &[&Context], several: bool) -> Result<(), Resp> {
-    let id: ServerIdentity = serde_json::from_value(identity(store)).expect("the fake's identity decodes");
-    let served = id.models.iter().find(|s| s.model == m.name).expect("identity lists the config's models");
+    let served = served(store, m);
     for (k, c) in contexts.iter().enumerate() {
-        if let Err(e) = c.check_thinking(served) {
+        if let Err(e) = c.check_thinking(&served) {
             let param = if several { format!("contexts[{}].thinking", k) } else { "thinking".to_string() };
             return Err(bad_param(&param, e.message));
         }
     }
     Ok(())
+}
+
+/// A context's control list as the toy applies it: each item's op, strength, and vector.
+type Steer = Vec<(ControlOp, f64, ControlVector)>;
+
+/// The key of a context's control list, which its snapshot ids hash: empty for the plain model.
+/// Equal lists have equal keys.
+fn control_key(c: &Context) -> String {
+    c.control.iter().map(|i| format!("{} {:?} {:016x};", i.vector, i.op, i.strength.to_bits())).collect()
+}
+
+/// Reads each context's control list, checking it in the contract's order: `control_vectors` on
+/// the served model, then each item's object: its media type, that the server holds it, that it
+/// is a control vector, and that it fits. An error names the member, under `contexts[k].` for a
+/// request with several contexts.
+fn steer_of(store: &Store, m: &FakeModel, contexts: &[&Context], several: bool) -> Result<Vec<Steer>, Resp> {
+    let served = served(store, m);
+    let under = |k: usize| if several { format!("contexts[{}].", k) } else { String::new() };
+    for (k, c) in contexts.iter().enumerate() {
+        if let Err(e) = c.check_control(&served) {
+            return Err(bad_param(&format!("{}control", under(k)), e.message));
+        }
+    }
+    let mut out = Vec::new();
+    for (k, c) in contexts.iter().enumerate() {
+        let mut steer = Vec::new();
+        for (i, item) in c.control.iter().enumerate() {
+            let at = format!("{}control[{}].vector", under(k), i);
+            let id = item.vector.as_str();
+            let bytes = match store.objects.get(id) {
+                Some((mime, _)) if mime != MEDIA_TYPE => {
+                    return Err(bad_param(&at, format!("nothing ran: {} names {}, which the server holds as {}, not {}; put the control vector as {}", at, id, mime, MEDIA_TYPE, MEDIA_TYPE)));
+                }
+                Some((_, bytes)) => bytes,
+                None => return Err(err(404, "not_found", format!("nothing ran: {} names {}, which the server does not hold; PUT the control vector, then send the request again", at, id), Some(&at))),
+            };
+            let v = ControlVector::parse(bytes).map_err(|e| bad_param(&at, format!("nothing ran: {} names {}, which is not a control vector: {}", at, id, e)))?;
+            v.check_fits(&weight_hash(m), LAYERS, WIDTH).map_err(|e| bad_param(&at, format!("nothing ran: {} names {}, which does not fit {}: {}", at, id, m.name, e)))?;
+            steer.push((item.op, item.strength, v));
+        }
+        out.push(steer);
+    }
+    Ok(out)
+}
+
+/// Each control vector the contexts name, for `usage.media`.
+fn vectors_in(contexts: &[&Context]) -> Vec<Named> {
+    contexts.iter().flat_map(|c| c.control.iter().map(|i| Named { at: String::new(), object: ObjectRef { id: i.vector.to_string(), mime: MEDIA_TYPE.into() }, assistant: false })).collect()
+}
+
+/// The logits at model state `st` under a control list.
+fn logits_of(st: State, steer: &Steer) -> [f64; VOCAB] {
+    toy_control::logits(st, steer)
 }
 
 /// The objects of each context of a request with several, named `contexts[k].messages[i]...`.
@@ -354,6 +426,7 @@ pub fn handle(store: &mut Store, method: &str, path: &str, headers: &[(String, S
         ("POST", ["reads"]) => reads(store, body),
         ("POST", ["generations"]) => generations(store, body),
         ("POST", ["embeddings"]) => embeddings(store, body),
+        ("POST", ["control-vectors"]) => control_vectors(store, body),
         _ => not_found("unknown route"),
     }
 }
@@ -479,22 +552,23 @@ impl Built {
 /// held whose tokens begin it, and holds a snapshot at each boundary and at the end unless `dry_run`.
 fn build(store: &mut Store, m: &FakeModel, c: &Context, dry_run: bool) -> Built {
     let r = model::render(&c.tools, c.thinking, &c.messages, false);
+    let key = control_key(c);
     let mut counts = Vec::new();
     let mut cuts = Vec::new();
     for cut in &r.cuts {
         counts.push(cut.tokens);
-        cuts.push((snapshot_id(m, &r.tokens[..cut.tokens], &counts), *cut));
+        cuts.push((snapshot_id(m, &key, &r.tokens[..cut.tokens], &counts), *cut));
     }
     let head = cuts.last().unwrap().0.clone();
     // The longest held snapshot whose tokens begin the context: a boundary of this context, or
     // the head a generation held after its reply.
     let n = r.end;
-    let best = store.snaps.iter().filter(|(_, s)| s.model == m.name && s.tokens.len() <= n && r.tokens.starts_with(&s.tokens)).max_by(|a, b| a.1.tokens.len().cmp(&b.1.tokens.len()).then(b.0.cmp(a.0)));
+    let best = store.snaps.iter().filter(|(_, s)| s.model == m.name && s.control == key && s.tokens.len() <= n && r.tokens.starts_with(&s.tokens)).max_by(|a, b| a.1.tokens.len().cmp(&b.1.tokens.len()).then(b.0.cmp(a.0)));
     let (kept, from) = best.map_or((0, None), |(id, s)| (s.tokens.len(), Some(id.clone())));
     if !dry_run {
         let mut parent = None;
         for (id, cut) in &cuts {
-            store.hold(id.clone(), &m.name, &r.tokens[..cut.tokens], parent);
+            store.hold(id.clone(), &m.name, &key, &r.tokens[..cut.tokens], parent);
             parent = Some(id.clone());
         }
     }
@@ -519,6 +593,9 @@ fn build_route(store: &mut Store, body: &[u8]) -> Resp {
     if let Err(r) = check_objects(store, &m, &objects_of(&req.context.messages)) {
         return r;
     }
+    if let Err(r) = steer_of(store, &m, &[&req.context], false) {
+        return r;
+    }
     let dry_run = req.dry_run.unwrap_or(false);
     let limit = store.cfg.context_tokens;
     let n = model::render(&req.context.tools, req.context.thinking, &req.context.messages, false).end;
@@ -527,7 +604,8 @@ fn build_route(store: &mut Store, body: &[u8]) -> Resp {
     }
     let b = build(store, &m, &req.context, dry_run);
     let snapshots = if dry_run { vec![] } else { b.infos(store) };
-    let usage = Usage { prompt: n as u64, kept: b.kept as u64, fed: (n - b.kept) as u64, completion: 0, reasoning: 0, media: media_usage(store, &objects_of(&req.context.messages), &[]) };
+    let read = [objects_of(&req.context.messages), vectors_in(&[&req.context])].concat();
+    let usage = Usage { prompt: n as u64, kept: b.kept as u64, fed: (n - b.kept) as u64, completion: 0, reasoning: 0, media: media_usage(store, &read, &[]) };
     Resp::Json(200, json!({"model": m.name, "head": b.head, "usage": usage, "from": b.from, "dry_run": dry_run, "snapshots": snapshots}))
 }
 
@@ -595,6 +673,10 @@ fn reads(store: &mut Store, body: &[u8]) -> Resp {
     if let Err(r) = check_objects(store, &m, &objects_in(&req.contexts)) {
         return r;
     }
+    let steers = match steer_of(store, &m, &req.contexts.iter().collect::<Vec<_>>(), true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
     let letters = match letter_tokens(&req.letters) {
         Ok(l) => l,
         Err(r) => return r,
@@ -624,7 +706,7 @@ fn reads(store: &mut Store, body: &[u8]) -> Resp {
             usage.kept += kept as u64;
             usage.fed += (n + suffix.len() - kept) as u64;
             let st = suffix.iter().fold(base, |s, &t| s.step(t));
-            let lp = model::log_softmax(&st.logits());
+            let lp = model::log_softmax(&logits_of(st, &steers[ci]));
             let mut logprobs = Map::new();
             let mut ls = Vec::new();
             for (l, &id) in req.letters.iter().zip(&letters) {
@@ -637,7 +719,7 @@ fn reads(store: &mut Store, body: &[u8]) -> Resp {
             out.push(json!({"context": ci, "snapshot": b.head, "suffix": si, "logprobs": logprobs, "mass": math::log_sum_exp(&ls), "top": tops}));
         }
     }
-    usage.media = media_usage(store, &objects_in(&req.contexts), &[]);
+    usage.media = media_usage(store, &[objects_in(&req.contexts), vectors_in(&req.contexts.iter().collect::<Vec<_>>())].concat(), &[]);
     Resp::Json(200, json!({"model": m.name, "reads": out, "signals": {"control_text": control}, "usage": usage}))
 }
 
@@ -715,6 +797,10 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
     if let Err(r) = check_objects(store, &m, &objects_of(&req.context.messages)) {
         return r;
     }
+    let steer = match steer_of(store, &m, &[&req.context], false) {
+        Ok(mut s) => s.remove(0),
+        Err(r) => return r,
+    };
     if !req.decisions.is_empty() {
         return bad_param("decisions", "nothing ran: riding decisions need the ride capability, which this model does not have; send the generation without decisions");
     }
@@ -802,7 +888,7 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
         } else {
             let mut cands = letters.clone();
             cands.push(if phase == Phase::Think { model::ENDTHINK } else { model::END });
-            pick(&cands, &st.logits(), temperature, sample.top_k.unwrap_or(0) as usize, sample.top_p.unwrap_or(1.0), sample.min_p.unwrap_or(0.0), &mut rng)
+            pick(&cands, &logits_of(st, &steer), temperature, sample.top_k.unwrap_or(0) as usize, sample.top_p.unwrap_or(1.0), sample.min_p.unwrap_or(0.0), &mut rng)
         };
         n += 1;
         toks.push(tok);
@@ -921,7 +1007,7 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
         (json!(held.head), held.infos(store))
     };
     let written: Vec<u64> = outputs.iter().map(|o| o["bytes"].as_u64().unwrap_or(0)).collect();
-    let usage = Usage { prompt: prompt.tokens.len() as u64, kept: b.kept as u64, fed: (prompt.tokens.len() - b.kept) as u64, completion: n as u64, reasoning: thought, media: media_usage(store, &objects_of(&c.messages), &written) };
+    let usage = Usage { prompt: prompt.tokens.len() as u64, kept: b.kept as u64, fed: (prompt.tokens.len() - b.kept) as u64, completion: n as u64, reasoning: thought, media: media_usage(store, &[objects_of(&c.messages), vectors_in(&[c])].concat(), &written) };
     let mut done = json!({
         "content": content, "reasoning": reasoning,
         "tool_calls": wire_calls,
@@ -982,6 +1068,11 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
     if let Err(r) = check_objects(store, &m, &objects) {
         return r;
     }
+    let steers = match steer_of(store, &m, &req.contexts.iter().collect::<Vec<_>>(), true) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    objects.extend(vectors_in(&req.contexts.iter().collect::<Vec<_>>()));
     let spec_id = req.spec_id.clone();
     let Some(v) = store.specs.get(&spec_id) else { return not_found(format!("no held spec {}; POST it again", spec_id)) };
     let (questions, instructions, label) = match parse_spec(v, &rules()) {
@@ -1041,7 +1132,9 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
     let mut reads: Vec<ReadOut> = Vec::new();
     let mut usage = Usage::default();
     let contexts: Vec<Option<&Context>> = if req.contexts.is_empty() { vec![None] } else { req.contexts.iter().map(Some).collect() };
-    for c in contexts {
+    for (ci, c) in contexts.into_iter().enumerate() {
+        let plain = Steer::new();
+        let steer = if c.is_some() { &steers[ci] } else { &plain };
         // A read keeps what its build kept and feeds the rest of the context, then everything after it.
         let (head, base_tokens, queue, kept) = match c {
             None => (None, read::empty_context(), None, 0),
@@ -1071,7 +1164,7 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
             for &qi in &sorted {
                 let q = &ask.questions[qi];
                 read::queue_question(&mut toks, &q.id);
-                let lp = model::log_softmax(&State::after(m.seed, &toks).logits());
+                let lp = model::log_softmax(&logits_of(State::after(m.seed, &toks), steer));
                 let read: Vec<f64> = ask.chosen[qi].iter().map(|&j| lp[read::option_letter(j) as usize]).collect();
                 let best = (0..read.len()).fold(0, |b, i| if read[i] > read[b] { i } else { b });
                 read::queue_letter(&mut toks, ask.chosen[qi][best]);
@@ -1084,7 +1177,7 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
             for &qi in &ask.asked {
                 let q = &ask.questions[qi];
                 let toks = read::plain_question(&text_all, &q.id, &q.instructions);
-                let lp = model::log_softmax(&State::after(m.seed, &toks).logits());
+                let lp = model::log_softmax(&logits_of(State::after(m.seed, &toks), steer));
                 lps[qi] = Some(ask.chosen[qi].iter().map(|&j| lp[read::option_letter(j) as usize]).collect());
                 fed += toks.len() - base_tokens.len();
             }
@@ -1210,4 +1303,68 @@ fn embeddings(store: &mut Store, body: &[u8]) -> Resp {
     let usage = Usage { prompt: all, kept: 0, fed: if req.dry_run { 0 } else { all }, completion: 0, reasoning: 0, media: media_usage(store, &req.objects(), &[]) };
     let resp = EmbeddingsResponse { model: m.name.clone(), task: req.task.clone(), dimensions: d, embeddings, identity, usage };
     Resp::Json(200, serde_json::to_value(resp).expect("an embeddings response encodes"))
+}
+
+// ---- control vectors
+
+fn control_vectors(store: &mut Store, body: &[u8]) -> Resp {
+    let req: ControlVectorRequest = match parse(body, "control-vectors") {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let m = match route(store, &req.model) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    if let Err(e) = req.validate().and_then(|_| req.check(&served(store, &m))) {
+        return invalid(e);
+    }
+    let contexts = req.contexts();
+    let objects: Vec<Named> = contexts.iter().flat_map(|(at, c)| objects_of(&c.messages).into_iter().map(move |n| Named { at: format!("{}.{}", at, n.at), ..n })).collect();
+    if let Err(r) = check_objects(store, &m, &objects) {
+        return r;
+    }
+    let limit = store.cfg.context_tokens;
+    let mut usage = Usage::default();
+    // The sum of the residuals after each layer at the last prompt token, for each side.
+    let mut sums = [vec![[0.0f64; WIDTH]; LAYERS as usize], vec![[0.0f64; WIDTH]; LAYERS as usize]];
+    for (k, (at, c)) in contexts.iter().enumerate() {
+        let prompt = model::render(&c.tools, c.thinking, &c.messages, true).tokens;
+        if prompt.len() > limit {
+            return too_long(&format!("prompt of {}", at), prompt.len(), limit);
+        }
+        let b = build(store, &m, c, req.dry_run);
+        usage.prompt += prompt.len() as u64;
+        usage.kept += b.kept as u64;
+        usage.fed += (prompt.len() - b.kept) as u64;
+        let side = usize::from(k >= req.positive.len());
+        for (sum, h) in sums[side].iter_mut().zip(toy_control::residuals(State::after(m.seed, &prompt))) {
+            for (s, x) in sum.iter_mut().zip(h) {
+                *s += x;
+            }
+        }
+    }
+    let (np, nn) = (req.positive.len() as f64, req.negative.len() as f64);
+    let layers = (0..LAYERS).map(|l| (l, (0..WIDTH).map(|j| (sums[0][l as usize][j] / np - sums[1][l as usize][j] / nn) as f32).collect())).collect();
+    let vector = ControlVector { model: m.name.clone(), weight_hash: weight_hash(&m), layers };
+    let bytes = vector.to_bytes();
+    let id = gogi_proto::content_id(&bytes);
+    let written: Vec<u64> = if req.dry_run { vec![] } else { vec![bytes.len() as u64] };
+    usage.media = media_usage(store, &objects, &written);
+    if !req.dry_run {
+        store.objects.entry(id.clone()).or_insert_with(|| (MEDIA_TYPE.to_string(), bytes));
+    }
+    let ident = identity_of(&m);
+    let identity = DecisionIdentity {
+        model: m.name.clone(),
+        weight_hash: weight_hash(&m),
+        tokenizer_hash: ident["tokenizer_hash"].as_str().unwrap_or_default().into(),
+        template: ident["template"].as_str().unwrap_or_default().into(),
+        engine: ident["engine"].as_str().unwrap_or_default().into(),
+        spec_id: None,
+    };
+    let vector = (!req.dry_run).then(|| gogi_proto::ids::ContentId::parse(id).expect("a content id parses"));
+    let contexts = ControlVectorContexts { positive: req.positive.len() as u64, negative: req.negative.len() as u64 };
+    let resp = ControlVectorResponse { model: m.name.clone(), vector, layers: LAYERS, width: WIDTH as u32, contexts, identity, usage };
+    Resp::Json(200, serde_json::to_value(resp).expect("a control-vector response encodes"))
 }

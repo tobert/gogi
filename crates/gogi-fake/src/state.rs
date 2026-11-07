@@ -30,11 +30,20 @@ pub struct FakeModel {
     /// It declares `thinking`, so its contexts take `thinking: true`. The toy template renders
     /// thinking either way.
     pub thinks: bool,
+    /// It declares `control_vectors`: its contexts take `control`, and it makes control vectors
+    /// (`gogi_toy::control`).
+    pub controls: bool,
 }
 
 impl FakeModel {
     pub fn ready(name: &str, seed: u64) -> FakeModel {
-        FakeModel { name: name.into(), aliases: vec![], seed, status: ModelStatus::Ready, embeds: false, thinks: true }
+        FakeModel { name: name.into(), aliases: vec![], seed, status: ModelStatus::Ready, embeds: false, thinks: true, controls: true }
+    }
+
+    /// A ready served model that does not declare `control_vectors`: a context with a `control` is
+    /// a `400` naming `control`, and `POST /council/v2/control-vectors` a `400` naming `model`.
+    pub fn without_control_vectors(name: &str, seed: u64) -> FakeModel {
+        FakeModel { controls: false, ..FakeModel::ready(name, seed) }
     }
 
     /// A ready served model that does not declare `thinking`: a context with `thinking: true` is a
@@ -45,7 +54,7 @@ impl FakeModel {
 
     /// A ready served model that only embeds.
     pub fn embedding(name: &str, seed: u64) -> FakeModel {
-        FakeModel { embeds: true, thinks: false, ..FakeModel::ready(name, seed) }
+        FakeModel { embeds: true, thinks: false, controls: false, ..FakeModel::ready(name, seed) }
     }
 }
 
@@ -89,6 +98,8 @@ impl Default for Config {
 pub struct Snap {
     /// The served model the snapshot belongs to.
     pub model: String,
+    /// The key of the control list its model state was made under; empty for the plain model.
+    pub control: String,
     pub tokens: Arc<Vec<u32>>,
     pub parent: Option<String>,
     /// A build that starts from it reads its model state rounded.
@@ -124,8 +135,9 @@ pub struct Store {
 }
 
 /// The id of served model `model`'s snapshot after `tokens`, with boundaries at the token counts
-/// `counts`.
-pub fn snapshot_id(model: &FakeModel, tokens: &[u32], counts: &[usize]) -> String {
+/// `counts`, under the control list whose key is `control`. The plain model's key is empty, and its
+/// ids hash no key.
+pub fn snapshot_id(model: &FakeModel, control: &str, tokens: &[u32], counts: &[usize]) -> String {
     let mut bytes = Vec::with_capacity(tokens.len() * 4 + 64);
     bytes.extend_from_slice(b"gogi-fake-held-v1\0");
     bytes.extend_from_slice(IDENTITY_KEY.as_bytes());
@@ -139,6 +151,10 @@ pub fn snapshot_id(model: &FakeModel, tokens: &[u32], counts: &[usize]) -> Strin
     bytes.push(0);
     for c in counts {
         bytes.extend_from_slice(&(*c as u64).to_le_bytes());
+    }
+    if !control.is_empty() {
+        bytes.push(0);
+        bytes.extend_from_slice(control.as_bytes());
     }
     content_id(&bytes)
 }
@@ -178,13 +194,14 @@ impl Store {
         self.snaps.contains_key(id)
     }
 
-    /// Holds a snapshot of served model `model` built on `parent`.
-    pub fn hold(&mut self, id: String, model: &str, tokens: &[u32], parent: Option<String>) {
+    /// Holds a snapshot of served model `model` under the control list `control`, built on
+    /// `parent`.
+    pub fn hold(&mut self, id: String, model: &str, control: &str, tokens: &[u32], parent: Option<String>) {
         if self.snaps.contains_key(&id) {
             return;
         }
         self.next_born += 1;
-        self.snaps.insert(id, Snap { model: model.to_string(), tokens: Arc::new(tokens.to_vec()), parent, sealed: false, born: self.next_born });
+        self.snaps.insert(id, Snap { model: model.to_string(), control: control.to_string(), tokens: Arc::new(tokens.to_vec()), parent, sealed: false, born: self.next_born });
         self.evict();
     }
 
@@ -259,7 +276,7 @@ impl Store {
         let Some(dir) = &self.cfg.state_dir else { return };
         let kept = self.kept();
         let snaps: serde_json::Map<String, Value> =
-            kept.iter().filter_map(|id| self.snaps.get(id).map(|s| (id.clone(), json!({"model": s.model, "tokens": *s.tokens, "parent": s.parent, "sealed": s.sealed})))).collect();
+            kept.iter().filter_map(|id| self.snaps.get(id).map(|s| (id.clone(), json!({"model": s.model, "control": s.control, "tokens": *s.tokens, "parent": s.parent, "sealed": s.sealed})))).collect();
         let pins: serde_json::Map<String, Value> = self.pins.iter().map(|(o, p)| (o.clone(), json!({"snapshots": p.snapshots, "expires": p.expires}))).collect();
         let keeps: serde_json::Map<String, Value> = self.keeps.iter().map(|(o, k)| (o.clone(), json!({"objects": k.objects, "expires": k.expires}))).collect();
         let kept: BTreeSet<&String> = self.keeps.values().flat_map(|k| k.objects.iter()).collect();
@@ -311,7 +328,7 @@ impl Store {
         snaps.sort_by_key(|(_, s)| s["tokens"].as_array().map_or(0, |t| t.len()));
         for (id, s) in snaps {
             let tokens: Vec<u32> = s["tokens"].as_array().into_iter().flatten().filter_map(|t| t.as_u64().map(|t| t as u32)).collect();
-            self.hold(id.clone(), s["model"].as_str().unwrap_or(""), &tokens, s["parent"].as_str().map(String::from));
+            self.hold(id.clone(), s["model"].as_str().unwrap_or(""), s["control"].as_str().unwrap_or(""), &tokens, s["parent"].as_str().map(String::from));
             if s["sealed"] == json!(true) {
                 self.seal(id);
             }

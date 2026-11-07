@@ -240,3 +240,37 @@ def test_the_fake_reports_and_keeps_the_limits_it_is_given():
         _, b = _call(fake.url, "POST", "/council/v2/contexts", {"model": "toy", "context": big})
         status, e = _call(fake.url, "PUT", "/council/v2/pins/t", {"snapshots": [b["head"]], "ttl_s": 60})
         assert (status, e["error"]["param"]) == (413, "pin_bytes")
+
+
+def test_a_context_takes_a_control_list_and_names_a_bad_item():
+    vector = "blake3:" + "a" * 64
+    u = {"role": "user", "content": "u"}
+    gogi.check_context({"thinking": False, "control": [{"vector": vector, "op": "ablate", "strength": 1}], "messages": [u]})
+    for item, member in [({"vector": vector, "op": "boost", "strength": 1}, r"control\[0\]\.op"), ({"vector": vector, "op": "add", "strength": "1"}, r"control\[0\]\.strength"),
+                         ({"vector": "blake3:ab", "op": "add", "strength": 1}, r"control\[0\]\.vector")]:
+        with pytest.raises(ValueError, match=r"invalid field `" + member):
+            gogi.check_context({"thinking": False, "control": [item], "messages": [u]})
+
+
+def test_a_control_vector_round_trips_through_its_bytes():
+    data = gogi.control_vector_bytes("m", "0x01", {0: [1.0, -0.5], 3: [0.25, 2.0]})
+    assert gogi.parse_control_vector(data) == {"model": "m", "weight_hash": "0x01", "layers": {0: [1.0, -0.5], 3: [0.25, 2.0]}}
+    with pytest.raises(ValueError, match="one width"):
+        gogi.control_vector_bytes("m", "0x01", {0: [1.0], 1: [1.0, 2.0]})
+    with pytest.raises(ValueError, match="8 bytes"):
+        gogi.parse_control_vector(b"x")
+
+
+def test_the_fake_makes_control_vectors_on_a_model_that_declares_them():
+    said = lambda text: {"thinking": False, "messages": [{"role": "user", "content": "Write it."}, {"role": "assistant", "content": text}]}
+    with gogi.FakeServer(models=["day", {"name": "plain", "control_vectors": False}]) as fake:
+        _, ident = _call(fake.url, "GET", "/council/v2/identity")
+        assert ["control_vectors" in m["capabilities"] for m in ident["models"]] == [True, False]
+        status, r = _call(fake.url, "POST", "/council/v2/control-vectors", {"model": "day", "positive": [said("No.")], "negative": [said("Yes.")]})
+        assert status == 200 and (r["layers"], r["width"]) == (4, 8)
+        with urllib.request.urlopen(fake.url + "/council/v2/objects/" + r["vector"]) as resp:
+            assert resp.headers["content-type"] == "application/x-safetensors"
+            v = gogi.parse_control_vector(resp.read())
+        assert v["weight_hash"] == ident["models"][0]["weight_hash"] and sorted(v["layers"]) == [0, 1, 2, 3]
+        status, e = _call(fake.url, "POST", "/council/v2/control-vectors", {"model": "plain", "positive": [said("No.")], "negative": [said("Yes.")]})
+        assert (status, e["error"]["param"]) == (400, "model")
