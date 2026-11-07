@@ -15,6 +15,12 @@ impl Suite {
         let (Some(id), Some(me)) = (self.identity.clone(), self.model.clone()) else { return };
         let ctx = self.ctx(self.opening("models"));
         let named = |model: &str| json!({"model": model, "context": ctx});
+        // A request to another served model sends the thinking that model takes, so its refusal is the one checked.
+        let theirs = |m: &gogi_proto::identity::ServedModel| {
+            let mut c = ctx.clone();
+            c["thinking"] = json!(m.has(Capability::Thinking));
+            json!({"model": m.model, "context": c})
+        };
         let Some(b) = self.expect("a build naming the served model succeeds", "POST", "/council/v2/contexts", Some(named(&me.model)), 200) else { return };
         self.r.check("a build names its served model", b["model"] == json!(me.model), &b["model"]);
 
@@ -48,7 +54,7 @@ impl Suite {
         // reading identity and sending the request, so the check names the status it expected.
         let waiting: Vec<_> = id.models.iter().filter(|m| matches!(m.status, ModelStatus::Loading | ModelStatus::Draining | ModelStatus::Unloaded)).cloned().collect();
         for m in &waiting {
-            if let Some((status, v)) = self.bare("a build naming a served model that is not ready", "/council/v2/contexts", named(&m.model)) {
+            if let Some((status, v)) = self.bare("a build naming a served model that is not ready", "/council/v2/contexts", theirs(m)) {
                 let e = &v["error"];
                 self.r.check(
                     &format!("{}, {:?} in identity, is a 503 model_unavailable naming it and its status", m.model, m.status),
@@ -65,12 +71,12 @@ impl Suite {
         let others: Vec<_> = id.models.iter().filter(|m| m.status == ModelStatus::Ready && m.model != me.model).cloned().collect();
         for m in &others {
             if !m.text_replies() {
-                if let Some((status, v)) = self.bare("a build on a served model with no text replies", "/council/v2/contexts", named(&m.model)) {
+                if let Some((status, v)) = self.bare("a build on a served model with no text replies", "/council/v2/contexts", theirs(m)) {
                     self.r.check(&format!("a build naming {}, which has no text replies, is a 400 naming model", m.model), status == 400 && v["error"]["param"] == json!("model"), (status, &v));
                 }
                 continue;
             }
-            if let Some((status, v)) = self.bare("a build on another ready served model", "/council/v2/contexts", named(&m.model)) {
+            if let Some((status, v)) = self.bare("a build on another ready served model", "/council/v2/contexts", theirs(m)) {
                 self.r.check(&format!("{} builds the same context into a snapshot of its own", m.model), status == 200 && v["model"] == json!(m.model) && v["head"].is_string() && v["head"] != b["head"], (status, &v));
             }
         }

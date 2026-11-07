@@ -205,3 +205,11 @@ fn the_fake_passes_as_a_model_without_thinking() {
     }
     assert!(r.checks.iter().any(|c| c.name == "thinking is part of the context" && c.status == Status::Skip), "a model without thinking has no thinking to compare");
 }
+
+#[test]
+fn the_fake_passes_as_a_model_that_thinks_beside_one_that_does_not() {
+    let server = Server::start(Config { models: vec![FakeModel::ready("gogi-toy-1", 0), FakeModel::without_thinking("gogi-toy-plain", 3)], ..Config::default() }).unwrap();
+    let r = run(Opts { url: server.url(), restart: None, model: Some("gogi-toy-1".into()) }, false);
+    assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
+    assert!(r.checks.iter().any(|c| c.name == "gogi-toy-plain builds the same context into a snapshot of its own" && c.status == Status::Ok));
+}
