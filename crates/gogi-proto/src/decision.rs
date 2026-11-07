@@ -371,7 +371,7 @@ mod tests {
     }
 
     fn chat() -> Context {
-        Context { messages: vec![Message::user("u")], ..Default::default() }
+        Context::new(false, vec![Message::user("u")])
     }
 
     #[test]
@@ -387,11 +387,11 @@ mod tests {
     fn queue_context() -> Context {
         let call = ToolCall { id: "c".into(), name: "next".into(), input: Default::default() };
         Context {
+            thinking: false,
             tools: vec![Tool::new("next", json!({"type": "object", "properties": {"answers": {"type": "object", "properties": {
                 "verdict": {"type": "string", "enum": ["A", "B"]}}}}}))],
             queue: Some("next".into()),
             messages: vec![Message::user("u"), Message { tool_calls: vec![call], ..Message::assistant("") }],
-            ..Default::default()
         }
     }
 
@@ -411,7 +411,7 @@ mod tests {
         assert_eq!(param(DecisionRequest { case: json!(3), ..req() }), "case");
         assert_eq!(param(DecisionRequest { timeout_ms: Some(0), ..req() }), "timeout_ms");
         assert_eq!(param(DecisionRequest { contexts: vec![chat(); 9], ..req() }), "contexts");
-        assert_eq!(param(DecisionRequest { contexts: vec![Context::default()], ..req() }), "contexts");
+        assert_eq!(param(DecisionRequest { contexts: vec![Context::new(false, vec![])], ..req() }), "contexts");
         DecisionRequest { contexts: vec![chat(); 8], ..req() }.validate().unwrap();
         assert_eq!(param(DecisionRequest { ask: Some(vec![]), ..req() }), "ask");
         assert_eq!(param(DecisionRequest { ask: Some(vec!["q".into(), "q".into()]), ..req() }), "ask");
@@ -420,12 +420,12 @@ mod tests {
 
     #[test]
     fn decisions_never_read_an_open_message() {
-        let open = Context { messages: vec![Message::user("u"), Message::assistant("The plan:").opened()], ..Default::default() };
+        let open = Context::new(false, vec![Message::user("u"), Message::assistant("The plan:").opened()]);
         let e = DecisionRequest { contexts: vec![chat(), open], ..req() }.validate().unwrap_err();
         assert_eq!((e.param.as_deref(), e.message.as_str()), (Some("continue"), "contexts[1]: a decision reads no open message; send continue: true only to a generation"));
-        let broken = Context { messages: vec![Message::user("u").opened()], ..Default::default() };
+        let broken = Context::new(false, vec![Message::user("u").opened()]);
         assert_eq!(param(DecisionRequest { contexts: vec![broken], ..req() }), "continue");
-        let closed = Context { messages: vec![Message { open: false, ..Message::user("u") }], ..Default::default() };
+        let closed = Context::new(false, vec![Message { open: false, ..Message::user("u") }]);
         DecisionRequest { contexts: vec![closed], ..req() }.validate().unwrap();
     }
 
@@ -455,7 +455,7 @@ mod tests {
 
     #[test]
     fn a_request_decodes_strictly_and_names_reads_by_index() {
-        let v = json!({"model": "m", "case": {"b": 1, "a": 2}, "spec_id": spec_id(), "contexts": [{"messages": [{"role": "user", "content": "u"}]}], "think": {"tokens": 0}});
+        let v = json!({"model": "m", "case": {"b": 1, "a": 2}, "spec_id": spec_id(), "contexts": [{"thinking": false, "messages": [{"role": "user", "content": "u"}]}], "think": {"tokens": 0}});
         let r: DecisionRequest = serde_json::from_value(v.clone()).unwrap();
         assert_eq!(serde_json::to_value(&r).unwrap(), v);
         assert_eq!(serde_json::to_string(&r.case).unwrap(), r#"{"b":1,"a":2}"#);

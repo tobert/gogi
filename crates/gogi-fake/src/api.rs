@@ -172,6 +172,9 @@ pub fn identity(store: &Store) -> Value {
             v["limits"] = json!({"context_tokens": store.cfg.context_tokens, "decision_context_tokens": store.cfg.decision_context_tokens,
                                  "snapshot_bytes": BYTES_PER_TOKEN, "contexts_per_decision": 8, "default_timeout_ms": 30000});
             v["capabilities"] = json!(["reads", "generate", "continuation", "dry_run", "leave_one_out"]);
+            if m.thinks {
+                v["capabilities"].as_array_mut().expect("an array").push(json!("thinking"));
+            }
             if !store.cfg.media_inputs.is_empty() || !store.cfg.media_outputs.is_empty() {
                 v["media"] = json!({"inputs": store.cfg.media_inputs, "outputs": store.cfg.media_outputs});
             }
@@ -232,6 +235,20 @@ fn output_bytes(m: &FakeModel, seed: u64, mime: &str, prompt: &[u32], n: usize) 
     let mut out = vec![0u8; n];
     h.finalize_xof().fill(&mut out);
     out
+}
+
+/// Refuses `thinking: true` in a context of a served model without `thinking`, a `400` naming
+/// `thinking`, or `contexts[k].thinking` for a request with several contexts.
+fn check_thinking(store: &Store, m: &FakeModel, contexts: &[&Context], several: bool) -> Result<(), Resp> {
+    let id: ServerIdentity = serde_json::from_value(identity(store)).expect("the fake's identity decodes");
+    let served = id.models.iter().find(|s| s.model == m.name).expect("identity lists the config's models");
+    for (k, c) in contexts.iter().enumerate() {
+        if let Err(e) = c.check_thinking(served) {
+            let param = if several { format!("contexts[{}].thinking", k) } else { "thinking".to_string() };
+            return Err(bad_param(&param, e.message));
+        }
+    }
+    Ok(())
 }
 
 /// The objects of each context of a request with several, named `contexts[k].messages[i]...`.
@@ -461,7 +478,7 @@ impl Built {
 /// Renders a context and builds it on served model `m`: starts from the longest snapshot of `m`
 /// held whose tokens begin it, and holds a snapshot at each boundary and at the end unless `dry_run`.
 fn build(store: &mut Store, m: &FakeModel, c: &Context, dry_run: bool) -> Built {
-    let r = model::render(&c.tools, c.thinks(), &c.messages, false);
+    let r = model::render(&c.tools, c.thinking, &c.messages, false);
     let mut counts = Vec::new();
     let mut cuts = Vec::new();
     for cut in &r.cuts {
@@ -493,15 +510,18 @@ fn build_route(store: &mut Store, body: &[u8]) -> Resp {
         Ok(m) => m,
         Err(r) => return r,
     };
-    if let Err(e) = req.validate().and_then(|_| model::check_open(&req.context.tools, req.context.thinks(), &req.context.messages)) {
+    if let Err(e) = req.validate().and_then(|_| model::check_open(&req.context.tools, req.context.thinking, &req.context.messages)) {
         return invalid(e);
+    }
+    if let Err(r) = check_thinking(store, &m, &[&req.context], false) {
+        return r;
     }
     if let Err(r) = check_objects(store, &m, &objects_of(&req.context.messages)) {
         return r;
     }
     let dry_run = req.dry_run.unwrap_or(false);
     let limit = store.cfg.context_tokens;
-    let n = model::render(&req.context.tools, req.context.thinks(), &req.context.messages, false).end;
+    let n = model::render(&req.context.tools, req.context.thinking, &req.context.messages, false).end;
     if n > limit {
         return too_long("context", n, limit);
     }
@@ -569,6 +589,9 @@ fn reads(store: &mut Store, body: &[u8]) -> Resp {
     if let Err(e) = req.validate() {
         return invalid(e);
     }
+    if let Err(r) = check_thinking(store, &m, &req.contexts.iter().collect::<Vec<_>>(), true) {
+        return r;
+    }
     if let Err(r) = check_objects(store, &m, &objects_in(&req.contexts)) {
         return r;
     }
@@ -588,7 +611,7 @@ fn reads(store: &mut Store, body: &[u8]) -> Resp {
     let mut out = Vec::new();
     let mut usage = Usage::default();
     for (ci, c) in req.contexts.iter().enumerate() {
-        let n = model::render(&c.tools, c.thinks(), &c.messages, false).end;
+        let n = model::render(&c.tools, c.thinking, &c.messages, false).end;
         if n + longest > store.cfg.context_tokens {
             return too_long("context and its longest suffix", n + longest, store.cfg.context_tokens);
         }
@@ -686,6 +709,9 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
     if let Err(e) = req.validate() {
         return invalid(e);
     }
+    if let Err(r) = check_thinking(store, &m, &[&req.context], false) {
+        return r;
+    }
     if let Err(r) = check_objects(store, &m, &objects_of(&req.context.messages)) {
         return r;
     }
@@ -719,7 +745,7 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
         return bad_param("max_tokens", format!("max_tokens is 1 to {}", limit));
     }
     let c = &req.context;
-    let thinking = c.thinks();
+    let thinking = c.thinking;
     if let Err(e) = model::check_open(&c.tools, thinking, &c.messages) {
         return invalid(e);
     }
@@ -950,6 +976,9 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
     }
     let mut objects = objects_in(&req.contexts);
     objects.extend(req.case_media.iter().enumerate().map(|(i, o)| Named { at: format!("case_media[{}]", i), object: o.clone(), assistant: false }));
+    if let Err(r) = check_thinking(store, &m, &req.contexts.iter().collect::<Vec<_>>(), true) {
+        return r;
+    }
     if let Err(r) = check_objects(store, &m, &objects) {
         return r;
     }
@@ -1017,7 +1046,7 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
         let (head, base_tokens, queue, kept) = match c {
             None => (None, read::empty_context(), None, 0),
             Some(c) => {
-                let n = model::render(&c.tools, c.thinks(), &c.messages, false).end;
+                let n = model::render(&c.tools, c.thinking, &c.messages, false).end;
                 if n > store.cfg.decision_context_tokens {
                     return err(413, "too_large", format!("context is {} tokens; decisions read contexts of up to {}", n, store.cfg.decision_context_tokens), Some("decision_context_tokens"));
                 }

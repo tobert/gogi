@@ -93,7 +93,7 @@ pub fn queue_start(c: &Context, call_id: &str, case: &str, media: &[ObjectRef]) 
         result.content = Some(Content::Parts(parts));
     }
     messages.push(result);
-    let mut t = render(&c.tools, c.thinks(), &messages, true).tokens;
+    let mut t = render(&c.tools, c.thinking, &messages, true).tokens;
     push_text(&mut t, &format!("call:{}{{answers:{{", c.queue.as_deref().unwrap_or("")));
     t
 }

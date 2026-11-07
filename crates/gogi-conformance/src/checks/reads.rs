@@ -73,7 +73,7 @@ impl Suite {
         m2.extend(super::continue_after(&g, "Now list what is left."));
         let rq = json!({"contexts": [self.ctx(m2)], "suffixes": [SUFFIX], "letters": ["A", "B"], "top": 20});
         let Some(a) = self.expect("replay: the first read succeeds", "POST", "/council/v2/reads", Some(rq.clone()), 200) else { return };
-        let other = json!({"messages": [{"role": "system", "content": format!("Unrelated {}.", self.nonce)}, {"role": "user", "content": "Say hi.", "snap": true}]});
+        let other = json!({"thinking": self.thinks(), "messages": [{"role": "system", "content": format!("Unrelated {}.", self.nonce)}, {"role": "user", "content": "Say hi.", "snap": true}]});
         self.generate("replay: an unrelated generation succeeds", &other, 8);
         let Some(b) = self.expect("replay: the second read succeeds", "POST", "/council/v2/reads", Some(rq), 200) else { return };
         let same = a["reads"][0]["top"] == b["reads"][0]["top"] && a["reads"][0]["logprobs"] == b["reads"][0]["logprobs"] && a["reads"][0]["mass"] == b["reads"][0]["mass"];

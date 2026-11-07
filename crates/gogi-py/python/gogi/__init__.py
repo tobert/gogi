@@ -51,10 +51,10 @@ STATUSES = ("ready", "loading", "draining", "unloaded")
 def _served_model(m, i):
     if isinstance(m, str):
         m = {"name": m}
-    unknown = set(m) - {"name", "aliases", "seed", "status"}
+    unknown = set(m) - {"name", "aliases", "seed", "status", "thinking"}
     if unknown:
-        raise ValueError(f"models[{i}]: unknown members {sorted(unknown)}; a served model has name, aliases, seed, and status")
-    return {"name": m.get("name"), "aliases": list(m.get("aliases", [])), "seed": m.get("seed", i), "status": m.get("status", "ready")}
+        raise ValueError(f"models[{i}]: unknown members {sorted(unknown)}; a served model has name, aliases, seed, status, and thinking")
+    return {"name": m.get("name"), "aliases": list(m.get("aliases", [])), "seed": m.get("seed", i), "status": m.get("status", "ready"), "thinking": m.get("thinking", True)}
 
 
 class FakeServer:

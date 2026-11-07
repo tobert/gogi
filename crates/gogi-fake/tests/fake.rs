@@ -45,7 +45,7 @@ fn post(s: &Server, path: &str, body: Value) -> (u16, Value) {
 }
 
 fn ctx(messages: Value) -> Value {
-    json!({"messages": messages})
+    json!({"thinking": true, "messages": messages})
 }
 
 fn answer_with_reasoning() -> Vec<Value> {
@@ -299,7 +299,7 @@ fn a_queue_context_gets_the_case_as_the_calls_result() {
     let (_, held) = post(&s, "/council/v2/specs", spec);
     let tool = |undo: &[&str]| json!({"name": "next", "input_schema": {"type": "object", "properties": {"answers": {"type": "object", "properties": {
         "verdict": {"type": "string", "enum": ["A", "B"]}, "undo": {"type": "string", "enum": undo}}}}}});
-    let queue = |undo: &[&str]| json!({"tools": [tool(undo)], "queue": "next", "messages": [
+    let queue = |undo: &[&str]| json!({"thinking": true, "tools": [tool(undo)], "queue": "next", "messages": [
         {"role": "system", "content": "s"}, {"role": "user", "content": "go", "snap": true},
         {"role": "assistant", "tool_calls": [{"id": "c0", "name": "next", "input": {}}]}]});
     let req = |c: Value| json!({"model": "toy", "spec_id": held["spec_id"], "case": "git push", "contexts": [c]});
@@ -374,7 +374,7 @@ fn each_served_model_has_its_own_snapshots_and_numbers_and_keeps_them_across_an_
 fn a_streamed_reply_labels_each_token_by_its_part_and_the_parts_join_in_done() {
     let s = Server::start(Config::default()).unwrap();
     let tool = json!({"name": "next", "input_schema": {"type": "object"}});
-    let body = json!({"model": "toy", "context": {"tools": [tool], "messages": [{"role": "user", "content": "CALL it"}]}, "max_tokens": 400, "sample": {"temperature": 1, "seed": 5}, "stream": true});
+    let body = json!({"model": "toy", "context": {"thinking": true, "tools": [tool], "messages": [{"role": "user", "content": "CALL it"}]}, "max_tokens": 400, "sample": {"temperature": 1, "seed": 5}, "stream": true});
     let events = stream(&s, body);
     let Some(StreamEvent::Done(done)) = events.last() else { panic!("{events:?}") };
     let tokens: Vec<_> = events.iter().filter_map(|e| if let StreamEvent::Token(t) = e { Some(t) } else { None }).collect();
@@ -518,7 +518,6 @@ fn each_misuse_of_continue_is_a_400_naming_continue() {
         thinking(with(json!({"role": "assistant", "content": "a", "tool_calls": [{"id": "c", "name": "sh", "input": {}}], "continue": true}))),
         thinking(with(json!({"role": "assistant", "reasoning": "", "continue": true}))),
         json!({"thinking": false, "messages": with(json!({"role": "assistant", "reasoning": "r", "continue": true}))}),
-        json!({"messages": with(json!({"role": "assistant", "reasoning": "r", "continue": true}))}),
         thinking(with(json!({"role": "assistant", "content": "a", "continue": "yes"}))),
         thinking(with(json!({"role": "assistant", "content": "a", "continue": null}))),
     ];
@@ -826,5 +825,43 @@ fn a_model_that_only_embeds_refuses_contexts_naming_model() {
     ] {
         let (code, v) = post(&s, path, body);
         assert_eq!((code, v["error"]["param"].as_str()), (400, Some("model")), "{path}: {v}");
+    }
+}
+
+/// A served model without thinking: the toy's numbers, and `thinking` absent from its capabilities.
+fn plain() -> Server {
+    Server::start(Config { models: vec![FakeModel::ready("gogi-toy-1", 0), FakeModel::without_thinking("gogi-toy-plain", 3)], ..Config::default() }).unwrap()
+}
+
+#[test]
+fn every_request_that_reads_a_context_names_thinking_and_a_plain_model_takes_only_false() {
+    let s = plain();
+    let (_, id) = call(&s, "GET", "/council/v2/identity", None);
+    let caps = |i: usize| id["models"][i]["capabilities"].as_array().unwrap().contains(&json!("thinking"));
+    assert_eq!((caps(0), caps(1)), (true, false), "{id}");
+    let (_, spec) = post(&s, "/council/v2/specs", json!({"name": "g", "instructions": "i", "input_label": "l", "questions": [{"id": "v", "type": "noul", "instructions": "ok?"}]}));
+    let messages = json!([{"role": "user", "content": "u", "snap": true}]);
+    let bodies = |model: &str, c: Value| {
+        [
+            ("/council/v2/contexts", json!({"model": model, "context": c}), "thinking"),
+            ("/council/v2/generations", json!({"model": model, "context": c, "max_tokens": 4}), "thinking"),
+            ("/council/v2/reads", json!({"model": model, "contexts": [c], "suffixes": ["x"], "letters": ["A", "B"]}), "contexts[0].thinking"),
+            ("/council/v2/decisions", json!({"model": model, "spec_id": spec["spec_id"], "case": "x", "contexts": [c]}), "contexts[0].thinking"),
+        ]
+    };
+    for model in ["gogi-toy-1", "gogi-toy-plain"] {
+        for (path, body, _) in bodies(model, json!({"messages": messages})) {
+            assert_eq!(refused_param(&s, path, body), json!("thinking"), "{path}: a context without thinking names it");
+        }
+        for (path, body, _) in bodies(model, json!({"thinking": false, "messages": messages})) {
+            let (code, v) = post(&s, path, body);
+            assert_eq!(code, 200, "{path} {model}: {v}");
+        }
+    }
+    for (path, body, param) in bodies("gogi-toy-plain", json!({"thinking": true, "messages": messages})) {
+        assert_eq!(refused_param(&s, path, body), json!(param), "{path}");
+    }
+    for (path, body, _) in bodies("gogi-toy-1", json!({"thinking": true, "messages": messages})) {
+        assert_eq!(post(&s, path, body).0, 200, "{path}");
     }
 }

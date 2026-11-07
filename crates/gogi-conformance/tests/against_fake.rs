@@ -13,7 +13,7 @@ fn the_fake_passes_every_check() {
     let r = run(Opts { url: server.url(), restart: None, model: None }, false);
     assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
     assert!(r.checks.len() > 150, "{}", r.checks.len());
-    for name in ["an object reads back bit for bit", "a range reads its bytes", "a keep list names the held objects only", "an object past object_bytes is a 413", "another object is another context", "a decision reads its case_media", "a keep set past keep_bytes is a 413", "a PUT replaces the owner's whole keep set", "GET of a sealed pending id is a 308 to its content id", "HEAD of a sealed pending id is a 308 to its content id", "usage.media counts the output written", "usage.media counts the object read", "a reply's message holds its output as an object part", "usage.media counts an object named twice once", "case_media is read in order", "an object part of another media type than its put is a 400 naming the part", "an unheld part in a decision's context is a 404 naming it under contexts", "a text part that spells a template token is the same context as that string", "a stream's progress and preview events follow their rules", "a stream with previews: true sends previews", "a preview object reads back with its media type", "usage.media does not count previews", "previews with no stream is a 400 naming previews", "a stream with no previews sends no preview, and its steps count up"] {
+    for name in ["a build refuses a context without thinking with a 400 naming thinking", "a build refuses a context whose thinking is not a boolean with a 400 naming thinking", "a generation refuses a context without thinking with a 400 naming thinking", "a context with thinking true builds on a model that declares thinking", "thinking is part of the context", "an object reads back bit for bit", "a range reads its bytes", "a keep list names the held objects only", "an object past object_bytes is a 413", "another object is another context", "a decision reads its case_media", "a keep set past keep_bytes is a 413", "a PUT replaces the owner's whole keep set", "GET of a sealed pending id is a 308 to its content id", "HEAD of a sealed pending id is a 308 to its content id", "usage.media counts the output written", "usage.media counts the object read", "a reply's message holds its output as an object part", "usage.media counts an object named twice once", "case_media is read in order", "an object part of another media type than its put is a 400 naming the part", "an unheld part in a decision's context is a 404 naming it under contexts", "a text part that spells a template token is the same context as that string", "a stream's progress and preview events follow their rules", "a stream with previews: true sends previews", "a preview object reads back with its media type", "usage.media does not count previews", "previews with no stream is a 400 naming previews", "a stream with no previews sends no preview, and its steps count up"] {
         assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name} did not pass");
     }
 }
@@ -97,7 +97,7 @@ fn the_fake_passes_the_continuation_checks() {
         "a continuation's stream done equals the response without stream",
         "a continuation's stream usage relations hold",
         "snap: true on the open message is allowed",
-        "open content with thinking absent is allowed",
+        "open content with thinking true is allowed",
         "continue: false on the last message is a closed message",
         "a build without dry_run refuses an open message, naming continue",
         "a continuation's done starts with the open text",
@@ -114,7 +114,6 @@ fn the_fake_passes_the_continuation_checks() {
         "an open message with tool_calls is a 400 naming continue",
         "an open message with no text is a 400 naming continue",
         "an open message with reasoning and thinking false is a 400 naming continue",
-        "an open message with reasoning and thinking absent is a 400 naming continue",
         "continue that is a string is a 400 naming continue",
         "continue that is null is a 400 naming continue",
         "a decision with an open context is a 400 naming continue",
@@ -188,4 +187,21 @@ fn a_chat_model_beside_one_that_only_embeds_refuses_embeddings() {
     for name in ["embeddings to a served model without embed is a 400 naming model", "a build naming gogi-toy-embed-1, which has no text replies, is a 400 naming model"] {
         assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name} did not pass");
     }
+}
+
+#[test]
+fn the_fake_passes_as_a_model_without_thinking() {
+    let server = Server::start(Config { models: vec![FakeModel::ready("gogi-toy-1", 0), FakeModel::without_thinking("gogi-toy-plain", 3)], ..Config::default() }).unwrap();
+    let r = run(Opts { url: server.url(), restart: None, model: Some("gogi-toy-plain".into()) }, false);
+    assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
+    for name in [
+        "a build with thinking true to a model without thinking is a 400 naming thinking",
+        "a generation with thinking true to a model without thinking is a 400 naming thinking",
+        "a build refuses a context without thinking with a 400 naming thinking",
+        "a context with thinking false builds",
+        "an open message with reasoning and thinking false is a 400 naming continue",
+    ] {
+        assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name}: {:?}", r.checks.iter().find(|c| c.name == name));
+    }
+    assert!(r.checks.iter().any(|c| c.name == "thinking is part of the context" && c.status == Status::Skip), "a model without thinking has no thinking to compare");
 }

@@ -154,7 +154,7 @@ GET /council/v2/identity
        "device": "2x Intel(R) Arc(TM) Pro B70 Graphics",
        "limits": {"context_tokens": 65535, "decision_context_tokens": 3072, "snapshot_bytes": 450560,
                   "contexts_per_decision": 8, "default_timeout_ms": 30000},
-       "capabilities": ["reads", "generate", "dry_run", "leave_one_out"],
+       "capabilities": ["reads", "generate", "thinking", "dry_run", "leave_one_out"],
        "media": {"inputs": ["image/*", "audio/wav"], "outputs": []}},
       {"model": "qwen-3.8-mutant-636", "aliases": [], "status": "unloaded", …}],
     "limits": {"pin_bytes": 17179869184, "case_bytes": 65536, "questions_per_spec": 16, "choice_options": 26},
@@ -318,7 +318,13 @@ POST /council/v2/contexts
   server never renders, and a `tool` message names the call whose result it
   gives in `tool_call_id`, a call of the assistant message before its run of
   tool messages.
-- **`thinking`** absent is the server's default; mkviolet's is on.
+- **`thinking` is required, `true` or `false`.** A context without it, or
+  with any other value, is a `400` naming `thinking`. The server has no
+  default, so the same context means the same thing to every server.
+  `thinking: true` needs capability `thinking` on the served model; without
+  it, `thinking: true` is a `400` naming `thinking`, or `contexts[i].thinking`
+  in a request with `contexts`. `thinking: false` is always allowed, also
+  for a served model with no text replies. (Amy, 2026-11-07.)
   A template may render a context the same with thinking on and off:
   Qwen3.8 changes only the generation prompt. Then both contexts have one
   head. A template that renders thinking into the context, as Gemma 4
@@ -800,7 +806,7 @@ data: {"model": "gemma-4-26b-a4b", "content": "…", "finish": "end_turn", …}
 
 ```json
 POST /council/v2/generations
-{"model": "foley", "context": {"messages": [{"role": "user", "content": "Vinyl crackle, light rain, 8 bars at 90 bpm."}]},
+{"model": "foley", "context": {"thinking": false, "messages": [{"role": "user", "content": "Vinyl crackle, light rain, 8 bars at 90 bpm."}]},
  "max_tokens": 64, "sample": {"seed": 7}, "output": {"mime": "audio/wav", "options": {"seconds": 21.333}},
  "stream": true}
 ```
@@ -952,9 +958,8 @@ POST /council/v2/generations
   resumes with `content: ""`. Without a `content` member, the model
   continues inside its thinking.
 - **An open message with `reasoning` needs `thinking: true`** in the
-  context, when the `reasoning` is not empty. With `thinking` false or
-  absent, it is a `400` naming `continue`, so a request does not depend on
-  a server's default.
+  context, when the `reasoning` is not empty. With `thinking: false`, it is
+  a `400` naming `continue`.
 - **`snap: true` on the open message is allowed.** The end of a context is
   always a boundary, so the mark changes nothing.
 - **The open text is content, never control** (rule 2). Text in it that
@@ -1265,6 +1270,7 @@ specs, which every served model shares.
 | `reads` | served model | `POST /council/v2/reads`. |
 | `generate` | served model | `POST /council/v2/generations`. |
 | `think` | served model | Decisions accept `think` with `tokens` above 0. |
+| `thinking` | served model | Contexts accept `thinking: true`: the model thinks before its reply. |
 | `ride` | served model | Generations accept `decisions`. |
 | `continuation` | served model | Generations accept an open last message, `continue: true`. |
 | `infill` | served model | Reserved for a later top-level `infill` member of a generation. No server declares it yet. |

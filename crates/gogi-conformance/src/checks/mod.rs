@@ -170,8 +170,15 @@ impl Suite {
         }
     }
 
+    /// A context with the shell tools. `thinking` is `true` when the served model declares
+    /// `thinking`, and `false` otherwise.
     pub(crate) fn ctx(&self, messages: Vec<Value>) -> Value {
-        json!({"thinking": true, "tools": shell_tools(), "messages": messages})
+        json!({"thinking": self.thinks(), "tools": shell_tools(), "messages": messages})
+    }
+
+    /// Whether the checked served model declares `thinking`.
+    pub(crate) fn thinks(&self) -> bool {
+        self.has(Capability::Thinking)
     }
 
     /// The first messages of a context, unique to this run.
@@ -269,30 +276,31 @@ impl Suite {
         let call = |id: &str| json!({"id": id, "name": "shell", "input": {}});
         let asst = |id: &str| json!({"role": "assistant", "tool_calls": [call(id)]});
         let bad: Vec<(&str, Value)> = vec![
-            ("a context with no messages", json!({"messages": []})),
-            ("reasoning on a user message", json!({"messages": [{"role": "user", "content": "x", "reasoning": "r"}]})),
-            ("tool_calls on a user message", json!({"messages": [{"role": "user", "content": "x", "tool_calls": [call("a")]}]})),
-            ("a tool message without tool_call_id", json!({"messages": [user.clone(), asst("a"), {"role": "tool", "content": "r"}]})),
-            ("a tool message naming no call", json!({"messages": [user.clone(), asst("a"), {"role": "tool", "tool_call_id": "nope", "content": "r"}]})),
-            ("a tool message after a user message", json!({"messages": [asst("a"), user.clone(), {"role": "tool", "tool_call_id": "a", "content": "r"}]})),
-            ("tool_call_id on a user message", json!({"messages": [{"role": "user", "content": "x", "tool_call_id": "a"}]})),
-            ("a call with an empty id", json!({"messages": [user.clone(), asst("")]})),
-            ("a call with no name", json!({"messages": [user.clone(), {"role": "assistant", "tool_calls": [{"id": "a", "name": "", "input": {}}]}]})),
-            ("a call whose input is not an object", json!({"messages": [user.clone(), {"role": "assistant", "tool_calls": [{"id": "a", "name": "shell", "input": "x"}]}]})),
-            ("a call with arguments in place of input", json!({"messages": [user.clone(), {"role": "assistant", "tool_calls": [{"id": "a", "name": "shell", "arguments": {}}]}]})),
-            ("is_error on a user message", json!({"messages": [{"role": "user", "content": "x", "is_error": true}]})),
-            ("a tool in OpenAI's shape", json!({"tools": [{"type": "function", "function": {"name": "shell", "parameters": {}}}], "messages": [user.clone()]})),
-            ("a tool without input_schema", json!({"tools": [{"name": "shell"}], "messages": [user.clone()]})),
-            ("two tools with one name", json!({"tools": [shell_tools()[0].clone(), shell_tools()[0].clone()], "messages": [user.clone()]})),
-            ("a queue that names no tool", json!({"queue": "nope", "tools": shell_tools(), "messages": [user.clone()]})),
-            ("an unknown role", json!({"messages": [{"role": "wizard", "content": "x"}]})),
-            ("an unknown member of a context", json!({"messages": [user.clone()], "system": "x"})),
-            ("an unknown member of a message", json!({"messages": [{"role": "user", "content": "x", "extra": 1}]})),
+            ("a context with no messages", json!({"thinking": false, "messages": []})),
+            ("reasoning on a user message", json!({"thinking": false, "messages": [{"role": "user", "content": "x", "reasoning": "r"}]})),
+            ("tool_calls on a user message", json!({"thinking": false, "messages": [{"role": "user", "content": "x", "tool_calls": [call("a")]}]})),
+            ("a tool message without tool_call_id", json!({"thinking": false, "messages": [user.clone(), asst("a"), {"role": "tool", "content": "r"}]})),
+            ("a tool message naming no call", json!({"thinking": false, "messages": [user.clone(), asst("a"), {"role": "tool", "tool_call_id": "nope", "content": "r"}]})),
+            ("a tool message after a user message", json!({"thinking": false, "messages": [asst("a"), user.clone(), {"role": "tool", "tool_call_id": "a", "content": "r"}]})),
+            ("tool_call_id on a user message", json!({"thinking": false, "messages": [{"role": "user", "content": "x", "tool_call_id": "a"}]})),
+            ("a call with an empty id", json!({"thinking": false, "messages": [user.clone(), asst("")]})),
+            ("a call with no name", json!({"thinking": false, "messages": [user.clone(), {"role": "assistant", "tool_calls": [{"id": "a", "name": "", "input": {}}]}]})),
+            ("a call whose input is not an object", json!({"thinking": false, "messages": [user.clone(), {"role": "assistant", "tool_calls": [{"id": "a", "name": "shell", "input": "x"}]}]})),
+            ("a call with arguments in place of input", json!({"thinking": false, "messages": [user.clone(), {"role": "assistant", "tool_calls": [{"id": "a", "name": "shell", "arguments": {}}]}]})),
+            ("is_error on a user message", json!({"thinking": false, "messages": [{"role": "user", "content": "x", "is_error": true}]})),
+            ("a tool in OpenAI's shape", json!({"thinking": false, "tools": [{"type": "function", "function": {"name": "shell", "parameters": {}}}], "messages": [user.clone()]})),
+            ("a tool without input_schema", json!({"thinking": false, "tools": [{"name": "shell"}], "messages": [user.clone()]})),
+            ("two tools with one name", json!({"thinking": false, "tools": [shell_tools()[0].clone(), shell_tools()[0].clone()], "messages": [user.clone()]})),
+            ("a queue that names no tool", json!({"thinking": false, "queue": "nope", "tools": shell_tools(), "messages": [user.clone()]})),
+            ("an unknown role", json!({"thinking": false, "messages": [{"role": "wizard", "content": "x"}]})),
+            ("an unknown member of a context", json!({"thinking": false, "messages": [user.clone()], "system": "x"})),
+            ("an unknown member of a message", json!({"thinking": false, "messages": [{"role": "user", "content": "x", "extra": 1}]})),
         ];
         for (name, ctx) in bad {
             self.refused(&format!("a build refuses {}", name), "POST", "/council/v2/contexts", Some(json!({"context": ctx})), 400);
         }
-        self.refused("a build refuses an unknown member of the body", "POST", "/council/v2/contexts", Some(json!({"context": {"messages": [user.clone()]}, "persist": true})), 400);
+        self.refused("a build refuses an unknown member of the body", "POST", "/council/v2/contexts", Some(json!({"context": {"thinking": false, "messages": [user.clone()]}, "persist": true})), 400);
+        self.thinking_is_required();
         self.refused("a build refuses a body that is not JSON", "POST", "/council/v2/contexts", Some(json!("x")), 400);
         let mut failed = vec![user.clone(), asst("a"), json!({"role": "tool", "tool_call_id": "a", "content": format!("exit 1 {}", self.nonce), "is_error": true})];
         if let Some(f) = self.build("a failed tool result builds", &self.ctx(failed.clone()), false) {
@@ -367,6 +375,10 @@ impl Suite {
 
         // Thinking is part of the context. A template may render a context the same with thinking off (Qwen3.8 changes
         // only the generation prompt). Then both builds hold the same tokens, so they have one head and one length.
+        if !self.thinks() {
+            self.r.skip("thinking is part of the context", "the served model does not declare thinking");
+            return;
+        }
         let mut off = ctx.clone();
         off["thinking"] = json!(false);
         if let Some(o) = self.build("a context with thinking off succeeds", &off, false) {
@@ -377,6 +389,46 @@ impl Suite {
                 }
             } else {
                 self.r.check("thinking is part of the context", true, &o);
+            }
+        }
+    }
+
+    /// A context without `thinking` is a `400` naming `thinking`, as is a `thinking` that is not a
+    /// boolean. `thinking: true` to a served model without the `thinking` capability is a `400`
+    /// naming `thinking`, and `thinking: false` always builds.
+    pub(crate) fn thinking_is_required(&mut self) {
+        let user = json!({"role": "user", "content": format!("hi {}", self.nonce), "snap": true});
+        let cases = [
+            ("a context without thinking", json!({"messages": [user.clone()]})),
+            ("a context whose thinking is not a boolean", json!({"thinking": "yes", "messages": [user.clone()]})),
+        ];
+        for (name, c) in cases {
+            if let Some(e) = self.refused(&format!("a build refuses {}", name), "POST", "/council/v2/contexts", Some(json!({"context": c})), 400) {
+                self.r.check(&format!("a build refuses {} with a 400 naming thinking", name), e["error"]["param"] == json!("thinking"), &e);
+            }
+        }
+        if let Some(e) = self.refused("a generation refuses a context without thinking", "POST", "/council/v2/generations", Some(json!({"context": {"messages": [user.clone()]}, "max_tokens": 4})), 400) {
+            self.r.check("a generation refuses a context without thinking with a 400 naming thinking", e["error"]["param"] == json!("thinking"), &e);
+        }
+        let what = "a context with thinking false builds";
+        if self.build(what, &json!({"thinking": false, "messages": [user.clone()]}), false).is_some() {
+            self.r.ok_with(what, "");
+        }
+        let on = json!({"thinking": true, "messages": [user.clone()]});
+        if self.thinks() {
+            let what = "a context with thinking true builds on a model that declares thinking";
+            if self.build(what, &on, false).is_some() {
+                self.r.ok_with(what, "");
+            }
+        } else {
+            for (what, path, body, param) in [
+                ("a build", "/council/v2/contexts", json!({"context": on}), "thinking"),
+                ("a generation", "/council/v2/generations", json!({"context": on, "max_tokens": 4}), "thinking"),
+            ] {
+                let name = format!("{} with thinking true to a model without thinking is a 400 naming {}", what, param);
+                if let Some(e) = self.refused(&name, "POST", path, Some(body), 400) {
+                    self.r.check(&name, e["error"]["param"] == json!(param), &e);
+                }
             }
         }
     }

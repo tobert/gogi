@@ -28,6 +28,11 @@ numbers but hold separate snapshots. A restart returns each model to its configu
 served model that is not `ready` is a `503` with `error.type` `model_unavailable`. Snapshots
 and pins stay held through the change.
 
+A served model declares capability `thinking` unless it is built with
+`FakeModel::without_thinking`, or with `"thinking": false` in Python. Such a model refuses
+`thinking: true` with a `400` naming `thinking` (`contexts[i].thinking` in a decision or a raw
+read). Its numbers come from the same template as any other served model.
+
 ## Tokens
 
 A token is one of the 256 byte values, or one of 16 template markers (ids 256 to 271).

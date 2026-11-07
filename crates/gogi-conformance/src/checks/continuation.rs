@@ -38,7 +38,7 @@ impl Suite {
         }
         if !self.has(Capability::Continuation) {
             self.r.skip("continuations", "the served model does not declare the continuation capability");
-            let open = self.open_ctx(json!({"role": "assistant", "content": "Plan:", "continue": true}), Some(false));
+            let open = self.open_ctx(json!({"role": "assistant", "content": "Plan:", "continue": true}), false);
             if let Some(e) = self.refused("without continuation, an open message is refused", "POST", "/council/v2/generations", Some(json!({"context": open, "max_tokens": 4})), 400) {
                 self.r.check("without continuation, an open message is a 400 naming continue", names_continue(&e), &e);
             }
@@ -50,18 +50,12 @@ impl Suite {
         self.riding(open);
     }
 
-    /// The opening messages with `last` after them, as a context with `thinking` as given (absent
-    /// when `None`).
-    fn open_ctx(&self, last: Value, thinking: Option<bool>) -> Value {
+    /// The opening messages with `last` after them, as a context with `thinking` as given.
+    fn open_ctx(&self, last: Value, thinking: bool) -> Value {
         let mut messages = self.opening("continuation");
         messages.push(last);
         let mut c = self.ctx(messages);
-        match thinking {
-            Some(t) => c["thinking"] = json!(t),
-            None => {
-                c.as_object_mut().map(|o| o.remove("thinking"));
-            }
-        }
+        c["thinking"] = json!(thinking);
         c
     }
 
@@ -342,15 +336,17 @@ impl Suite {
     /// Open text the suite writes: the server continues it, or refuses it at its seam, naming
     /// `continue`.
     fn open_text_the_client_wrote(&mut self) {
-        let plan = self.open_ctx(json!({"role": "assistant", "content": "Plan:", "continue": true}), Some(false));
+        let plan = self.open_ctx(json!({"role": "assistant", "content": "Plan:", "continue": true}), false);
         let what = "a continuation of open content the client wrote starts with it";
         if let Sent::Ok(v) = self.send_open(what, "/council/v2/generations", json!({"context": plan, "max_tokens": RESUME, "sample": {"temperature": 0}})) {
             self.r.check(what, v["content"].as_str().is_some_and(|c| c.starts_with("Plan:")) && num(&v["usage"]["reasoning"]) == 0, &v);
         }
-        let absent = self.open_ctx(json!({"role": "assistant", "content": "Plan:", "continue": true}), None);
-        let what = "open content with thinking absent is allowed";
-        if let Sent::Ok(v) = self.send_open(what, "/council/v2/generations", json!({"context": absent, "max_tokens": 4, "sample": {"temperature": 0}})) {
-            self.r.check(what, v["content"].as_str().is_some_and(|c| c.starts_with("Plan:")), &v);
+        if self.thinks() {
+            let on = self.open_ctx(json!({"role": "assistant", "content": "Plan:", "continue": true}), true);
+            let what = "open content with thinking true is allowed";
+            if let Sent::Ok(v) = self.send_open(what, "/council/v2/generations", json!({"context": on, "max_tokens": 4, "sample": {"temperature": 0}})) {
+                self.r.check(what, v["content"].as_str().is_some_and(|c| c.starts_with("Plan:")), &v);
+            }
         }
         let what = "a dry run of an open message the client wrote reports what it would feed";
         if !self.has(Capability::DryRun) {
@@ -370,20 +366,19 @@ impl Suite {
         not_last.push(json!({"role": "user", "content": "Go on."}));
         let cases: Vec<(&str, Value)> = vec![
             ("an open message that is not last", self.ctx(not_last)),
-            ("an open user message", self.open_ctx(json!({"role": "user", "content": "Go on.", "continue": true}), Some(true))),
-            ("an open message with tool_calls", self.open_ctx(json!({"role": "assistant", "content": "Plan:", "tool_calls": [{"id": "c0", "name": "shell", "input": {}}], "continue": true}), Some(true))),
-            ("an open message with no text", self.open_ctx(json!({"role": "assistant", "reasoning": "", "continue": true}), Some(true))),
-            ("an open message with reasoning and thinking false", self.open_ctx(json!({"role": "assistant", "reasoning": "First I", "continue": true}), Some(false))),
-            ("an open message with reasoning and thinking absent", self.open_ctx(json!({"role": "assistant", "reasoning": "First I", "continue": true}), None)),
-            ("continue that is a string", self.open_ctx(json!({"role": "assistant", "content": "Plan:", "continue": "yes"}), Some(true))),
-            ("continue that is null", self.open_ctx(json!({"role": "assistant", "content": "Plan:", "continue": null}), Some(true))),
+            ("an open user message", self.open_ctx(json!({"role": "user", "content": "Go on.", "continue": true}), self.thinks())),
+            ("an open message with tool_calls", self.open_ctx(json!({"role": "assistant", "content": "Plan:", "tool_calls": [{"id": "c0", "name": "shell", "input": {}}], "continue": true}), self.thinks())),
+            ("an open message with no text", self.open_ctx(json!({"role": "assistant", "reasoning": "", "continue": true}), self.thinks())),
+            ("an open message with reasoning and thinking false", self.open_ctx(json!({"role": "assistant", "reasoning": "First I", "continue": true}), false)),
+            ("continue that is a string", self.open_ctx(json!({"role": "assistant", "content": "Plan:", "continue": "yes"}), self.thinks())),
+            ("continue that is null", self.open_ctx(json!({"role": "assistant", "content": "Plan:", "continue": null}), self.thinks())),
         ];
         for (name, c) in cases {
             if let Some(e) = self.refused(&format!("{} is refused", name), "POST", "/council/v2/generations", Some(generation(c)), 400) {
                 self.r.check(&format!("{} is a 400 naming continue", name), names_continue(&e), &e);
             }
         }
-        let open = self.open_ctx(json!({"role": "assistant", "content": "Plan:", "continue": true}), Some(false));
+        let open = self.open_ctx(json!({"role": "assistant", "content": "Plan:", "continue": true}), false);
         if let Some(spec_id) = self.hold_gate("continuation") {
             let d = json!({"spec_id": spec_id, "case": "ls", "contexts": [open]});
             if let Some(e) = self.refused("a decision with an open context is refused", "POST", "/council/v2/decisions", Some(d), 400) {

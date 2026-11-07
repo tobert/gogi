@@ -101,7 +101,7 @@ mod tests {
     fn req() -> ReadsRequest {
         ReadsRequest {
             model: "m".into(),
-            contexts: vec![Context { messages: vec![Message::user("u")], ..Default::default() }],
+            contexts: vec![Context::new(false, vec![Message::user("u")])],
             suffixes: vec!["x".into()],
             letters: vec!["A".into(), "B".into()],
             top: None,
@@ -116,7 +116,7 @@ mod tests {
         let cases: Vec<(&str, ReadsRequest)> = vec![
             ("contexts", ReadsRequest { contexts: vec![], ..req() }),
             ("contexts", ReadsRequest { contexts: vec![req().contexts[0].clone(); 9], ..req() }),
-            ("contexts", ReadsRequest { contexts: vec![Context::default()], ..req() }),
+            ("contexts", ReadsRequest { contexts: vec![Context::new(false, vec![])], ..req() }),
             ("suffixes", ReadsRequest { suffixes: vec![], ..req() }),
             ("suffixes", ReadsRequest { suffixes: vec![String::new()], ..req() }),
             ("letters", ReadsRequest { letters: vec!["A".into()], ..req() }),
@@ -131,10 +131,10 @@ mod tests {
 
     #[test]
     fn reads_never_read_an_open_message() {
-        let open = Context { messages: vec![Message::user("u"), Message::assistant("The plan:").opened()], ..Default::default() };
+        let open = Context::new(false, vec![Message::user("u"), Message::assistant("The plan:").opened()]);
         let e = ReadsRequest { contexts: vec![req().contexts[0].clone(), open], ..req() }.validate().unwrap_err();
         assert_eq!((e.param.as_deref(), e.message.as_str()), (Some("continue"), "contexts[1]: raw reads read no open message; send continue: true only to a generation"));
-        let broken = Context { messages: vec![Message::user("u").opened()], ..Default::default() };
+        let broken = Context::new(false, vec![Message::user("u").opened()]);
         assert_eq!(ReadsRequest { contexts: vec![broken], ..req() }.validate().unwrap_err().param.as_deref(), Some("continue"));
     }
 

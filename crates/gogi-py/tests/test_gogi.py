@@ -25,11 +25,11 @@ def test_spec_id_ignores_member_order_and_refuses_fractions():
 
 
 def test_context_rules():
-    ok = {"messages": [{"role": "user", "content": "hi"}]}
+    ok = {"thinking": True, "messages": [{"role": "user", "content": "hi"}]}
     gogi.check_context(ok)
     with pytest.raises(ValueError, match="at least one message"):
-        gogi.check_context({"messages": []})
-    bad = {"messages": [{"role": "tool", "tool_call_id": "a", "content": "r"}]}
+        gogi.check_context({"thinking": True, "messages": []})
+    bad = {"thinking": True, "messages": [{"role": "tool", "tool_call_id": "a", "content": "r"}]}
     with pytest.raises(ValueError, match=r"messages\[0\]: tool_call_id a names no call"):
         gogi.check_context(bad)
     with pytest.raises(ValueError, match="queue nope names no tool"):
@@ -39,7 +39,7 @@ def test_context_rules():
 def test_continue_opens_only_a_last_assistant_message():
     u = {"role": "user", "content": "u"}
     gogi.check_context({"thinking": True, "messages": [u, {"role": "assistant", "reasoning": "First I", "continue": True}]})
-    gogi.check_context({"messages": [{**u, "continue": False}, {"role": "assistant", "content": "Plan:", "continue": True}]})
+    gogi.check_context({"thinking": True, "messages": [{**u, "continue": False}, {"role": "assistant", "content": "Plan:", "continue": True}]})
     for bad in [
         [u, {"role": "assistant", "content": "a", "continue": True}, u],
         [{**u, "continue": True}],
@@ -47,26 +47,28 @@ def test_continue_opens_only_a_last_assistant_message():
         [u, {"role": "assistant", "content": "a", "tool_calls": [{"id": "c0", "name": "shell", "input": {}}], "continue": True}],
     ]:
         with pytest.raises(ValueError, match="continue: true|open message"):
-            gogi.check_context({"messages": bad})
+            gogi.check_context({"thinking": True, "messages": bad})
     with pytest.raises(ValueError, match="needs thinking: true"):
-        gogi.check_context({"messages": [u, {"role": "assistant", "reasoning": "First I", "continue": True}]})
+        gogi.check_context({"thinking": False, "messages": [u, {"role": "assistant", "reasoning": "First I", "continue": True}]})
+    with pytest.raises(ValueError, match="missing field `thinking`"):
+        gogi.check_context({"messages": [u]})
     with pytest.raises(ValueError, match="invalid field `continue`"):
-        gogi.check_context({"messages": [u, {"role": "assistant", "content": "a", "continue": "yes"}]})
+        gogi.check_context({"thinking": True, "messages": [u, {"role": "assistant", "content": "a", "continue": "yes"}]})
 
 
 def test_tools_calls_and_results_take_the_anthropic_shape():
     tool = {"name": "shell", "description": "Runs a command.", "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}}}
     call = {"role": "assistant", "tool_calls": [{"id": "c0", "name": "shell", "input": {"command": "ls"}}]}
     failed = {"role": "tool", "tool_call_id": "c0", "content": "exit 1", "is_error": True}
-    gogi.check_context({"tools": [tool], "messages": [{"role": "user", "content": "u"}, call, failed]})
+    gogi.check_context({"thinking": True, "tools": [tool], "messages": [{"role": "user", "content": "u"}, call, failed]})
     with pytest.raises(ValueError):
-        gogi.check_context({"tools": [{"type": "function", "function": {"name": "shell", "parameters": {}}}], "messages": [{"role": "user", "content": "u"}]})
+        gogi.check_context({"thinking": True, "tools": [{"type": "function", "function": {"name": "shell", "parameters": {}}}], "messages": [{"role": "user", "content": "u"}]})
     with pytest.raises(ValueError):
         gogi.validate_messages([], [{"role": "assistant", "tool_calls": [{"id": "c0", "name": "shell", "arguments": {}}]}])
     with pytest.raises(ValueError, match="only a tool message carries is_error"):
         gogi.validate_messages([], [{"role": "user", "content": "u", "is_error": True}])
     with pytest.raises(ValueError, match="no other tool has"):
-        gogi.check_context({"tools": [tool, tool], "messages": [{"role": "user", "content": "u"}]})
+        gogi.check_context({"thinking": True, "tools": [tool, tool], "messages": [{"role": "user", "content": "u"}]})
 
 
 def test_parse_spec_id_refuses_text_without_describe():
@@ -145,7 +147,7 @@ def test_the_fake_serves_and_its_spec_ids_match_ours():
 
 
 def test_the_fake_keeps_specs_and_pins_across_a_restart_and_expires_pins(tmp_path):
-    ctx = {"messages": [{"role": "user", "content": "u", "snap": True}]}
+    ctx = {"thinking": True, "messages": [{"role": "user", "content": "u", "snap": True}]}
     with gogi.FakeServer(state_dir=tmp_path) as fake:
         _, held = _call(fake.url, "POST", "/council/v2/specs", GATE)
         _, built = _call(fake.url, "POST", "/council/v2/contexts", {"model": "toy", "context": ctx})
@@ -158,7 +160,7 @@ def test_the_fake_keeps_specs_and_pins_across_a_restart_and_expires_pins(tmp_pat
         assert _call(fake.url, "GET", "/council/v2/pins/t")[0] == 404
 
 
-CTX = {"messages": [{"role": "user", "content": "u", "snap": True}]}
+CTX = {"thinking": True, "messages": [{"role": "user", "content": "u", "snap": True}]}
 
 
 def _read(url, model):
@@ -229,12 +231,12 @@ def test_the_fake_reports_and_keeps_the_limits_it_is_given():
         _, ident = _call(fake.url, "GET", "/council/v2/identity")
         limits = ident["models"][0]["limits"]
         assert (limits["context_tokens"], limits["decision_context_tokens"], ident["limits"]["pin_bytes"]) == (512, 256, 4096)
-        status, e = _call(fake.url, "POST", "/council/v2/contexts", {"model": "toy", "context": {"messages": [{"role": "user", "content": "x" * 600}]}})
+        status, e = _call(fake.url, "POST", "/council/v2/contexts", {"model": "toy", "context": {"thinking": True, "messages": [{"role": "user", "content": "x" * 600}]}})
         assert (status, e["error"]["type"], e["error"]["param"]) == (413, "too_large", "context_tokens")
-        heads = [_call(fake.url, "POST", "/council/v2/contexts", {"model": "toy", "context": {"messages": [{"role": "user", "content": f"u{i}"}]}})[1]["head"] for i in range(3)]
+        heads = [_call(fake.url, "POST", "/council/v2/contexts", {"model": "toy", "context": {"thinking": True, "messages": [{"role": "user", "content": f"u{i}"}]}})[1]["head"] for i in range(3)]
         assert _call(fake.url, "GET", "/council/v2/snapshots/" + heads[0])[0] == 404, "past max_snapshots the oldest is evicted"
         assert _call(fake.url, "GET", "/council/v2/snapshots/" + heads[2])[0] == 200
-        big = {"messages": [{"role": "user", "content": "y" * 200}]}
+        big = {"thinking": True, "messages": [{"role": "user", "content": "y" * 200}]}
         _, b = _call(fake.url, "POST", "/council/v2/contexts", {"model": "toy", "context": big})
         status, e = _call(fake.url, "PUT", "/council/v2/pins/t", {"snapshots": [b["head"]], "ttl_s": 60})
         assert (status, e["error"]["param"]) == (413, "pin_bytes")

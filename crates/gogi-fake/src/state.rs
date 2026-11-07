@@ -27,16 +27,25 @@ pub struct FakeModel {
     /// no `generate`, and a build, a decision, a raw read, or a generation that names it is a
     /// `400` naming `model`.
     pub embeds: bool,
+    /// It declares `thinking`, so its contexts take `thinking: true`. The toy template renders
+    /// thinking either way.
+    pub thinks: bool,
 }
 
 impl FakeModel {
     pub fn ready(name: &str, seed: u64) -> FakeModel {
-        FakeModel { name: name.into(), aliases: vec![], seed, status: ModelStatus::Ready, embeds: false }
+        FakeModel { name: name.into(), aliases: vec![], seed, status: ModelStatus::Ready, embeds: false, thinks: true }
+    }
+
+    /// A ready served model that does not declare `thinking`: a context with `thinking: true` is a
+    /// `400` naming `thinking`.
+    pub fn without_thinking(name: &str, seed: u64) -> FakeModel {
+        FakeModel { thinks: false, ..FakeModel::ready(name, seed) }
     }
 
     /// A ready served model that only embeds.
     pub fn embedding(name: &str, seed: u64) -> FakeModel {
-        FakeModel { embeds: true, ..FakeModel::ready(name, seed) }
+        FakeModel { embeds: true, thinks: false, ..FakeModel::ready(name, seed) }
     }
 }
 

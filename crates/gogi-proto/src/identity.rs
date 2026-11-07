@@ -18,6 +18,8 @@ pub enum Capability {
     Generate,
     /// Decisions accept `think` with `tokens` above 0.
     Think,
+    /// Contexts accept `thinking: true`: the model thinks before its reply.
+    Thinking,
     /// `/council/v2/pins`.
     Pins,
     /// `/council/v2/objects` and `/council/v2/keeps`.

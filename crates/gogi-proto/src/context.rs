@@ -83,12 +83,13 @@ impl Usage {
 
 /// A chat sent whole with every request that reads it: messages, tools, whether the model
 /// thinks, and the tool a decision delivers its case through.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Context {
-    /// Absent: the server's default. mkviolet's is `true`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<bool>,
+    /// Whether the model thinks before its reply. Required: a context without it is a `400`
+    /// naming `thinking`. `true` needs the served model's `thinking` capability.
+    #[serde(deserialize_with = "thinking_flag")]
+    pub thinking: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<Tool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -96,10 +97,23 @@ pub struct Context {
     pub messages: Vec<Message>,
 }
 
+/// Decodes `thinking`, which is `true` or `false`. Any other value is an error that names
+/// `thinking`.
+fn thinking_flag<'de, D: serde::Deserializer<'de>>(de: D) -> Result<bool, D::Error> {
+    match serde_json::Value::deserialize(de)? {
+        serde_json::Value::Bool(b) => Ok(b),
+        other => Err(serde::de::Error::custom(format!("invalid field `thinking`: thinking is true or false, not {}", other))),
+    }
+}
+
 impl Context {
+    /// A context with no tools and no queue. Each caller says whether the model thinks.
+    pub fn new(thinking: bool, messages: Vec<Message>) -> Context {
+        Context { thinking, tools: vec![], queue: None, messages }
+    }
+
     /// Checks the messages, that each tool has a distinct name, and that `queue` names a tool. An
-    /// open message with reasoning needs `thinking: true` sent, so it does not depend on a server's
-    /// default.
+    /// open message with reasoning needs `thinking: true`.
     pub fn check(&self) -> Result<(), Invalid> {
         if self.messages.is_empty() {
             return Err(Invalid::new("a context has at least one message"));
@@ -107,7 +121,7 @@ impl Context {
         message::check_opens(&self.messages)?;
         if let Some(m) = self.open()
             && !m.reasoning.as_deref().unwrap_or("").is_empty()
-            && self.thinking != Some(true)
+            && !self.thinking
         {
             return Err(Invalid::param("continue", format!("messages[{}]: an open message with reasoning needs thinking: true in the context", self.messages.len() - 1)));
         }
@@ -152,9 +166,12 @@ impl Context {
         Ok(())
     }
 
-    /// Whether the model thinks, taking an absent `thinking` as `true`, mkviolet's default.
-    pub fn thinks(&self) -> bool {
-        self.thinking.unwrap_or(true)
+    /// Checks that served model `model` declares `thinking` when the context sets `thinking: true`.
+    pub fn check_thinking(&self, model: &crate::identity::ServedModel) -> Result<(), Invalid> {
+        if self.thinking && !model.has(crate::identity::Capability::Thinking) {
+            return Err(Invalid::param("thinking", format!("nothing ran: {} does not declare thinking; send thinking: false", model.model)));
+        }
+        Ok(())
     }
 
     /// The name of each tool, in order.
@@ -255,19 +272,19 @@ mod tests {
     fn a_read_names_a_part_under_its_context() {
         use crate::message::{Content, Part};
         let bad = Message { content: Some(Content::Parts(vec![Part::Object { id: "blake3:ab".into(), mime: "image/png".into() }])), ..Message::user("") };
-        let c = Context { messages: vec![Message::user("u"), bad], ..Default::default() };
+        let c = Context::new(false, vec![Message::user("u"), bad]);
         let e = c.check_read(3, "a decision reads").unwrap_err();
         assert_eq!(e.param.as_deref(), Some("contexts[3].messages[1].content[0]"), "{e:?}");
     }
 
     #[test]
     fn a_context_needs_a_message() {
-        assert_eq!(Context::default().check().unwrap_err().message, "a context has at least one message");
+        assert_eq!(Context::new(false, vec![]).check().unwrap_err().message, "a context has at least one message");
     }
 
     #[test]
     fn queue_names_a_tool() {
-        let mut c = Context { tools: vec![tool("next")], queue: Some("next".into()), messages: vec![Message::user("u")], ..Default::default() };
+        let mut c = Context { thinking: false, tools: vec![tool("next")], queue: Some("next".into()), messages: vec![Message::user("u")] };
         c.check().unwrap();
         c.queue = Some("missing".into());
         assert_eq!(c.check().unwrap_err().message, "queue missing names no tool in tools");
@@ -277,7 +294,7 @@ mod tests {
 
     #[test]
     fn tool_names_are_distinct_and_not_empty() {
-        let mut c = Context { tools: vec![tool("a"), tool("b")], messages: vec![Message::user("u")], ..Default::default() };
+        let mut c = Context { thinking: false, tools: vec![tool("a"), tool("b")], queue: None, messages: vec![Message::user("u")] };
         c.check().unwrap();
         c.tools.push(tool("a"));
         assert_eq!(c.check().unwrap_err().message, "tools[2]: a tool needs a name no other tool has");
@@ -305,66 +322,88 @@ mod tests {
 
     #[test]
     fn the_messages_are_checked_from_the_start() {
-        let c = Context { messages: vec![Message::tool("a", "r")], ..Default::default() };
+        let c = Context::new(false, vec![Message::tool("a", "r")]);
         assert!(c.check().unwrap_err().message.starts_with("messages[0]"));
-        let c = Context {
-            messages: vec![Message { tool_calls: vec![ToolCall { id: "a".into(), name: "n".into(), input: Default::default() }], ..Message::assistant("") }, Message::tool("a", "r")],
-            ..Default::default()
-        };
+        let c = Context::new(false, vec![Message { tool_calls: vec![ToolCall { id: "a".into(), name: "n".into(), input: Default::default() }], ..Message::assistant("") }, Message::tool("a", "r")]);
         c.check().unwrap();
     }
 
     #[test]
-    fn thinking_is_on_unless_the_context_says_otherwise() {
-        assert!(Context::default().thinks());
-        assert!(!Context { thinking: Some(false), ..Default::default() }.thinks());
+    fn a_context_without_thinking_is_refused_and_names_thinking() {
+        let e = serde_json::from_value::<Context>(json!({"messages": [{"role": "user", "content": "u"}]})).unwrap_err();
+        assert_eq!(crate::error::decode_param(&e.to_string()).as_deref(), Some("thinking"), "{e}");
+        for v in [json!("yes"), json!(null), json!(1)] {
+            let e = serde_json::from_value::<Context>(json!({"thinking": v, "messages": [{"role": "user", "content": "u"}]})).unwrap_err();
+            assert_eq!(crate::error::decode_param(&e.to_string()).as_deref(), Some("thinking"), "{v}: {e}");
+        }
+        let c: Context = serde_json::from_value(json!({"thinking": false, "messages": [{"role": "user", "content": "u"}]})).unwrap();
+        assert_eq!(serde_json::to_value(&c).unwrap()["thinking"], json!(false), "false is written, not left out");
     }
 
-    fn open_context(thinking: Option<bool>, open: Message) -> Context {
-        Context { thinking, messages: vec![Message::user("u"), open], ..Default::default() }
+    fn served(capabilities: Vec<crate::identity::Capability>) -> crate::identity::ServedModel {
+        serde_json::from_value(json!({"model": "m", "status": "ready", "weight_hash": "w", "tokenizer_hash": "t", "template": "p", "engine": "e",
+            "limits": {"context_tokens": 8, "decision_context_tokens": 8, "snapshot_bytes": 1, "contexts_per_decision": 1, "default_timeout_ms": 1},
+            "capabilities": capabilities}))
+        .unwrap()
+    }
+
+    #[test]
+    fn thinking_true_needs_the_thinking_capability() {
+        use crate::identity::Capability;
+        let on = Context { thinking: true, tools: vec![], queue: None, messages: vec![Message::user("u")] };
+        let off = Context { thinking: false, ..on.clone() };
+        let plain = served(vec![Capability::Generate]);
+        let e = on.check_thinking(&plain).unwrap_err();
+        assert_eq!((e.param.as_deref(), e.message.as_str()), (Some("thinking"), "nothing ran: m does not declare thinking; send thinking: false"));
+        off.check_thinking(&plain).unwrap();
+        let thinker = served(vec![Capability::Generate, Capability::Thinking]);
+        on.check_thinking(&thinker).unwrap();
+        off.check_thinking(&thinker).unwrap();
+    }
+
+    fn open_context(thinking: bool, open: Message) -> Context {
+        Context::new(thinking, vec![Message::user("u"), open])
     }
 
     #[test]
     fn an_open_message_with_reasoning_needs_thinking_sent_true() {
         let thought = Message { reasoning: Some("I should".into()), content: None, ..Message::assistant("").opened() };
-        open_context(Some(true), thought.clone()).check().unwrap();
-        for thinking in [Some(false), None] {
-            let e = open_context(thinking, thought.clone()).check().unwrap_err();
-            assert_eq!((e.param.as_deref(), e.message.as_str()), (Some("continue"), "messages[1]: an open message with reasoning needs thinking: true in the context"), "{thinking:?}");
-        }
-        open_context(None, Message::assistant("The plan:").opened()).check().unwrap();
-        let mut stray = open_context(None, thought.clone());
+        open_context(true, thought.clone()).check().unwrap();
+        let e = open_context(false, thought.clone()).check().unwrap_err();
+        assert_eq!((e.param.as_deref(), e.message.as_str()), (Some("continue"), "messages[1]: an open message with reasoning needs thinking: true in the context"));
+        open_context(false, Message::assistant("The plan:").opened()).check().unwrap();
+        let mut stray = open_context(false, thought.clone());
         stray.messages.insert(0, Message::tool("nope", "r"));
         assert_eq!(stray.check().unwrap_err().param.as_deref(), Some("continue"), "the open message's rule comes first");
-        open_context(Some(false), Message { reasoning: Some(String::new()), ..Message::assistant("x").opened() }).check().unwrap();
+        open_context(false, Message { reasoning: Some(String::new()), ..Message::assistant("x").opened() }).check().unwrap();
     }
 
     #[test]
     fn open_names_the_open_last_message() {
-        let c = open_context(None, Message::assistant("The plan:").opened());
+        let c = open_context(false, Message::assistant("The plan:").opened());
         assert_eq!(c.open().and_then(|m| m.text()), Some("The plan:"));
-        assert_eq!(open_context(None, Message::assistant("done")).open(), None);
+        assert_eq!(open_context(false, Message::assistant("done")).open(), None);
     }
 
     #[test]
     fn a_build_reads_an_open_message_only_as_a_dry_run() {
-        let build = |dry_run| ContextBuild { model: "m".into(), context: open_context(None, Message::assistant("The plan:").opened()), dry_run, class: None, priority: None };
+        let build = |dry_run| ContextBuild { model: "m".into(), context: open_context(false, Message::assistant("The plan:").opened()), dry_run, class: None, priority: None };
         build(Some(true)).validate().unwrap();
         for dry_run in [None, Some(false)] {
             let e = build(dry_run).validate().unwrap_err();
             assert_eq!(e.param.as_deref(), Some("continue"), "{dry_run:?}");
             assert!(e.message.contains("dry_run: true"), "{}", e.message);
         }
-        let closed = ContextBuild { context: open_context(None, Message::assistant("done")), ..build(None) };
+        let closed = ContextBuild { context: open_context(false, Message::assistant("done")), ..build(None) };
         closed.validate().unwrap();
-        assert!(ContextBuild { context: Context::default(), ..build(Some(true)) }.validate().is_err());
+        assert!(ContextBuild { context: Context::new(false, vec![]), ..build(Some(true)) }.validate().is_err());
     }
 
     #[test]
     fn a_context_with_a_stray_member_is_refused() {
-        assert!(serde_json::from_value::<Context>(json!({"messages": [], "system": "x"})).is_err());
-        assert!(serde_json::from_value::<ContextBuild>(json!({"model": "m", "context": {"messages": []}, "persist": true})).is_err());
-        assert!(serde_json::from_value::<ContextBuild>(json!({"context": {"messages": []}})).is_err(), "a build names its model");
+        assert!(serde_json::from_value::<Context>(json!({"thinking": false, "messages": [], "system": "x"})).is_err());
+        assert!(serde_json::from_value::<ContextBuild>(json!({"model": "m", "context": {"thinking": false, "messages": []}, "persist": true})).is_err());
+        assert!(serde_json::from_value::<ContextBuild>(json!({"context": {"thinking": false, "messages": []}})).is_err(), "a build names its model");
     }
 
     #[test]

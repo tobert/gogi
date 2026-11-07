@@ -803,7 +803,7 @@ mod tests {
 
     #[test]
     fn the_request_rules_each_refuse() {
-        let ctx = Context { messages: vec![crate::message::Message::user("u")], ..Default::default() };
+        let ctx = Context::new(false, vec![crate::message::Message::user("u")]);
         let r = GenerationRequest { model: "m".into(), context: ctx, max_tokens: 8, sample: Some(Sample { temperature: Some(0.0), ..Default::default() }), stream: None, decisions: Vec::new(), class: None, priority: None, output: None, previews: None };
         r.validate().unwrap();
         let e = GenerationRequest { previews: Some(true), ..r.clone() }.validate().unwrap_err();
@@ -811,9 +811,9 @@ mod tests {
         GenerationRequest { previews: Some(true), stream: Some(true), ..r.clone() }.validate().unwrap();
         GenerationRequest { previews: Some(false), ..r.clone() }.validate().unwrap();
         assert!(GenerationRequest { max_tokens: 0, ..r.clone() }.validate().is_err());
-        let v = json!({"model": "m", "context": {"messages": [{"role": "user", "content": "u"}]}});
+        let v = json!({"model": "m", "context": {"thinking": false, "messages": [{"role": "user", "content": "u"}]}});
         assert!(serde_json::from_value::<GenerationRequest>(v).is_err(), "a generation sends max_tokens");
-        assert!(GenerationRequest { context: Context::default(), ..r.clone() }.validate().is_err());
+        assert!(GenerationRequest { context: Context::new(false, vec![]), ..r.clone() }.validate().is_err());
         let ride = |ask: Option<Vec<String>>| GenerationRequest {
             decisions: vec![RidingDecision { spec_id: format!("blake3:{}", "a".repeat(64)), ask, when: RideWhen::After }],
             ..r.clone()
