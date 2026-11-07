@@ -37,6 +37,8 @@ pub enum Capability {
     Classes,
     /// `POST /council/v2/embeddings`, as the served model's `embeddings` describes.
     Embed,
+    /// Contexts accept `control`, and `POST /council/v2/control-vectors` makes control vectors.
+    ControlVectors,
     #[serde(other)]
     Unknown,
 }
@@ -73,6 +75,9 @@ pub struct ModelLimits {
     pub default_timeout_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_tokens: Option<u64>,
+    /// The most contexts each side of a control-vector request holds, with `control_vectors`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_vector_contexts: Option<u64>,
 }
 
 /// The server's own limits, which every served model shares.

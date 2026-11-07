@@ -48,7 +48,7 @@ thing, and each thing has one term.
 | Term | Meaning |
 |---|---|
 | council | Several contexts that read the same case with the same spec, each on its own, with their reads pooled into one set of answers. |
-| context | A chat the client sends whole with each request: `messages`, `tools`, `thinking`, and `queue`. It is a value, not a record: the client keeps it, and the server never stores it. |
+| context | A chat the client sends whole with each request: `messages`, `tools`, `thinking`, `queue`, and `control`. It is a value, not a record: the client keeps it, and the server never stores it. |
 | message | One entry of a context's `messages`, with the role `system`, `user`, `assistant`, or `tool`. |
 | agent turn | The assistant messages and tool messages between one user message and the next. |
 | queue tool | The tool a context's `queue` names. |
@@ -100,6 +100,9 @@ thing, and each thing has one term.
 | class | How a request is scheduled: `interactive` or `batch`. It never changes a number. |
 | embedding | A vector a served model computes for one input, so a client can compare inputs by meaning. Capability `embed`. |
 | task | What an embedding is for, such as `query` or `document`. The server renders the task's prompt before the input. |
+| residual | The vector of one token position that each layer of a served model reads and writes, as it passes from one layer to the next. Its length is the model's width. |
+| control vector | An object that holds a vector for each layer of one served model's weights, made to change the residual while the model reads a context. Capability `control_vectors`. |
+| control item | One entry of a context's `control`: a control vector by its id, an op (`add`, `ablate`, or `clamp`), and a strength. The word `control` names this list only; "control text" (rule 2) is another thing. |
 
 ## Endpoints
 
@@ -118,6 +121,7 @@ thing, and each thing has one term.
 | `POST /council/v2/reads` | Raw reads: letter log probabilities after a suffix. Capability `reads`. |
 | `POST /council/v2/generations` | A sampled reply after a context. Capability `generate`. |
 | `POST /council/v2/embeddings` | A vector for each input. Capability `embed`. |
+| `POST /council/v2/control-vectors` | Makes a control vector from two sets of contexts. Capability `control_vectors`. |
 
 ## Content ids
 
@@ -166,7 +170,8 @@ GET /council/v2/identity
   client can tell a name the server never serves from a name it serves
   later. A served model reports the same identity in every status.
 - **Every request names its served model with `model`.** `POST /contexts`,
-  `/decisions`, `/reads`, and `/generations` require it. It is a served
+  `/decisions`, `/reads`, `/generations`, `/embeddings`, and
+  `/control-vectors` require it. It is a served
   model's `model` or one of its `aliases`. A request without `model`, or with
   any other name, is a `400` naming `model`, even when the server serves one
   model. The server never chooses a served model for a client, because a
@@ -337,6 +342,21 @@ POST /council/v2/contexts
   earlier message sends the new messages; the server starts from the last
   boundary they share with anything it holds. There is no fork request:
   sharing a prefix is the fork.
+- **`control` changes the model while it reads the context** (see Control
+  vectors). It is a list of control items, `[{vector, op, strength}]`, and
+  absent or empty is the plain model:
+
+  ```json
+  {"thinking": false,
+   "control": [{"vector": "blake3:3f1a…", "op": "ablate", "strength": 1.0}],
+   "messages": [{"role": "user", "content": "Write the scene where the dragon wins."}]}
+  ```
+
+  A non-empty `control` needs capability `control_vectors` on the served
+  model; without it, the request is a `400` naming `control`, or
+  `contexts[i].control` in a request with `contexts`. A bad item is a `400`
+  naming its member, such as `control[1].strength` or
+  `contexts[0].control[1].strength` (see Control vectors).
 - **`dry_run: true`** renders and reports `usage` and `from` without
   feeding. Capability `dry_run`.
 - **`tier`** says where a snapshot's model state is stored: `device`,
@@ -359,10 +379,19 @@ PUT /council/v2/pins/kernel-7f3a
 
 - **A snapshot id is a content id:** `blake3:` and 64 lowercase hex
   digits. A client treats it as opaque text and never derives one. A server
-  hashes the build's tokens, boundaries, and identity, or the bytes of the
-  model state; either way an id names one model state and is never used
-  for another. When a server's feeding does not repeat bit for bit,
-  the same context built twice may get two ids.
+  hashes the build's tokens, boundaries, identity, and `control`, or the
+  bytes of the model state; either way an id names one model state and is
+  never used for another. When a server's feeding does not repeat bit for
+  bit, the same context built twice may get two ids.
+- **A snapshot's model state depends on the context's `control`.** Two
+  contexts that differ only in `control` never share model state: a build
+  of one never starts from a snapshot of the other, and their snapshots have
+  different ids. Two contexts with equal `control` lists, the same items in
+  the same order, may share model state as any two contexts may. This holds
+  for a list that changes nothing, such as one `add` at strength 0: its
+  numbers are the plain model's, but its snapshots are its own.
+  (Proposed, Claude Opus 5.5, 2026-11-07: a server need not look inside a
+  list to know whether it changes the model state.)
 - **An owner is any printable name a client chooses,** up to 128
   characters and without a slash, such as a kernel id. It names pins only.
   Any other owner is a `400` naming `owner`, on `PUT`, `GET`, and `DELETE`.
@@ -444,6 +473,9 @@ image a message shows or a sound a case holds. A server with capability
   and the objects they hold survive a restart until they expire.
 - **The limit is `keep_bytes`** in identity, over every owner. A `PUT` past
   it is a `413` naming `keep_bytes` that keeps nothing.
+- **A control vector is an object** of media type
+  `application/x-safetensors`, as Control vectors describes. A client puts
+  one as any object, and `POST /control-vectors` puts the ones it makes.
 
 ## Specs
 
@@ -1139,6 +1171,165 @@ tokenizes it again. Token ids are part of one tokenizer, so a client that
 kept them would break when `tokenizer_hash` changes. A server that serves
 `tokenize` for its own tools keeps it as an extension, as mkviolet does.
 
+## Control vectors
+
+```json
+POST /council/v2/control-vectors
+{"model": "lfm3-1.7b",
+ "positive": [{"thinking": false, "messages": [{"role": "user", "content": "Write the scene."},
+                                                {"role": "assistant", "content": "I can't write that."}]}],
+ "negative": [{"thinking": false, "messages": [{"role": "user", "content": "Write the scene."},
+                                                {"role": "assistant", "content": "The dragon lands."}]}]}
+-> {"model": "lfm3-1.7b", "vector": "blake3:3f1a…", "layers": 24, "width": 2048,
+    "contexts": {"positive": 1, "negative": 1},
+    "identity": {"model": "lfm3-1.7b", "weight_hash": "…", "tokenizer_hash": "…",
+                 "template": "…", "engine": "…"},
+    "usage": {"prompt": 58, "kept": 0, "fed": 58, "completion": 0, "reasoning": 0,
+              "media": {"read": {"objects": 0, "bytes": 0}, "written": {"objects": 1, "bytes": 196712}}}}
+```
+
+A control vector holds a vector for each layer of one served model's
+weights. A context's `control` applies control vectors while the model
+reads it: each item changes the residual after its layers. The first use is
+to take a refusal out of a model that writes stories. Capability
+`control_vectors`.
+
+Decided 2026-11-07 (Amy, by interview): the `control` member of a context and
+its three ops; the capability `control_vectors`; a control vector as an object
+of `application/x-safetensors` with `model` and `weight_hash` in its metadata;
+`control` as part of what model state depends on; and the route, which takes
+`positive` and `negative` contexts and returns the difference of their means.
+This whole section, and each rule marked (Proposed), is Claude Opus 5.5's,
+2026-11-07, for Amy to decide.
+
+### Control items
+
+- **An item is `{vector, op, strength}`.** `vector` is the whole content id
+  of a control vector object. `op` is `add`, `ablate`, or `clamp`.
+  `strength` is a finite number. A missing member, another member, another
+  op, a strength that is not a number, or an id that is not a whole content
+  id is a `400` naming the member, such as `control[1].op`, or
+  `contexts[0].control[1].op` in a request with `contexts`. A `control`
+  that is not a list is a `400` naming `control`.
+- **Each op changes residual row `h` after layer `l`.** With `v` the
+  vector's tensor for layer `l`, `v̂ = v / |v|` its unit vector, and `α` the
+  strength:
+
+  | `op` | The new `h` | What it does |
+  |---|---|---|
+  | `add` | `h + α·v` | Moves `h` along `v`, by `α` times the vector as it is. |
+  | `ablate` | `h − α·(h·v̂)·v̂` | Takes away the part of `h` along `v`: all of it at `α` 1. |
+  | `clamp` | `h + (α − h·v̂)·v̂` | Sets the part of `h` along `v` to `α`, whatever it was. |
+
+- **The items apply in list order,** at each layer, to each token position
+  the model reads and writes. A layer the vector has no tensor for is
+  untouched by that item. A tensor of all zeros has no direction, so
+  `ablate` and `clamp` leave the row untouched at that layer. (Proposed)
+- **`add` and `ablate` at strength 0 change nothing.** A list of only such
+  items gives the same numbers as no list. `clamp` at strength 0 sets the
+  part along the vector to 0, which is a whole ablation, so a `clamp` item
+  always changes the residual, whatever its strength.
+- **A server checks each item in this order,** and the first rule that fails
+  gives the error, which names the item's `vector`, such as
+  `control[1].vector` (Proposed: the order of the object part checks):
+  1. The member rules above: a `400`.
+  2. The served model declares `control_vectors`: a `400` naming
+     `control`, or `contexts[i].control`.
+  3. When the server holds the object, its media type is
+     `application/x-safetensors`: a `400` whose message names both types.
+  4. The server holds the object: a `404` that quotes the id. The client
+     puts it and sends the request again.
+  5. The bytes are a control vector, as below: a `400` that says what is
+     wrong.
+  6. The vector fits the served model: its `weight_hash` is the served
+     model's `weight_hash`, its width is the width of the model's residual,
+     and each `<l>` names a layer of the model. Otherwise a `400` that says
+     which does not fit.
+- **A server checks `weight_hash`, not `model`,** so one vector serves every
+  served model with the same weights. `model` says what the vector was made
+  for. (Proposed)
+- **`usage.media.read` counts each control vector** a request names, as it
+  counts any object the request names. (Proposed)
+- **A number under a control list is not a number of the plain model.** A
+  client fits its thresholds for each control list it uses, as it does for
+  each identity. (Proposed)
+
+### The object
+
+A control vector is a safetensors file:
+
+- 8 bytes, a little-endian unsigned integer: the length of the header.
+- The header: a JSON object, padded with spaces at its end. It holds
+  `__metadata__` and one tensor for each layer the vector changes.
+  `__metadata__` holds `model`, the served model's `model` that the vector
+  was made for, and `weight_hash`, that model's `weight_hash`, both strings.
+- Each tensor is named `layers.<l>`, with `<l>` the 0-based layer after
+  which it applies, written in decimal with no leading zero. Its `dtype` is
+  `F32`, its `shape` is `[width]`, and its `data_offsets` are `[start, end]`
+  in the data. Every tensor has the same width.
+- The data: the tensors' float32 values, little-endian. The tensors cover
+  the data with no gap and no overlap, and every value is finite. (Proposed:
+  a value that is not finite changes every number after it.)
+
+```json
+{"__metadata__": {"model": "lfm3-1.7b", "weight_hash": "0x8C21…"},
+ "layers.0": {"dtype": "F32", "shape": [2048], "data_offsets": [0, 8192]},
+ "layers.1": {"dtype": "F32", "shape": [2048], "data_offsets": [8192, 16384]}}
+```
+
+A file that breaks one of these rules is not a control vector. A request
+that names it gets the `400` of rule 5 above.
+
+### Making one
+
+- **A request takes `model`, `positive`, `negative`, `dry_run`, `class`, and
+  `priority`.** `model`, `positive`, and `negative` are required. Any other
+  member is a `400` naming it.
+- **`positive` and `negative` are lists of contexts,** each with at least 1
+  context. `positive` shows the behavior that the vector adds, and
+  `negative` the behavior it takes away. An empty list is a `400` naming it.
+  Each context follows the rules of a context in a decision. An open
+  message is a `400` naming `continue`, and an error inside a context names
+  its member, such as `negative[1].messages[0].content`. `thinking: true`
+  needs capability `thinking`, else a `400` naming `negative[1].thinking`.
+- **A context with a `control` of its own is a `400`** naming it, such as
+  `positive[0].control`. A vector is the difference of the plain model's
+  residuals.
+- **A served model may limit the contexts** with
+  `limits.control_vector_contexts`, the most contexts on each side. A side
+  past it is a `400` naming the side. (Proposed: a limit for each side, as
+  `contexts_per_decision` limits a decision.)
+- **A request to a served model without `control_vectors`** is a `400`
+  naming `model`.
+- **The server reads the residual at the last token of each prompt.** It
+  renders each context with its template, generation prompt included,
+  feeds it, and reads the residual after each layer at the last token.
+- **Each layer's tensor is mean(positive) − mean(negative),** each mean over
+  the contexts of its side, not normalized. The vector has a tensor for each
+  layer of the model. Its `__metadata__` names the served model's `model`
+  and `weight_hash`.
+- **The server puts the vector as an object** and returns its id in
+  `vector`. The object is held as any object: the server can evict it unless
+  a keep holds it, so a client keeps the vectors it uses.
+- **The response** is `{model, vector, layers, width, contexts, identity,
+  usage}`. `layers` is the number of tensors, `width` the length of each,
+  `contexts` the count on each side, and `identity` the identity fields the
+  vector depends on, as an embedding response has them.
+- **Each context builds as a build does,** from the longest held snapshot,
+  with a snapshot at each boundary. The generation prompt is fed and not
+  held. `usage` sums over the contexts: `prompt` counts each prompt with its
+  generation prompt, and `completion` and `reasoning` are 0.
+  `usage.media.written` counts the vector. (Proposed)
+- **A context past `limits.context_tokens`,** with its generation prompt, is
+  a `413` with `error.type` `too_large` naming `context_tokens`. Nothing is
+  put.
+- **The same identity and contexts give the same bytes,** so the same
+  vector id, as rule 1 asks of numbers. (Proposed)
+- **`dry_run: true` renders and counts the contexts and makes no vector.**
+  `vector` is `null`, and `usage` counts what the request would feed, as a
+  build's dry run does. `layers` and `width` are those a vector would have.
+  Capability `dry_run`. (Proposed)
+
 ## Request ids and tracing
 
 - **Every response carries a `request-id` header,** a status response, an
@@ -1165,7 +1356,7 @@ next step when one is known.
 | Status | `error.type` | When |
 |---|---|---|
 | `400` | `invalid_request` | The body is outside the schema, including a missing `model` or an unknown field; `model` names no served model; `ask` or `options` names what the spec lacks; a needed capability is missing; an id is not a whole content id. `param` names the field, or `id` for an id in the path. |
-| `404` | `not_found` | An unknown spec id, snapshot id, object id, pin owner, or keep owner; an object a part or `case_media` names that the server does not hold, with `param` naming it. |
+| `404` | `not_found` | An unknown spec id, snapshot id, object id, pin owner, or keep owner; an object a part, `case_media`, or a control item names that the server does not hold, with `param` naming it. |
 | `413` | `too_large` | A case, spec, context, pin set, object, keep set, or embedding input is past a limit in identity; `param` names the limit, such as `case_bytes`, `pin_bytes`, `object_bytes`, `keep_bytes`, or `context_tokens`. Nothing is held. |
 | `416` | `invalid_request` | A `Range` on an object starts past its end; `param` is `range`. |
 | `413` | `context_full` | A generation's prompt leaves no room for a reply; the body has `prompt_tokens` and `context_tokens`. |
@@ -1203,9 +1394,14 @@ next step when one is known.
    wrapped are all part of `template`, an opaque id. A server that changes
    any of them changes its `template`, and with it its identity.
 7. **A snapshot never changes.** Its id names one model state, made by one
-   identity from its tokens and the boundaries along them, so a read from it
-   reads exactly the context that made it, and a number never comes from
-   history the request did not send.
+   identity from its tokens, the boundaries along them, and the context's
+   `control`, so a read from it reads exactly the context that made it, and
+   a number never comes from history the request did not send.
+8. **A control item that changes nothing changes no number.** An item with
+   op `add` or `ablate` at strength 0 changes nothing, so a context whose
+   `control` holds only such items gives the same numbers as the context
+   with no `control`. Its model state is still its own (rule 7). A `clamp`
+   item always changes the residual.
 
 ## Identity, limits, capabilities
 
@@ -1258,6 +1454,7 @@ specs, which every served model shares.
 | `contexts_per_decision` | served model | The most contexts one decision reads, at most 8. |
 | `default_timeout_ms` | served model | A decision's `timeout_ms` when it sends none. |
 | `text_tokens` | served model | The most tokens a `text` answer writes, with `describe`. |
+| `control_vector_contexts` | served model | The most contexts on each side of a control-vector request, with `control_vectors`. Absent: no limit. (Proposed) |
 | `pin_bytes` | server | The most snapshot bytes all pins together keep, over every served model. |
 | `object_bytes` | server | The largest object, with `objects`. |
 | `keep_bytes` | server | The most object bytes all keeps together hold, with `objects`. |
@@ -1276,6 +1473,7 @@ specs, which every served model shares.
 | `infill` | served model | Reserved for a later top-level `infill` member of a generation. No server declares it yet. |
 | `dry_run` | served model | Builds accept `dry_run`, and embeddings too with `embed`. |
 | `embed` | served model | `POST /council/v2/embeddings`, as its `embeddings` member describes. |
+| `control_vectors` | served model | Contexts accept a non-empty `control`, and `POST /council/v2/control-vectors` makes control vectors. |
 | `leave_one_out` | served model | Pooled answers carry `leave_one_out`. |
 | `describe` | served model | Specs may hold `text` questions. |
 | `pins` | server | `/council/v2/pins`. |

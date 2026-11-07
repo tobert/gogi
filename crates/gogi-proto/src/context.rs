@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::control::Control;
 use crate::error::Invalid;
 use crate::identity::Class;
 use crate::ids::SnapshotId;
@@ -94,6 +95,10 @@ pub struct Context {
     pub tools: Vec<Tool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue: Option<String>,
+    /// The control vectors that change the served model's residual while it reads this context,
+    /// applied in order. Empty: the plain model. A non-empty list needs `control_vectors`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "crate::control::control_list")]
+    pub control: Vec<Control>,
     pub messages: Vec<Message>,
 }
 
@@ -109,14 +114,18 @@ fn thinking_flag<'de, D: serde::Deserializer<'de>>(de: D) -> Result<bool, D::Err
 impl Context {
     /// A context with no tools and no queue. Each caller says whether the model thinks.
     pub fn new(thinking: bool, messages: Vec<Message>) -> Context {
-        Context { thinking, tools: vec![], queue: None, messages }
+        Context { thinking, tools: vec![], queue: None, control: vec![], messages }
     }
 
-    /// Checks the messages, that each tool has a distinct name, and that `queue` names a tool. An
-    /// open message with reasoning needs `thinking: true`.
+    /// Checks the messages, that each tool has a distinct name, that `queue` names a tool, and that
+    /// each control item has a finite strength. An open message with reasoning needs
+    /// `thinking: true`.
     pub fn check(&self) -> Result<(), Invalid> {
         if self.messages.is_empty() {
             return Err(Invalid::new("a context has at least one message"));
+        }
+        for (i, c) in self.control.iter().enumerate() {
+            c.check(&format!("control[{}]", i))?;
         }
         message::check_opens(&self.messages)?;
         if let Some(m) = self.open()
@@ -151,17 +160,33 @@ impl Context {
     /// under `contexts[i]` when the error names one, such as `contexts[0].messages[2].content[1]`,
     /// and `contexts` otherwise. `what` names the request and its verb, such as "a decision reads".
     pub fn check_read(&self, i: usize, what: &str) -> Result<(), Invalid> {
+        self.check_in("contexts", i, what)
+    }
+
+    /// Checks a closed context, the `i`th of the request's list `list`, such as `contexts` or
+    /// `positive`, as [`Context::check_read`] does.
+    pub fn check_in(&self, list: &str, i: usize, what: &str) -> Result<(), Invalid> {
+        let at = format!("{}[{}]", list, i);
         let named = |e: Invalid| {
             let param = match e.param.as_deref() {
                 Some("continue") => "continue".to_string(),
-                Some(p) if p.starts_with("messages[") => format!("contexts[{}].{}", i, p),
-                _ => "contexts".to_string(),
+                Some(p) if p.starts_with("messages[") || p.starts_with("control") => format!("{}.{}", at, p),
+                _ => list.to_string(),
             };
-            Invalid::param(param, format!("contexts[{}]: {}", i, e.message))
+            Invalid::param(param, format!("{}: {}", at, e.message))
         };
         self.check().map_err(named)?;
         if self.open().is_some() {
-            return Err(Invalid::param("continue", format!("contexts[{}]: {} no open message; send continue: true only to a generation", i, what)));
+            return Err(Invalid::param("continue", format!("{}: {} no open message; send continue: true only to a generation", at, what)));
+        }
+        Ok(())
+    }
+
+    /// Checks that served model `model` declares `control_vectors` when the context has a
+    /// `control` list.
+    pub fn check_control(&self, model: &crate::identity::ServedModel) -> Result<(), Invalid> {
+        if !self.control.is_empty() && !model.has(crate::identity::Capability::ControlVectors) {
+            return Err(Invalid::param("control", format!("nothing ran: {} does not declare control_vectors; send no control", model.model)));
         }
         Ok(())
     }
@@ -284,7 +309,7 @@ mod tests {
 
     #[test]
     fn queue_names_a_tool() {
-        let mut c = Context { thinking: false, tools: vec![tool("next")], queue: Some("next".into()), messages: vec![Message::user("u")] };
+        let mut c = Context { thinking: false, tools: vec![tool("next")], queue: Some("next".into()), control: vec![], messages: vec![Message::user("u")] };
         c.check().unwrap();
         c.queue = Some("missing".into());
         assert_eq!(c.check().unwrap_err().message, "queue missing names no tool in tools");
@@ -294,7 +319,7 @@ mod tests {
 
     #[test]
     fn tool_names_are_distinct_and_not_empty() {
-        let mut c = Context { thinking: false, tools: vec![tool("a"), tool("b")], queue: None, messages: vec![Message::user("u")] };
+        let mut c = Context { thinking: false, tools: vec![tool("a"), tool("b")], queue: None, control: vec![], messages: vec![Message::user("u")] };
         c.check().unwrap();
         c.tools.push(tool("a"));
         assert_eq!(c.check().unwrap_err().message, "tools[2]: a tool needs a name no other tool has");
@@ -350,7 +375,7 @@ mod tests {
     #[test]
     fn thinking_true_needs_the_thinking_capability() {
         use crate::identity::Capability;
-        let on = Context { thinking: true, tools: vec![], queue: None, messages: vec![Message::user("u")] };
+        let on = Context { thinking: true, tools: vec![], queue: None, control: vec![], messages: vec![Message::user("u")] };
         let off = Context { thinking: false, ..on.clone() };
         let plain = served(vec![Capability::Generate]);
         let e = on.check_thinking(&plain).unwrap_err();

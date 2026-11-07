@@ -18,6 +18,7 @@ pub const MAX_CONTEXTS: usize = 8;
 pub struct ReadsRequest {
     /// The served model: its `model` or an alias.
     pub model: String,
+    #[serde(deserialize_with = "crate::control::contexts")]
     pub contexts: Vec<Context>,
     /// Text the client formats itself; special-token text in it becomes one token id each.
     pub suffixes: Vec<String>,

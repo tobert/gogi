@@ -76,7 +76,7 @@ pub struct DecisionRequest {
     /// Question id to the options to narrow it to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<Map<String, Value>>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "crate::control::contexts")]
     pub contexts: Vec<Context>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool: Option<Pool>,
@@ -391,6 +391,7 @@ mod tests {
             tools: vec![Tool::new("next", json!({"type": "object", "properties": {"answers": {"type": "object", "properties": {
                 "verdict": {"type": "string", "enum": ["A", "B"]}}}}}))],
             queue: Some("next".into()),
+            control: vec![],
             messages: vec![Message::user("u"), Message { tool_calls: vec![call], ..Message::assistant("") }],
         }
     }
