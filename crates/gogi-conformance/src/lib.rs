@@ -11,6 +11,7 @@
 
 mod checks;
 mod http;
+mod media_files;
 mod report;
 
 use gogi_proto::identity::{ServedModel, ServerIdentity};

@@ -47,7 +47,7 @@ impl Suite {
             self.r.fail("a served model that reads media is on a server with objects", format!("it reads {:?}, but the server does not declare the objects capability", inputs));
             return;
         }
-        let a = self.object_bytes("media-a");
+        let a = self.media_bytes("media-a", &read);
         let Some(id) = self.put_object("media: object put succeeds", &a, &read) else { return };
         let c = self.with_object(&id, &read);
         let Some(first) = self.build("a context with an object part builds", &c, false) else { return };
@@ -56,7 +56,7 @@ impl Suite {
         if let Some(again) = self.build("media: build again", &c, false) {
             self.r.check("a context with an object part builds again with nothing fed", num(&again["usage"]["fed"]) == 0 && again["head"] == first["head"], &again);
         }
-        let b = self.object_bytes("media-b");
+        let b = self.media_bytes("media-b", &read);
         if let Some(other) = self.put_object("media: second object put succeeds", &b, &read)
             && let Some(built) = self.build("a context with another object builds", &self.with_object(&other, &read), false)
         {

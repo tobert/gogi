@@ -39,6 +39,12 @@ impl Suite {
         (0..=255u8).chain(format!("{}-{}", label, self.nonce).bytes()).collect()
     }
 
+    /// The bytes of an object of `mime` for `label`: a file that a model of that type decodes, such as a PNG or a WAV,
+    /// or the bytes of [`Suite::object_bytes`] for a type with no such file.
+    pub(crate) fn media_bytes(&self, label: &str, mime: &str) -> Vec<u8> {
+        crate::media_files::media_file(mime, &format!("{}-{}", label, self.nonce)).unwrap_or_else(|| self.object_bytes(label))
+    }
+
     /// Puts an object and returns its id, or `None` when the put fails.
     pub(crate) fn put_object(&mut self, what: &str, bytes: &[u8], mime: &str) -> Option<String> {
         let id = content_id(bytes);
