@@ -1,10 +1,10 @@
 //! The council API routes over the toy model.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 
 use gogi_proto::canon::spec_id_of;
 use gogi_proto::context::{Context, MediaCount, MediaUsage, Usage};
-use gogi_proto::control::{ControlOp, ControlVector, ControlVectorContexts, ControlVectorRequest, ControlVectorResponse, MEDIA_TYPE};
+use gogi_proto::control::{ControlVector, ControlVectorContexts, ControlVectorRequest, ControlVectorResponse, MEDIA_TYPE};
 use gogi_proto::decision::{DecisionIdentity, DecisionRequest, PoolMethod, PoolWeights, check_queue_schema, queue_call};
 use gogi_proto::embeddings::{Embedding, EmbeddingsRequest, EmbeddingsResponse};
 use gogi_proto::error::{ErrorBody, ErrorType};
@@ -271,7 +271,7 @@ fn check_thinking(store: &Store, m: &FakeModel, contexts: &[&Context], several: 
 }
 
 /// A context's control list as the toy applies it: each item's op, strength, and vector.
-type Steer = Vec<(ControlOp, f64, Option<BTreeMap<u32, f64>>, ControlVector)>;
+type Steer = Vec<toy_control::LayeredItem>;
 
 /// The key of a context's control list, which its snapshot ids hash: empty for the plain model.
 /// Equal lists have equal keys.

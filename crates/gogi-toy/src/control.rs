@@ -50,9 +50,13 @@ pub fn logits(state: State, control: &[(ControlOp, f64, ControlVector)]) -> [f64
     logits_by_layer(state, &items)
 }
 
+/// A control item as the toy applies it: its op, its strength, its layers with their numbers when
+/// it names them, and its vector.
+pub type LayeredItem = (ControlOp, f64, Option<BTreeMap<u32, f64>>, ControlVector);
+
 /// The logits at `state` under a control list whose items may name their layers: with
 /// `Some(layers)`, an item acts only on those layers, at its strength times each one's number.
-pub fn logits_by_layer(state: State, control: &[(ControlOp, f64, Option<BTreeMap<u32, f64>>, ControlVector)]) -> [f64; VOCAB] {
+pub fn logits_by_layer(state: State, control: &[LayeredItem]) -> [f64; VOCAB] {
     let mut out = state.logits();
     for (l, h) in residuals(state).iter().enumerate() {
         let mut changed = *h;
