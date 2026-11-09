@@ -76,9 +76,22 @@ pub struct Control {
     pub op: ControlOp,
     /// A finite number. Its scale is the vector's: `add` at 1 adds the vector as it is.
     pub strength: f64,
+    /// The layers the item acts on, each with the number its strength is multiplied by. `None`:
+    /// every layer of the vector, at `strength`. (Proposed)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layers: Option<BTreeMap<u32, f64>>,
 }
 
 impl Control {
+    /// The strength of the item at layer `l`: `strength`, or `strength` times the layer's number
+    /// with `layers`. `None` when `layers` leaves the layer out, so the item leaves it untouched.
+    pub fn strength_at(&self, l: u32) -> Option<f64> {
+        match &self.layers {
+            None => Some(self.strength),
+            Some(layers) => layers.get(&l).map(|m| self.strength * m),
+        }
+    }
+
     /// Checks a finite strength. `at` names the item, such as `control[1]`.
     pub fn check(&self, at: &str) -> Result<(), Invalid> {
         if !self.strength.is_finite() {
@@ -105,8 +118,8 @@ fn decode_list(v: &Value) -> Result<Vec<Control>, (String, String)> {
         let Value::Object(m) = item else {
             return Err((at.clone(), format!("{} is an object {{vector, op, strength}}, not {}", at, item)));
         };
-        if let Some(k) = m.keys().find(|k| !["vector", "op", "strength"].contains(&k.as_str())) {
-            return Err((format!("{}.{}", at, k), format!("{} has the unknown member {}; an item has vector, op, and strength only", at, k)));
+        if let Some(k) = m.keys().find(|k| !["vector", "op", "strength", "layers"].contains(&k.as_str())) {
+            return Err((format!("{}.{}", at, k), format!("{} has the unknown member {}; an item has vector, op, strength, and layers only", at, k)));
         }
         let vector = match m.get("vector") {
             Some(Value::String(s)) => match content_id_problem(s) {
@@ -125,7 +138,35 @@ fn decode_list(v: &Value) -> Result<Vec<Control>, (String, String)> {
             Some(a) => a,
             None => return Err((format!("{}.strength", at), format!("{}.strength is a finite number, not {}", at, m.get("strength").unwrap_or(&Value::Null)))),
         };
-        out.push(Control { vector, op, strength });
+        let layers = match m.get("layers") {
+            None => None,
+            Some(v) => Some(decode_layers(v, &at)?),
+        };
+        out.push(Control { vector, op, strength, layers });
+    }
+    Ok(out)
+}
+
+/// Decodes an item's `layers`: an object from a decimal layer number to a finite number, with a
+/// member or more. An error names `control[i].layers`.
+fn decode_layers(v: &Value, at: &str) -> Result<BTreeMap<u32, f64>, (String, String)> {
+    let param = format!("{}.layers", at);
+    let Value::Object(m) = v else {
+        return Err((param.clone(), format!("{} is an object from a layer number to a number, not {}", param, v)));
+    };
+    if m.is_empty() {
+        return Err((param.clone(), format!("{} names no layer; name a layer or more, or leave layers out to act on every layer", param)));
+    }
+    let mut out = BTreeMap::new();
+    for (k, x) in m {
+        let layer = k.parse::<u32>().ok().filter(|_| !k.is_empty() && k.bytes().all(|b| b.is_ascii_digit()));
+        let Some(layer) = layer else {
+            return Err((param.clone(), format!("{} has the key {:?}; a key is a layer number in decimal, such as \"12\"", param, k)));
+        };
+        let Some(x) = x.as_f64().filter(|x| x.is_finite()) else {
+            return Err((param.clone(), format!("{} gives layer {} the value {}; a value is a finite number", param, k, x)));
+        };
+        out.insert(layer, x);
     }
     Ok(out)
 }
@@ -386,6 +427,24 @@ mod tests {
     }
 
     #[test]
+    fn an_item_with_layers_acts_on_those_layers_at_its_strength_times_each_number() {
+        let list = serde_json::json!([{"vector": id('a'), "op": "ablate", "strength": 2.0, "layers": {"3": 1.5, "10": 0}}, {"vector": id('a'), "op": "add", "strength": 1.0}]);
+        let items = decode_list(&list).unwrap();
+        assert_eq!(items[0].layers, Some([(3, 1.5), (10, 0.0)].into_iter().collect()));
+        assert_eq!((items[0].strength_at(3), items[0].strength_at(10), items[0].strength_at(4)), (Some(3.0), Some(0.0), None));
+        assert_eq!((items[1].layers.clone(), items[1].strength_at(4)), (None, Some(1.0)));
+        // An item without layers writes none, so the JSON of the lists of today does not change.
+        assert!(!serde_json::to_string(&items[1]).unwrap().contains("layers"));
+        assert_eq!(serde_json::from_value::<Control>(serde_json::to_value(&items[0]).unwrap()).unwrap(), items[0]);
+        for (layers, why) in [(serde_json::json!({}), "names no layer"), (serde_json::json!({"x": 1}), "\"x\""), (serde_json::json!({"+1": 1}), "\"+1\""), (serde_json::json!({"2": "1"}), "finite number"), (serde_json::json!([1, 2]), "is an object")] {
+            let list = serde_json::json!([{"vector": id('a'), "op": "add", "strength": 1.0, "layers": layers}]);
+            let (param, message) = decode_list(&list).unwrap_err();
+            assert_eq!(param, "control[0].layers", "{message}");
+            assert!(message.contains(why), "{message}");
+        }
+    }
+
+    #[test]
     fn add_ablate_and_clamp_follow_their_formulas() {
         let v = [3.0f32, 4.0];
         let mut h = [1.0, 2.0];
@@ -471,7 +530,7 @@ mod tests {
     #[test]
     fn a_context_built_in_code_with_a_strength_that_is_not_finite_is_refused() {
         let mut c = Context::new(false, vec![Message::user("u")]);
-        c.control = vec![Control { vector: ContentId::parse(id('a')).unwrap(), op: ControlOp::Add, strength: 1.0 }, Control { vector: ContentId::parse(id('a')).unwrap(), op: ControlOp::Add, strength: f64::NAN }];
+        c.control = vec![Control { vector: ContentId::parse(id('a')).unwrap(), op: ControlOp::Add, strength: 1.0, layers: None }, Control { vector: ContentId::parse(id('a')).unwrap(), op: ControlOp::Add, strength: f64::NAN, layers: None }];
         assert_eq!(c.check().unwrap_err().param.as_deref(), Some("control[1].strength"));
         assert_eq!(c.check_read(2, "a decision reads").unwrap_err().param.as_deref(), Some("contexts[2].control[1].strength"));
     }
@@ -499,7 +558,7 @@ mod tests {
     fn control_needs_the_control_vectors_capability() {
         let plain = Context::new(false, vec![Message::user("u")]);
         let mut steered = plain.clone();
-        steered.control = vec![Control { vector: ContentId::parse(id('a')).unwrap(), op: ControlOp::Add, strength: 0.0 }];
+        steered.control = vec![Control { vector: ContentId::parse(id('a')).unwrap(), op: ControlOp::Add, strength: 0.0, layers: None }];
         let without = served(vec![Capability::Generate]);
         let e = steered.check_control(&without).unwrap_err();
         assert_eq!((e.param.as_deref(), e.message.as_str()), (Some("control"), "nothing ran: m does not declare control_vectors; send no control"));

@@ -1225,6 +1225,14 @@ This whole section, and each rule marked (Proposed), is Claude Opus 5.5's,
   the model reads and writes. A layer the vector has no tensor for is
   untouched by that item. A tensor of all zeros has no direction, so
   `ablate` and `clamp` leave the row untouched at that layer. (Proposed)
+- **An item can name its layers** with `layers`: an object from a layer
+  number, in decimal, to a finite number. With `layers`, the item acts only
+  on the listed layers, at `strength` times the number of each; the other
+  layers are untouched, also for `clamp`. Without it, the item acts on each
+  layer of its vector at `strength`. `layers` with no member, a key that is
+  not a layer number, or a value that is not a finite number is a `400`
+  naming `control[i].layers`. Two items with other `layers` are other items,
+  so their lists have model state of their own. (Proposed)
 - **`add` and `ablate` at strength 0 change nothing.** A list of only such
   items gives the same numbers as no list. `clamp` at strength 0 sets the
   part along the vector to 0, which is a whole ablation, so a `clamp` item

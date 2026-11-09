@@ -8,6 +8,8 @@
 //! A layer whose residual does not change adds nothing, so `add` and `ablate` at strength 0 give
 //! the plain logits bit for bit.
 
+use std::collections::BTreeMap;
+
 use gogi_proto::control::{ControlOp, ControlVector};
 
 use crate::{State, VOCAB, mix};
@@ -44,12 +46,23 @@ fn weight(l: u32, j: usize, v: usize) -> f64 {
 /// The logits at model state `state` under a control list: each item's op, strength, and vector,
 /// in order. Each vector fits the toy: its width is [`WIDTH`] and its layers are below [`LAYERS`].
 pub fn logits(state: State, control: &[(ControlOp, f64, ControlVector)]) -> [f64; VOCAB] {
+    let items: Vec<_> = control.iter().map(|(op, strength, v)| (*op, *strength, None, v.clone())).collect();
+    logits_by_layer(state, &items)
+}
+
+/// The logits at `state` under a control list whose items may name their layers: with
+/// `Some(layers)`, an item acts only on those layers, at its strength times each one's number.
+pub fn logits_by_layer(state: State, control: &[(ControlOp, f64, Option<BTreeMap<u32, f64>>, ControlVector)]) -> [f64; VOCAB] {
     let mut out = state.logits();
     for (l, h) in residuals(state).iter().enumerate() {
         let mut changed = *h;
-        for (op, strength, vector) in control {
-            if let Some(v) = vector.layers.get(&(l as u32)) {
-                op.apply(&mut changed, v, *strength);
+        for (op, strength, layers, vector) in control {
+            let at = match layers {
+                None => Some(*strength),
+                Some(layers) => layers.get(&(l as u32)).map(|m| strength * m),
+            };
+            if let (Some(v), Some(a)) = (vector.layers.get(&(l as u32)), at) {
+                op.apply(&mut changed, v, a);
             }
         }
         for j in 0..WIDTH {
@@ -70,6 +83,20 @@ mod tests {
 
     fn vector(layers: &[u32]) -> ControlVector {
         ControlVector { model: "m".into(), weight_hash: "w".into(), layers: layers.iter().map(|l| (*l, (0..WIDTH).map(|j| j as f32 - 3.5).collect())).collect() }
+    }
+
+    #[test]
+    fn layers_choose_where_an_item_acts_and_scale_its_strength() {
+        let s = State::after(0, &[1, 2, 3]);
+        let v = vector(&[0, 1]);
+        let all = |layers: Option<BTreeMap<u32, f64>>| logits_by_layer(s, &[(ControlOp::Add, 2.0, layers, v.clone())]);
+        assert_eq!(all(Some([(0, 1.0), (1, 1.0)].into())), all(None), "every layer at 1 is the item with no layers");
+        assert_eq!(all(Some([(0, 0.0), (1, 0.0)].into())), s.logits(), "add at 0 on each layer changes nothing");
+        assert_eq!(all(Some([(0, 2.0)].into())), logits_by_layer(s, &[(ControlOp::Add, 4.0, None, vector(&[0]))]), "layer 0 at 2 times strength 2 is strength 4 there, and layer 1 is untouched");
+        assert_ne!(all(Some([(0, 1.0)].into())), all(None));
+        // A clamp left out of a layer leaves it untouched: clamp at 0 is not the same as leaving the layer out.
+        let clamp = |layers| logits_by_layer(s, &[(ControlOp::Clamp, 0.0, layers, v.clone())]);
+        assert_ne!(clamp(Some([(0, 1.0)].into())), clamp(None));
     }
 
     #[test]

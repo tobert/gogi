@@ -1,6 +1,6 @@
 //! The council API routes over the toy model.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use gogi_proto::canon::spec_id_of;
 use gogi_proto::context::{Context, MediaCount, MediaUsage, Usage};
@@ -271,12 +271,12 @@ fn check_thinking(store: &Store, m: &FakeModel, contexts: &[&Context], several: 
 }
 
 /// A context's control list as the toy applies it: each item's op, strength, and vector.
-type Steer = Vec<(ControlOp, f64, ControlVector)>;
+type Steer = Vec<(ControlOp, f64, Option<BTreeMap<u32, f64>>, ControlVector)>;
 
 /// The key of a context's control list, which its snapshot ids hash: empty for the plain model.
 /// Equal lists have equal keys.
 fn control_key(c: &Context) -> String {
-    c.control.iter().map(|i| format!("{} {:?} {:016x};", i.vector, i.op, i.strength.to_bits())).collect()
+    c.control.iter().map(|i| format!("{} {:?} {:016x} {};", i.vector, i.op, i.strength.to_bits(), i.layers.iter().flatten().map(|(l, m)| format!("{}:{:016x}", l, m.to_bits())).collect::<Vec<_>>().join(","))).collect()
 }
 
 /// Reads each context's control list, checking it in the contract's order: `control_vectors` on
@@ -306,7 +306,7 @@ fn steer_of(store: &Store, m: &FakeModel, contexts: &[&Context], several: bool) 
             };
             let v = ControlVector::parse(bytes).map_err(|e| bad_param(&at, format!("nothing ran: {} names {}, which is not a control vector: {}", at, id, e)))?;
             v.check_fits(&weight_hash(m), LAYERS, WIDTH).map_err(|e| bad_param(&at, format!("nothing ran: {} names {}, which does not fit {}: {}", at, id, m.name, e)))?;
-            steer.push((item.op, item.strength, v));
+            steer.push((item.op, item.strength, item.layers.clone(), v));
         }
         out.push(steer);
     }
@@ -320,7 +320,7 @@ fn vectors_in(contexts: &[&Context]) -> Vec<Named> {
 
 /// The logits at model state `st` under a control list.
 fn logits_of(st: State, steer: &Steer) -> [f64; VOCAB] {
-    toy_control::logits(st, steer)
+    toy_control::logits_by_layer(st, steer)
 }
 
 /// The objects of each context of a request with several, named `contexts[k].messages[i]...`.

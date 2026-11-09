@@ -87,6 +87,7 @@ impl Suite {
             self.r.check("the same contexts give the same vector", again["vector"] == json!(vector), (&again["vector"], &vector));
         }
         let mut width = r.width as usize;
+        let mut held_layers: Option<Vec<u32>> = None;
         if self.has(Capability::Objects) {
             if let Some(g) = self.send_bytes("the control vector reads back", "GET", &format!("/council/v2/objects/{}", vector), None, &[]) {
                 self.r.check("the control vector reads back with its media type", g.status == 200 && g.header("content-type") == Some(MEDIA_TYPE), (g.status, g.header("content-type")));
@@ -96,6 +97,7 @@ impl Suite {
                         self.r.check("the control vector names its served model and weights", cv.model == me.model && cv.weight_hash == me.weight_hash, (&cv.model, &cv.weight_hash));
                         self.r.check("the control vector has the layers and width the response names", cv.layers.len() == r.layers as usize && cv.width() == width, (cv.layers.len(), cv.width()));
                         width = cv.width();
+                        held_layers = Some(cv.layers.keys().copied().collect());
                     }
                     Err(e) => self.r.fail("the control vector is a safetensors file of the contract's shape", e),
                 }
@@ -122,8 +124,31 @@ impl Suite {
             self.r.check("a list that changes the model never reuses the plain model state", s["head"] != p["head"] && !shared(&s), (&s, &p["head"]));
         }
 
+        // An item's layers (Proposed): every layer of the vector at 1 is the item with no layers;
+        // add at 0 on each layer is the plain model; and a list with layers has model state of its own.
+        if let Some(held) = held_layers.clone() {
+            let at = |m: f64| held.iter().map(|l| (l.to_string(), json!(m))).collect::<serde_json::Map<_, _>>();
+            let with = |m: f64, a: f64| json!([{"vector": vector, "op": "add", "strength": a, "layers": at(m)}]);
+            let each_one = self.steered(with(1.0, 8.0));
+            let each_zero = self.steered(with(0.0, 8.0));
+            if let (Some(s), Some(o)) = (self.numbers("a context with add at 8 reads", &strong), self.numbers("a context with add at 8 and each layer at 1 reads", &each_one)) {
+                self.r.check("an item with each layer of its vector at 1 gives the numbers of the item with no layers", s == o, (&s, &o));
+            }
+            if let (Some(p), Some(z)) = (self.numbers("the plain context reads again", &plain), self.numbers("a context with add at 8 and each layer at 0 reads", &each_zero)) {
+                self.r.check("add with each layer at 0 gives the numbers of no control", p == z, (&p, &z));
+            }
+            if let (Some(s), Some(o)) = (self.build("a context with add at 8 builds again", &strong, false), self.build("a context with add at 8 and each layer at 1 builds", &each_one, false)) {
+                self.r.check("an item with layers has model state of its own, apart from the item with no layers", s["head"] != o["head"], (&s["head"], &o["head"]));
+            }
+        } else {
+            self.r.skip("an item's layers", "the server does not declare objects, so the suite cannot read the vector's layers");
+        }
+
         // The item rules.
         let item_refusals: Vec<(&str, Value, &str)> = vec![
+            ("layers that name no layer", json!([{"vector": vector, "op": "add", "strength": 1, "layers": {}}]), "control[0].layers"),
+            ("a layer key that is not a number", json!([{"vector": vector, "op": "add", "strength": 1, "layers": {"x": 1}}]), "control[0].layers"),
+            ("a layer value that is not a number", json!([{"vector": vector, "op": "add", "strength": 1, "layers": {"2": "1"}}]), "control[0].layers"),
             ("an unknown op", json!([item(&vector, "add", 1.0), item(&vector, "boost", 1.0)]), "control[1].op"),
             ("a strength that is not a number", json!([{"vector": vector, "op": "add", "strength": "1"}]), "control[0].strength"),
             ("a short vector id", json!([item(&vector[..19], "add", 1.0)]), "control[0].vector"),
