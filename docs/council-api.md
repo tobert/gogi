@@ -1,9 +1,10 @@
 # Council API
 
 The council API is a small HTTP contract for a model server that holds
-snapshots of model state. The client sends a whole context with every
-request; the server holds a snapshot at each boundary the client marks and
-starts each request from the longest snapshot it holds. Three requests start
+snapshots of model state. A request carries its context whole, or names a
+context record the server holds and carries only the messages after it. The
+server holds a snapshot at each boundary the client marks and starts each
+request from the longest snapshot it holds. Three requests start
 from snapshots: decisions, raw reads, and generations. A server that
 implements the contract serves kaijutsu's chats and its council from one
 store, so the two share one KV cache and one eviction policy. One server
@@ -15,12 +16,16 @@ server against it.
 
 ## Design
 
-- **The server keeps no context records.** A request carries its context
-  whole, and the server holds only snapshots, which are named by their
-  tokens, and specs, which are named by their content. Neither can disagree
-  with the client: a client that sends a context gets that context, and a
-  restart, a second client, or an eviction costs feeding, never a wrong
-  answer.
+- **Everything the server holds is named by its content.** A snapshot is
+  named by its tokens, and a spec, an object, and a context record by their
+  content. None can disagree with the client: an id names one thing and
+  never another, so a client that names a context gets that context. A
+  restart, a second client, or an eviction costs feeding, or sending a
+  context whole again, and never a wrong answer.
+- **A context travels once.** A response names the record of the context it
+  read, and the next request names that record as its `parent` and carries
+  only its new messages. A client that keeps its own copy may still send a
+  context whole at any time; the two forms mean the same context.
 - **Contexts are native chat.** A context is `messages` in the model's own
   chat shape, tool calls and tool results included. The council bench
   measured why (mkviolet's `web/council.html`): Gemma 4 keeps its own
@@ -48,7 +53,10 @@ thing, and each thing has one term.
 | Term | Meaning |
 |---|---|
 | council | Several contexts that read the same case with the same spec, each on its own, with their reads pooled into one set of answers. |
-| context | A chat the client sends whole with each request: `messages`, `tools`, `thinking`, `queue`, and `control`. It is a value, not a record: the client keeps it, and the server never stores it. |
+| context | A chat a request reads: `messages`, `tools`, `thinking`, `queue`, and `control`. It is a value: the same members are the same context, whoever sends them and however. |
+| context record | A context the server holds, named by its context id. A request names one as its `parent`. |
+| context id | The content id of a context record's text. The same context has the same id for every served model. |
+| parent | The context record a request's context starts from. The request's context is the parent's context with the request's `messages` after it. |
 | message | One entry of a context's `messages`, with the role `system`, `user`, `assistant`, or `tool`. |
 | agent turn | The assistant messages and tool messages between one user message and the next. |
 | queue tool | The tool a context's `queue` names. |
@@ -59,12 +67,12 @@ thing, and each thing has one term.
 | head | The snapshot at the end of a context. |
 | built on | A snapshot is built on the snapshots at earlier boundaries of the same tokens; the nearest one is its parent. |
 | build | To render a context, start from the longest held snapshot whose tokens begin it, feed the remaining tokens, and hold a snapshot at each boundary. `kept` counts the tokens reused and `fed` the tokens run. |
-| hold | What a server does with snapshots and specs, the only things it keeps between requests. |
+| hold | What a server does with snapshots, context records, specs, and objects, the only things it keeps between requests. |
 | tier | Where a snapshot's model state is stored: `device`, `host`, or `disk`. |
-| pin | An owner's claim that keeps a snapshot, and the snapshots it is built on, from eviction until `ttl_s` runs out. |
+| pin | An owner's claim that keeps a snapshot, and the snapshots it is built on, from eviction until `ttl_s` runs out. A pin also keeps the context records it names. |
 | owner | The name a client pins under. |
 | spec | A held set of questions, with instructions and an input label. Its id is the content id of its canonical JSON. |
-| content id | `blake3:` and the 64 lowercase hex digits of a BLAKE3 hash, always whole. Snapshot ids, spec ids, and object ids are content ids. |
+| content id | `blake3:` and the 64 lowercase hex digits of a BLAKE3 hash, always whole. Snapshot ids, context ids, spec ids, and object ids are content ids. |
 | object | Bytes and a media type that a client puts on the server, such as an image or a sound. Its id is the content id of its bytes. Capability `objects`. |
 | media type | How to read an object's bytes: `type/subtype` in lowercase with no parameters, such as `audio/wav`. |
 | part | One piece of a message's content: text, or an object by its id and media type. |
@@ -110,6 +118,7 @@ thing, and each thing has one term.
 |---|---|
 | `GET /council/v2/identity` | The served models, each with its identity, limits, capabilities, and status, and the server's own limits and capabilities. |
 | `POST /council/v2/contexts` | Builds a context. |
+| `GET /council/v2/contexts/{id}` | A context record's context, whole. |
 | `GET /council/v2/snapshots/{id}` | A snapshot's served model, tokens, tier, size, and pins. |
 | `PUT /council/v2/pins/{owner}`, `GET`, `DELETE` | An owner's pins. |
 | `PUT /council/v2/objects/{id}`, `GET`, `HEAD` | Holds an object, or reads it, whole or by range. Capability `objects`. |
@@ -125,7 +134,7 @@ thing, and each thing has one term.
 
 ## Content ids
 
-A snapshot id, a spec id, and an object id are content ids: `blake3:` and
+A snapshot id, a context id, a spec id, and an object id are content ids: `blake3:` and
 the 64 lowercase hex digits of a BLAKE3 hash. This document shortens them with
 `…` only for reading.
 
@@ -237,9 +246,20 @@ POST /council/v2/contexts
 {"model": "gemma-4-26b-a4b",
  "context": {"thinking": true, "tools": […], "queue": "next_command", "messages": […]}}
 -> {"model": "gemma-4-26b-a4b", "head": "blake3:51d0…", "from": null, "dry_run": false,
+    "context": "blake3:8f02…",
     "usage": {"prompt": 1840, "kept": 0, "fed": 1840, "completion": 0, "reasoning": 0},
     "snapshots": [{"id": "blake3:9a1e…", "message": 1, "tokens": 412, "tier": "host"},
                   {"id": "blake3:51d0…", "message": 4, "tokens": 1840, "tier": "host"}]}
+```
+
+A later request names that record and carries only what is new (see Context
+records):
+
+```json
+POST /council/v2/generations
+{"model": "gemma-4-26b-a4b", "max_tokens": 256,
+ "context": {"parent": "blake3:8f02…",
+             "messages": [{"role": "user", "content": "how did it go?", "snap": true}]}}
 ```
 
 - **Content is a string or an array of parts.** A part is `{"type":
@@ -363,6 +383,111 @@ POST /council/v2/contexts
   `host`, or `disk`. A read from a `host` or `disk` snapshot loads it first
   and reports the time in `ms.load`.
 
+### Context records
+
+Proposed 2026-11-11. Amy chose the shape by interview: "of course I want
+the contract change". The rules below it are senpai's (vetoable).
+
+```json
+POST /council/v2/generations
+{"model": "lfm3", "max_tokens": 64,
+ "context": {"parent": "blake3:8f02…",
+             "messages": [{"role": "user", "content": "And now?"}]}}
+-> {"model": "lfm3", "content": "Now we wait.", "finish": "end_turn",
+    "context": "blake3:c4e2…",
+    "usage": {"prompt": 1854, "kept": 1840, "fed": 14, "completion": 5, "reasoning": 0}, …}
+
+GET /council/v2/contexts/blake3:c4e2…
+-> {"id": "blake3:c4e2…",
+    "context": {"thinking": false, "messages": [… , {"role": "user", "content": "And now?"},
+                {"role": "assistant", "content": "Now we wait.", "snap": true}]}}
+```
+
+- **A server holds a record of each context it reads.** A build, a
+  decision, a raw read, a generation, and a control-vector request each
+  hold the record of every context of the request, when the request passes
+  its checks. A `dry_run` holds none.
+- **The context id is the content id of the record's text:** the context
+  as compact JSON. The members of a context, a message, a part, a tool, a
+  call, and a control item are in the order `gogi-proto` writes them, and a
+  member that is absent, empty, or `false` by default is left out. The
+  members of a tool's `input_schema` and of a call's `input` keep the order
+  they were written in, because the template renders that order. The text
+  is not RFC 8785: sorted members would give two contexts that render
+  differently one id. `gogi-proto`'s `context_id` is this rule as code.
+  The id names no served model, so one record serves every served model of
+  a server. A client treats the id as opaque text and never derives one.
+- **`parent` names a context record.** A context with `parent` is the
+  parent's context with the request's `messages` after the parent's
+  messages. `messages` may be empty or absent: then the context is the
+  parent's context. A context without `parent` is whole, as before, and
+  needs one message or more.
+- **A member beside `parent` replaces the parent's.** `thinking`, `tools`,
+  `queue`, and `control` are each the parent's when the request has no such
+  member, and the request's when it has one. Thus one record serves a read
+  with thinking and a read without it, or with another `control`. To drop
+  the parent's `tools` or `control`, send an empty list. `queue: null`
+  drops the parent's `queue`.
+- **The two forms are one context.** A context sent whole and the same
+  context sent with `parent` have the same id, the same rendering, the same
+  snapshots, and the same numbers. The server renders the whole context
+  either way, and it starts from the longest snapshot it holds, as always.
+- **Every response that reads a context names its record in `context`.**
+  For a build, it is the context of the request. A decision, a raw read,
+  and a control-vector request name one for each context, in request order,
+  in `contexts`. For a generation, it is the context of the request with
+  the reply after it (see "The reply in a record").
+- **A parent the server does not hold is a `404`** with `error.type`
+  `not_found`, naming `context.parent`, or `contexts[i].parent` in a
+  request with `contexts`. The message quotes the id. The client sends the
+  context whole, which holds the record again under the same id. A server
+  may drop any record that no pin keeps, at any time, so a client that
+  cannot write a context again pins its record.
+- **A parent that is not a whole content id is a `400`** naming the same
+  member (see Content ids).
+- **A parent that ends with an open message closes it.** A request that
+  adds messages after it, or that names it in a decision or a raw read,
+  reads the message without its `continue`. A generation that names it with
+  no new messages continues it.
+- **The checks of a context are the checks of the whole context.** A
+  message of the request is checked as message `n + i`, where the parent
+  has `n` messages, and an error names it so, such as
+  `messages[7].content`. A record held for one served model can fail the
+  checks of another, such as a media type that the other does not read:
+  the error then names a message of the parent.
+- **`GET /council/v2/contexts/{id}` returns the context whole,**
+  `{id, context}`, with no `parent`: the canonical members, as the server
+  would read them. An id the server does not hold is a `404`.
+- **A record is text, and it is not model state.** It names its objects by
+  id and holds none of their bytes. A record whose snapshots are evicted
+  still serves: the request feeds what the snapshots would have kept.
+- **Records survive a restart,** as specs do. The limit `context_records`
+  in identity is the most records the server holds; past it, the server
+  drops the records that no pin keeps, the least recently named first.
+
+#### The reply in a record
+
+- **A generation's `context` ends with the reply as an assistant message:**
+  the `content`, `reasoning`, and `tool_calls` of `done`, each when it is
+  not empty, as a client would send the reply back. A reply with `outputs`
+  has an array `content`: its text part, when the text is not empty, then
+  one object part for each output, in order. An output that is still
+  pending is sealed before the record is held, so the stream's `done` may
+  wait for it.
+- **The reply's message carries `snap: true`.** The server need not hold a
+  snapshot there when the generation ends. The next request that reads the
+  record passes the boundary and holds the snapshot then, when the
+  rendering keeps it. Thus a client that only names records still gets a
+  boundary at each of its replies.
+- **A reply that ends with `max_tokens` is an open message in the record,**
+  with `continue: true`, when its `phase` is `content` or `reasoning`: with
+  a `content` member for `content`, and without one for `reasoning`. A
+  generation that names the record with no new messages resumes the reply.
+  A reply whose `phase` is `call`, or whose `finish` is `context_full`, is
+  a closed message.
+- **A generation that fails holds no record of a reply.** The record of
+  the request's context stays held.
+
 ## Snapshots and pins
 
 ```json
@@ -371,11 +496,18 @@ GET /council/v2/snapshots/blake3:51d0…
     "bytes": 829030400, "pins": [{"owner": "kernel-7f3a", "expires_in_s": 3412}]}
 
 PUT /council/v2/pins/kernel-7f3a
-{"snapshots": ["blake3:51d0…", "blake3:c4e2…"], "ttl_s": 3600}
+{"snapshots": ["blake3:51d0…", "blake3:c4e2…"], "contexts": ["blake3:8f02…"], "ttl_s": 3600}
 -> {"owner": "kernel-7f3a", "snapshots": [{"id": "blake3:51d0…", "held": true},
                                             {"id": "blake3:c4e2…", "held": false}],
+    "contexts": [{"id": "blake3:8f02…", "held": true}],
     "expires_in_s": 3600}
 ```
+
+- **A pin keeps context records too** (Proposed). `contexts` lists context
+  ids, and absent is none. A pinned record is never dropped. A pin on a
+  record the server does not hold reports `held: false` and holds nothing.
+  A record costs no `pin_bytes`. `GET` lists the pinned records in
+  `contexts`. A pin on a record does not pin its snapshots.
 
 - **A snapshot id is a content id:** `blake3:` and 64 lowercase hex
   digits. A client treats it as opaque text and never derives one. A server
@@ -708,8 +840,11 @@ POST /council/v2/generations
 ```
 
 - **A generation replies after its context.** The server builds the
-  context as `POST /contexts` does, then samples the reply. The client
-  appends the reply to its own messages for the next request.
+  context as `POST /contexts` does, then samples the reply. `done.context`
+  names the record of the context with the reply after it, so the next
+  request names it as its `parent` and sends only its new messages (see
+  Context records). A client that sends its contexts whole appends the
+  reply to its own messages.
 - **`max_tokens` is required:** 1 to the served model's `context_tokens`.
   Any other value, or none, is a `400` naming `max_tokens`.
 - **`sample`** is `{temperature, top_p, top_k, min_p, seed}`, each
@@ -717,8 +852,8 @@ POST /council/v2/generations
   `min_p` at least 0 and below 1. An absent field takes the server's
   default.
 - **`done` is the reply.** It has `model`, the reply's `content`,
-  `reasoning`, and `tool_calls`, `finish`, `usage`, `head`, the context's
-  `snapshots`, and `seed`, and `outputs` when it wrote one (see Outputs). A reply that ends with `max_tokens` also has
+  `reasoning`, and `tool_calls`, `finish`, `usage`, `head`, `context`, the
+  context's `snapshots`, and `seed`, and `outputs` when it wrote one (see Outputs). A reply that ends with `max_tokens` also has
   `phase`, the phase its next token would have (see Continuations).
   Without `stream`, `done` is the JSON response.
 - **`finish`** says why the reply ended:
@@ -1410,6 +1545,10 @@ next step when one is known.
    `control` holds only such items gives the same numbers as the context
    with no `control`. Its model state is still its own (rule 7). A `clamp`
    item always changes the residual.
+9. **A context record never changes.** Its id names one context, so a
+   request that names a record reads exactly that context, after any
+   restart and whoever held the record. A request never reads a record it
+   did not name.
 
 ## Identity, limits, capabilities
 
@@ -1464,6 +1603,7 @@ specs, which every served model shares.
 | `text_tokens` | served model | The most tokens a `text` answer writes, with `describe`. |
 | `control_vector_contexts` | served model | The most contexts on each side of a control-vector request, with `control_vectors`. Absent: no limit. (Proposed) |
 | `pin_bytes` | server | The most snapshot bytes all pins together keep, over every served model. |
+| `context_records` | server | The most context records the server holds, at least 1. (Proposed) |
 | `object_bytes` | server | The largest object, with `objects`. |
 | `keep_bytes` | server | The most object bytes all keeps together hold, with `objects`. |
 | `case_bytes` | server | The longest case, in bytes. |
@@ -1505,10 +1645,18 @@ A server serves the model-specific rest under its own prefix and lists it in
 
 ## Open questions
 
-- **The cost of sending everything.** Each request renders and tokenizes
-  its whole context. On mkviolet, a 32,480-token context renders, checks,
-  and returns a `dry_run` response in 79 ms; a server could cache renderings
-  by message prefix if that grows.
+- **The cost of rendering everything.** Each request renders and tokenizes
+  its whole context, also when it names a `parent`. On mkviolet, a
+  32,480-token context renders, checks, and returns a `dry_run` response in
+  79 ms; a server could cache renderings by record if that grows.
+- **A snapshot at the end of a reply.** A generation ends with the model
+  state of its reply, but a server holds no snapshot there unless the reply
+  was cut. The next request feeds the reply again to pass its boundary. A
+  server could hold the state it already has, when the closed rendering of
+  the reply begins with the sampled tokens.
+- **Records across machines.** Two servers that write a record's text the
+  same way give a context the same id, so a server in a cluster could read
+  a record from a peer on a miss, as it can an object.
 - **Snapshots across machines.** A client that moves to another server
   sends the same messages; nothing else moves. A server could copy a
   snapshot from another machine when the identity is the same, and content
