@@ -39,6 +39,8 @@ pub enum Capability {
     Embed,
     /// Contexts accept `control`, and `POST /council/v2/control-vectors` makes control vectors.
     ControlVectors,
+    /// Generations accept `forks` and `contexts`, and write several replies.
+    Replies,
     #[serde(other)]
     Unknown,
 }
@@ -78,6 +80,9 @@ pub struct ModelLimits {
     /// The most contexts each side of a control-vector request holds, with `control_vectors`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_vector_contexts: Option<u64>,
+    /// The most replies one generation writes, with `replies`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replies_per_generation: Option<u64>,
 }
 
 /// The server's own limits, which every served model shares.

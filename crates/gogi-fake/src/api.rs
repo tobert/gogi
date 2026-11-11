@@ -49,6 +49,9 @@ pub enum Resp {
     Redirect(String),
 }
 
+/// The most replies one generation writes.
+const REPLIES_PER_GENERATION: u64 = 8;
+
 fn err(status: u16, kind: &str, message: impl Into<String>, param: Option<&str>) -> Resp {
     let mut e = json!({"type": kind, "message": message.into()});
     if let Some(p) = param {
@@ -182,7 +185,8 @@ pub fn identity(store: &Store) -> Value {
             }
             v["limits"] = json!({"context_tokens": store.cfg.context_tokens, "decision_context_tokens": store.cfg.decision_context_tokens,
                                  "snapshot_bytes": BYTES_PER_TOKEN, "contexts_per_decision": 8, "default_timeout_ms": 30000});
-            v["capabilities"] = json!(["reads", "generate", "continuation", "dry_run", "leave_one_out"]);
+            v["capabilities"] = json!(["reads", "generate", "continuation", "dry_run", "leave_one_out", "replies"]);
+            v["limits"]["replies_per_generation"] = json!(REPLIES_PER_GENERATION);
             if m.thinks {
                 v["capabilities"].as_array_mut().expect("an array").push(json!("thinking"));
             }
@@ -453,7 +457,44 @@ fn with_records(store: &mut Store, name: &str, body: &[u8]) -> Resp {
         Err(Unresolved::Invalid(e)) => return invalid(e),
         Err(Unresolved::NotHeld { param, id }) => return err(404, "not_found", Unresolved::not_held_message(&id), Some(&param)),
     }
-    let whole = serde_json::to_vec(&v).expect("a JSON value writes");
+    if name == "generations" {
+        // The seed of reply 0 of a request with no seed: the fake takes it from the request, so a
+        // request replays.
+        let first = || u64::from_le_bytes(blake3::hash(body).as_bytes()[..8].try_into().expect("8 bytes"));
+        match gogi_proto::replies::split(&v, REPLIES_PER_GENERATION, first) {
+            Err(e) => return invalid(e),
+            Ok(Some(split)) => return several(store, &split),
+            Ok(None) => {}
+        }
+    }
+    one(store, name, &v)
+}
+
+/// Runs each reply of a request with several replies as a plain generation, in order, and joins
+/// them. The replies after the first start from the snapshots of the ones before, so a context
+/// that they share is fed once.
+fn several(store: &mut Store, split: &gogi_proto::replies::Split) -> Resp {
+    let mut dones = Vec::new();
+    for (i, request) in split.requests.iter().enumerate() {
+        match one(store, "generations", request) {
+            Resp::Json(200, done) => dones.push(serde_json::from_value(done).expect("the fake's done decodes")),
+            Resp::Json(code, mut e) => {
+                if !split.forks
+                    && let Some(param) = e["error"]["param"].as_str().map(|p| gogi_proto::replies::param_in(p, i))
+                {
+                    e["error"]["param"] = json!(param);
+                }
+                return Resp::Json(code, e);
+            }
+            other => return other,
+        }
+    }
+    Resp::Json(200, gogi_proto::replies::join(split, &dones))
+}
+
+/// Serves one request whose contexts are whole, and holds their records.
+fn one(store: &mut Store, name: &str, v: &Value) -> Resp {
+    let whole = serde_json::to_vec(v).expect("a JSON value writes");
     let mut resp = to_route(store, name, &whole);
     let read: Vec<Context> = ["context"].iter().filter_map(|k| v.get(*k)).chain(["contexts", "positive", "negative"].iter().filter_map(|k| v.get(*k)).filter_map(Value::as_array).flatten()).filter_map(|c| serde_json::from_value(c.clone()).ok()).collect();
     match &mut resp {

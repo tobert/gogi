@@ -1017,9 +1017,11 @@ POST /council/v2/generations
   rides no decision** (for now): `stream: true`, `output`, or `decisions`
   beside `forks` or `contexts` is a `400` naming that member. An open
   message is allowed, and each reply continues it.
-- **One reply that fails fails the request.** The server holds no record of
-  a reply then. (A reply that ends with `max_tokens` or `context_full` did
-  not fail.)
+- **One reply that fails fails the request.** The response is the error of
+  that reply, and for `contexts` its `param` names the context, such as
+  `contexts[1].messages[0].content`. The records of the replies before it
+  may stay held. (A reply that ends with `max_tokens` or `context_full`
+  did not fail.)
 - **A server declares capability `replies`** on the served model. Without
   it, `forks` or `contexts` in a generation is a `400` naming the member.
 

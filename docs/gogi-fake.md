@@ -206,6 +206,10 @@ function of that hash, between -6 and 6, so the same prefix gives the same bits.
   request, with `gogi-proto`'s `resolve_request`, so each route reads whole contexts only.
   `Config::context_records` is 10,000: past it, the records that no pin keeps go, the least
   recently named first. It is a field of `Config` in Rust only.
+- A generation with `forks` or `contexts` runs as one plain generation for each reply, in
+  order: `gogi-proto`'s `replies::split` makes their requests, and `replies::join` makes the
+  response. Thus a reply is the reply that its request gives alone. A reply after the first
+  starts from the snapshots of the replies before it. `replies_per_generation` is 8.
 - Objects are held in memory and never evicted. Keeps hold them through a restart with
   `--state-dir`, which stores each kept object as a file under `objects/`. `object_bytes` is
   1 MiB and `keep_bytes` 8 MiB.
