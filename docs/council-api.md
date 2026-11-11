@@ -91,6 +91,7 @@ thing, and each thing has one term.
 | preview | An output, or the reply's text, as it is after a step: not final, and replaced by the next preview. |
 | riding decision | A spec's questions asked during a generation, `before` or `after` the reply. Capability `ride`. |
 | reply | The assistant message a generation writes, with a continuation's open text at its start. |
+| fork | One of several replies after one context, from one request. Each fork has its own seed and its own record. Capability `replies`. |
 | continuation | A generation whose last message is an open assistant message: the model goes on from the open text. Capability `continuation`. |
 | open text | The `reasoning` and `content` of the open message, which the client wrote and the model continues. |
 | response | The HTTP body a server returns for any request. |
@@ -329,6 +330,14 @@ POST /council/v2/generations
   started from, held from this context or any other, or `null`;
   `usage.kept` counts the tokens it did not feed and `usage.prompt` the
   context's tokens.
+- **Requests in flight share a prefix** (Proposed 2026-11-11; Amy agreed
+  by interview). Two requests can be in flight together with contexts that
+  begin with the same tokens, while the server holds no snapshot of those
+  tokens. Then the server feeds those tokens once when it can, up to the
+  last boundary that both contexts mark, and the later request starts from
+  that snapshot. Thus a client never builds a context only so that other
+  requests find its snapshot. Each request gives the numbers that it gives
+  alone, and its `kept` counts what it did not feed.
 - **A boundary exists only where the rendering keeps it.** A marked message
   whose rendering is not a prefix of the whole context is not a boundary,
   and the response lists no snapshot for it. In Gemma 4 this is an
@@ -932,6 +941,89 @@ POST /council/v2/generations
 - **A prompt that leaves no room is a `413`** with `error.type`
   `context_full`, `prompt_tokens`, and `context_tokens`, before anything
   runs. The client shortens the context.
+
+### Several replies
+
+Proposed 2026-11-11. Amy asked for it by interview: several replies from
+one request, each reply named by an id that reads it back later. The rules
+are senpai's (vetoable).
+
+```json
+POST /council/v2/generations
+{"model": "lfm3", "max_tokens": 96, "sample": {"temperature": 1.0, "seed": 7},
+ "context": {"parent": "blake3:8f02…"},
+ "forks": 4, "replies": "ids"}
+-> {"model": "lfm3",
+    "usage": {"prompt": 1840, "kept": 1840, "fed": 0, "completion": 371, "reasoning": 0},
+    "replies": [{"index": 0, "context": "blake3:a1c0…", "finish": "end_turn", "seed": 7,
+                 "usage": {"completion": 96, "reasoning": 0}},
+                {"index": 1, "context": "blake3:77de…", "finish": "max_tokens", "phase": "content", "seed": 8,
+                 "usage": {"completion": 96, "reasoning": 0}}, …]}
+
+POST /council/v2/generations
+{"model": "lfm3", "max_tokens": 48, "sample": {"temperature": 1.0, "seed": 7},
+ "contexts": [{"parent": "blake3:8f02…", "messages": [{"role": "user", "content": "Focus: the fit."}]},
+              {"parent": "blake3:8f02…", "messages": [{"role": "user", "content": "Focus: the gaps."}]}]}
+-> {"model": "lfm3", "usage": {…},
+    "replies": [{"index": 0, "context": "blake3:19b4…", "content": "…", "reasoning": "", "tool_calls": [],
+                 "finish": "end_turn", "seed": 7, "usage": {"completion": 31, "reasoning": 0}}, …]}
+```
+
+- **`forks` asks for several replies after one context.** It is a count,
+  1 to the served model's `replies_per_generation`, or a list of that many
+  `sample` objects at most, one for each reply. A member of a list entry
+  replaces the same member of the request's `sample` for that reply, so a
+  list gives each reply its own temperature.
+- **`contexts` asks for one reply after each of several contexts,** 1 to
+  `replies_per_generation`, in place of `context`. Each may name a
+  `parent`. A request has `context` or `contexts`, not both, and `forks`
+  stands only beside `context`: any other mix is a `400` naming the second
+  member. An error in one context names it, such as
+  `contexts[1].messages[0].content`.
+- **The response has `replies`,** one for each reply, in order, each with
+  its `index`. A request with `forks` or `contexts` has `replies` even for
+  one reply. A request with neither has the response of one generation, as
+  before.
+- **A reply does not depend on the other replies.** Reply `i` is the reply
+  that the same request gives alone, for that context, with that `sample`
+  and that seed. A server may run the replies in one pass, but the pass
+  never changes a number of a reply.
+- **The seed of reply `i` is the request's seed plus `i`,** modulo 2^64,
+  when the request or its list entry gives no other. Without a seed in the
+  request, the server chooses the first. Each reply reports its `seed`.
+- **Each reply names its record in `context`:** its context with the reply
+  after it, as for one generation (see "The reply in a record"). The server
+  holds the record of each context of the request too.
+- **`replies: "ids"` leaves the text out of the response.** Each reply then
+  has `index`, `context`, `finish`, `phase` when it has one, `seed`, and
+  `usage`, and no `content`, `reasoning`, `tool_calls`, `stats`, `head`, or
+  `snapshots`. The client reads a reply later with
+  `GET /council/v2/contexts/{id}`: the last message of the record is the
+  reply. `replies: "full"` is the default and has every member of `done`
+  but `model`. Any other value is a `400` naming `replies`. `replies`
+  stands only beside `forks` or `contexts`.
+- **A client that wants to read a reply later pins its record.** A server
+  may drop a record that no pin keeps.
+- **`usage` counts the request once.** The top `usage` has the `prompt`,
+  `kept`, and `fed` of all contexts together, where a context of `forks` is
+  counted once, and the `completion` and `reasoning` of all replies
+  together. Each reply's `usage` has its own `completion` and `reasoning`,
+  and with `contexts` its own `prompt`, `kept`, and `fed`.
+- **The contexts of one request share what they share.** A server feeds a
+  prefix that several contexts of the request begin with once. Thus the
+  `fed` of the request is less than the sum of the same contexts sent
+  alone, when they share a prefix that the server did not hold.
+- **A request with several replies does not stream, writes no output, and
+  rides no decision** (for now): `stream: true`, `output`, or `decisions`
+  beside `forks` or `contexts` is a `400` naming that member. An open
+  message is allowed, and each reply continues it.
+- **One reply that fails fails the request.** The response is the error of
+  that reply, and for `contexts` its `param` names the context, such as
+  `contexts[1].messages[0].content`. The records of the replies before it
+  may stay held. (A reply that ends with `max_tokens` or `context_full`
+  did not fail.)
+- **A server declares capability `replies`** on the served model. Without
+  it, `forks` or `contexts` in a generation is a `400` naming the member.
 
 ### Streams
 
@@ -1606,6 +1698,7 @@ specs, which every served model shares.
 | `decision_context_tokens` | served model | The longest context a decision reads, not counting the spec and the case rendered after it. |
 | `snapshot_bytes` | served model | What one token of a snapshot costs. |
 | `contexts_per_decision` | served model | The most contexts one decision reads, at most 8. |
+| `replies_per_generation` | served model | The most replies one generation writes, with `replies`. (Proposed) |
 | `default_timeout_ms` | served model | A decision's `timeout_ms` when it sends none. |
 | `text_tokens` | served model | The most tokens a `text` answer writes, with `describe`. |
 | `control_vector_contexts` | served model | The most contexts on each side of a control-vector request, with `control_vectors`. Absent: no limit. (Proposed) |

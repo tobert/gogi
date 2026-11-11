@@ -28,6 +28,7 @@ pub mod objects;
 pub mod pins;
 pub mod reads;
 pub mod record;
+pub mod replies;
 pub mod spec;
 
 pub use canon::{canonical_json, content_id, spec_id_of};

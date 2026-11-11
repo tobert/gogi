@@ -164,7 +164,7 @@ mod tests {
             engine: "e".into(),
             device: None,
             text_stop: None,
-            limits: ModelLimits { context_tokens: 2048, decision_context_tokens: 0, snapshot_bytes: 0, contexts_per_decision: 0, default_timeout_ms: 30000, text_tokens: None, control_vector_contexts: None },
+            limits: ModelLimits { context_tokens: 2048, decision_context_tokens: 0, snapshot_bytes: 0, contexts_per_decision: 0, default_timeout_ms: 30000, text_tokens: None, control_vector_contexts: None, replies_per_generation: None },
             capabilities: vec![Capability::Embed, Capability::DryRun],
             media: Some(Media { inputs: vec![], outputs: vec![], text_replies: false }),
             embeddings: Some(Embeddings { tasks: vec!["query".into(), "document".into()], dimensions: vec![768, 512, 256, 128], inputs_per_request: 4 }),

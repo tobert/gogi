@@ -62,6 +62,43 @@ fn the_fake_passes_each_check_of_context_records() {
 }
 
 #[test]
+fn the_fake_passes_each_check_of_several_replies() {
+    let server = Server::start(Config::default()).unwrap();
+    let r = run(Opts { url: server.url(), restart: None, model: None }, false);
+    assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
+    for name in [
+        "a served model with replies names replies_per_generation, at least 1",
+        "forks give one reply for each fork, in order",
+        "the seed of reply i is the seed of the request plus i",
+        "a response with replies has no reply of its own",
+        "a fork is the reply that the same request gives alone",
+        "usage counts the context of forks once and the replies together",
+        "a fork's usage has its own completion and no prompt",
+        "replies ids leave the text out",
+        "replies ids name the records of the same replies",
+        "a reply reads back later as the last message of its record",
+        "a fork of a list takes the sample of its entry",
+        "a fork of a list keeps a seed of its own",
+        "one fork still has replies",
+        "contexts give one reply after each, and each is the reply of its context alone",
+        "a reply of contexts has the usage of its own context",
+        "usage counts each context of contexts",
+        "an unheld parent of contexts names its context",
+        "a bad message of contexts names its context and its place",
+        "context beside contexts names contexts",
+        "forks beside contexts names forks",
+        "forks of 0 is a 400 naming forks",
+        "forks past replies_per_generation is a 400 naming forks",
+        "forks that is not a count or a list is a 400 naming forks",
+        "replies with no forks is a 400 naming replies",
+        "a stream with forks is a 400 naming stream",
+        "replies that is not full or ids is a 400 naming replies",
+    ] {
+        assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name} did not pass: {:?}", r.checks.iter().filter(|c| c.name == name).map(|c| (&c.status, &c.detail)).collect::<Vec<_>>());
+    }
+}
+
+#[test]
 fn the_fake_passes_the_restart_checks_when_it_keeps_its_state() {
     let dir = std::env::temp_dir().join(format!("gogi-conf-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
