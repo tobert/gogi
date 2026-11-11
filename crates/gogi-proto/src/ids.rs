@@ -95,6 +95,12 @@ prefixed_id!(
     "snapshot id"
 );
 prefixed_id!(
+    /// The content id of a context record's text. A client treats it as opaque and never derives
+    /// one.
+    ContextId,
+    "context id"
+);
+prefixed_id!(
     /// The BLAKE3 hash of a spec's canonical JSON.
     SpecId,
     "spec id"

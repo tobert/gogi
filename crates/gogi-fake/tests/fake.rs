@@ -1055,3 +1055,80 @@ fn usage_counts_a_control_vector_read() {
     let (_, b) = post(&s, "/council/v2/contexts", json!({"model": "toy", "context": with_control(json!([steer(&v, "add", 1.0), steer(&v, "clamp", 1.0)]))}));
     assert_eq!(b["usage"]["media"]["read"]["objects"], json!(1), "{b}");
 }
+
+fn record_of(s: &Server, text: &str) -> String {
+    let (code, b) = post(s, "/council/v2/contexts", json!({"model": "toy", "context": ctx(json!([{"role": "user", "content": text}]))}));
+    assert_eq!(code, 200, "{b}");
+    b["context"].as_str().unwrap().to_string()
+}
+
+fn held(s: &Server, record: &str) -> bool {
+    call(s, "GET", &format!("/council/v2/contexts/{record}"), None).0 == 200
+}
+
+#[test]
+fn records_past_the_limit_go_the_least_recently_named_first_and_a_pin_keeps_one() {
+    let s = Server::start(Config { context_records: 3, ..Config::default() }).unwrap();
+    let (a, b, c) = (record_of(&s, "a"), record_of(&s, "b"), record_of(&s, "c"));
+    // A pin keeps `a`. A request that names `b` as its parent makes `b` the most recently named,
+    // and it holds a fourth record.
+    let (code, p) = call(&s, "PUT", "/council/v2/pins/o", Some(json!({"snapshots": [], "contexts": [a], "ttl_s": 60})));
+    assert_eq!((code, p["contexts"][0]["held"].clone(), p["expires_in_s"].clone()), (200, json!(true), json!(60)));
+    let (code, d) = post(&s, "/council/v2/contexts", json!({"model": "toy", "context": {"parent": b, "messages": [{"role": "user", "content": "d"}]}}));
+    assert_eq!(code, 200, "{d}");
+    assert_eq!((held(&s, &a), held(&s, &b), held(&s, &c), held(&s, d["context"].as_str().unwrap())), (true, true, false, true));
+    // The record that went is a 404 for a request that names it, and the context sent whole holds it again.
+    let (code, e) = post(&s, "/council/v2/contexts", json!({"model": "toy", "context": {"parent": c}}));
+    assert_eq!((code, e["error"]["type"].clone(), e["error"]["param"].clone()), (404, json!("not_found"), json!("context.parent")));
+    assert_eq!(record_of(&s, "c"), c);
+    assert!(held(&s, &a), "the pinned record stays");
+    // When the pin runs out, the record can go.
+    s.advance_clock(61);
+    for text in ["e", "f", "g"] {
+        record_of(&s, text);
+    }
+    assert!(!held(&s, &a));
+}
+
+#[test]
+fn a_stream_names_the_record_of_its_reply_and_the_record_serves_the_next_request() {
+    let s = Server::start(Config::default()).unwrap();
+    // With thinking off, the reply has no thinking for the template to drop, so the next request starts
+    // from the head after the reply.
+    let context = json!({"thinking": false, "messages": [{"role": "user", "content": "hello"}]});
+    let events = stream(&s, json!({"model": "toy", "context": context, "max_tokens": 64, "sample": {"temperature": 0}}));
+    let Some(StreamEvent::Done(done)) = events.last() else { panic!("no done") };
+    let record = done.context.clone().expect("done names a record").to_string();
+    let (_, r) = call(&s, "GET", &format!("/council/v2/contexts/{record}"), None);
+    let messages = r["context"]["messages"].as_array().unwrap();
+    assert_eq!((messages.len(), messages[1]["role"].clone(), messages[1]["snap"].clone()), (2, json!("assistant"), json!(true)));
+    // The record of the request's own context is held too.
+    let own = gogi_proto::context_id(&serde_json::from_value(context).unwrap()).to_string();
+    assert!(held(&s, &own));
+    let (code, next) = post(&s, "/council/v2/generations", json!({"model": "toy", "max_tokens": 8, "sample": {"temperature": 0}, "context": {"parent": record, "messages": [{"role": "user", "content": "more"}]}}));
+    assert_eq!(code, 200, "{next}");
+    assert!(next["usage"]["kept"].as_u64().unwrap() >= done.usage.prompt, "{}", next["usage"]);
+}
+
+#[test]
+fn a_request_that_fails_its_checks_holds_no_record() {
+    let s = Server::start(Config::default()).unwrap();
+    let context = ctx(json!([{"role": "user", "content": "no room"}]));
+    let (code, _) = post(&s, "/council/v2/generations", json!({"model": "toy", "context": context, "max_tokens": 0}));
+    assert_eq!(code, 400);
+    let own = gogi_proto::context_id(&serde_json::from_value(context).unwrap()).to_string();
+    assert!(!held(&s, &own));
+}
+
+#[test]
+fn records_survive_a_restart() {
+    let dir = std::env::temp_dir().join(format!("gogi-fake-records-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut s = Server::start(Config { state_dir: Some(dir.clone()), ..Config::default() }).unwrap();
+    let a = record_of(&s, "keep my text");
+    s.restart().unwrap();
+    assert!(held(&s, &a));
+    let (code, b) = post(&s, "/council/v2/contexts", json!({"model": "toy", "context": {"parent": a}}));
+    assert_eq!((code, b["context"].clone()), (200, json!(a)));
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -13,6 +13,7 @@ mod objects;
 mod outputs;
 mod pins;
 mod reads;
+mod records;
 mod restart;
 mod ride;
 

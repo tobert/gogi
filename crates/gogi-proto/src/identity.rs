@@ -90,6 +90,9 @@ pub struct ServerLimits {
     pub questions_per_spec: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin_bytes: Option<u64>,
+    /// The most context records the server holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_records: Option<u64>,
     /// The largest object, in bytes, with `objects`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_bytes: Option<u64>,

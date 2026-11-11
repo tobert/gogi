@@ -30,7 +30,7 @@ These words drifted before. Use the term on the right.
 
 | Do not write | Write |
 |---|---|
-| held context, stored context | context (the server holds snapshots, never contexts) |
+| held context, stored context | context record (the server holds a record of a context, named by its context id) |
 | seat, agent seat, council context | queue context, or context |
 | state, for the thing judged | case |
 | state, for what a snapshot holds | model state |

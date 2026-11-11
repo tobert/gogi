@@ -15,6 +15,7 @@ use gogi_proto::message::{Message, ToolCall};
 use gogi_proto::objects::{Named, ObjectRef, objects_of};
 use gogi_proto::pins::{PinsPut, is_owner};
 use gogi_proto::reads::ReadsRequest;
+use gogi_proto::record::Unresolved;
 use gogi_proto::spec::{Question, QuestionKind, SpecRules, parse_spec};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
@@ -197,7 +198,7 @@ pub fn identity(store: &Store) -> Value {
         .collect();
     json!({
         "models": models,
-        "limits": {"case_bytes": CASE_BYTES, "choice_options": 26, "questions_per_spec": 16, "pin_bytes": store.cfg.pin_bytes,
+        "limits": {"case_bytes": CASE_BYTES, "choice_options": 26, "questions_per_spec": 16, "pin_bytes": store.cfg.pin_bytes, "context_records": store.cfg.context_records,
                    "object_bytes": store.cfg.object_bytes, "keep_bytes": store.cfg.keep_bytes},
         "capabilities": ["pins", "objects"],
         "extensions": [],
@@ -348,9 +349,18 @@ pub fn handle(store: &mut Store, method: &str, path: &str, headers: &[(String, S
     let header = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
     let Some(rest) = path.strip_prefix("/council/v2/") else { return not_found("unknown route") };
     let parts: Vec<&str> = rest.split('/').collect();
+    if let ("POST", [name @ ("contexts" | "decisions" | "reads" | "generations" | "control-vectors")]) = (method, parts.as_slice()) {
+        return with_records(store, name, body);
+    }
     match (method, parts.as_slice()) {
         ("GET", ["identity"]) => Resp::Json(200, identity(store)),
-        ("POST", ["contexts"]) => build_route(store, body),
+        ("GET", ["contexts", id]) => match path_id(&unescape(id)) {
+            Ok(id) => match store.record(&id) {
+                Some(context) => Resp::Json(200, json!({"id": id, "context": context})),
+                None => not_found(format!("no context record {}", id)),
+            },
+            Err(r) => r,
+        },
         ("GET", ["snapshots", id]) => match path_id(&unescape(id)) {
             Ok(id) => snapshot_route(store, &id),
             Err(r) => r,
@@ -358,7 +368,7 @@ pub fn handle(store: &mut Store, method: &str, path: &str, headers: &[(String, S
         ("PUT", ["pins", owner]) => pins_put(store, &unescape(owner), body),
         ("GET", ["pins", owner]) => match path_owner(owner) {
             Ok(owner) => match store.pins.get(&owner) {
-                Some(p) => Resp::Json(200, json!({"owner": owner, "snapshots": p.snapshots, "expires_in_s": store.expires_in(p.expires)})),
+                Some(p) => Resp::Json(200, json!({"owner": owner, "snapshots": p.snapshots, "contexts": p.contexts, "expires_in_s": store.expires_in(p.expires)})),
                 None => not_found(format!("{} pins nothing", owner)),
             },
             Err(r) => r,
@@ -422,12 +432,66 @@ pub fn handle(store: &mut Store, method: &str, path: &str, headers: &[(String, S
             store.save();
             Resp::Empty(204)
         }
-        ("POST", ["decisions"]) => decisions(store, body),
-        ("POST", ["reads"]) => reads(store, body),
-        ("POST", ["generations"]) => generations(store, body),
         ("POST", ["embeddings"]) => embeddings(store, body),
-        ("POST", ["control-vectors"]) => control_vectors(store, body),
         _ => not_found("unknown route"),
+    }
+}
+
+// ---- context records
+
+/// Serves a route that reads contexts. It makes each context that names a `parent` whole before
+/// the route decodes the body, so the route reads whole contexts only. After a response that
+/// read them, it holds the record of each context, and it names the record of a build and of a
+/// generation in `context`.
+fn with_records(store: &mut Store, name: &str, body: &[u8]) -> Resp {
+    let Ok(mut v) = serde_json::from_slice::<Value>(body) else { return to_route(store, name, body) };
+    // Only a generation continues an open message.
+    let close = name != "generations";
+    let records = std::cell::RefCell::new(&mut *store);
+    match gogi_proto::resolve_request(&mut v, close, &|id| records.borrow_mut().record(id.as_str())) {
+        Ok(()) => {}
+        Err(Unresolved::Invalid(e)) => return invalid(e),
+        Err(Unresolved::NotHeld { param, id }) => return err(404, "not_found", Unresolved::not_held_message(&id), Some(&param)),
+    }
+    let whole = serde_json::to_vec(&v).expect("a JSON value writes");
+    let mut resp = to_route(store, name, &whole);
+    let read: Vec<Context> = ["context"].iter().filter_map(|k| v.get(*k)).chain(["contexts", "positive", "negative"].iter().filter_map(|k| v.get(*k)).filter_map(Value::as_array).flatten()).filter_map(|c| serde_json::from_value(c.clone()).ok()).collect();
+    match &mut resp {
+        Resp::Json(200, out) if name == "contexts" => {
+            if out["dry_run"] != json!(true) {
+                out["context"] = json!(store.hold_record(&read[0]));
+            }
+        }
+        Resp::Json(200, out) if name == "generations" => {
+            store.hold_record(&read[0]);
+            let done: gogi_proto::generation::GenerationDone = serde_json::from_value(out.clone()).expect("the fake's done decodes");
+            out["context"] = json!(store.hold_record(&gogi_proto::with_reply(&read[0], &done)));
+        }
+        Resp::Sse(events) => {
+            store.hold_record(&read[0]);
+            if let Some(StreamEvent::Done(done)) = events.last_mut() {
+                let id = store.hold_record(&gogi_proto::with_reply(&read[0], done));
+                done.context = Some(gogi_proto::ContextId::parse(id).expect("a context id"));
+            }
+        }
+        Resp::Json(200, _) => {
+            for c in &read {
+                store.hold_record(c);
+            }
+        }
+        _ => return resp,
+    }
+    store.save();
+    resp
+}
+
+fn to_route(store: &mut Store, name: &str, body: &[u8]) -> Resp {
+    match name {
+        "contexts" => build_route(store, body),
+        "decisions" => decisions(store, body),
+        "reads" => reads(store, body),
+        "generations" => generations(store, body),
+        _ => control_vectors(store, body),
     }
 }
 
@@ -631,22 +695,28 @@ fn pins_put(store: &mut Store, owner: &str, body: &[u8]) -> Resp {
     if let Err(e) = req.validate() {
         return invalid(e);
     }
+    let contexts: Vec<Value> = req.contexts.iter().map(|id| json!({"id": id, "held": store.records.contains_key(id)})).collect();
+    let records: Vec<String> = req.contexts.iter().filter(|id| store.records.contains_key(*id)).cloned().collect();
     let held: Vec<bool> = req.snapshots.iter().map(|id| store.has(id)).collect();
     let ids: Vec<String> = req.snapshots.iter().zip(&held).filter(|(_, h)| **h).map(|(i, _)| i.clone()).collect();
     if store.bytes_of_closure(&ids) > store.cfg.pin_bytes {
         return err(413, "too_large", "the snapshots these pins keep are over pin_bytes", Some("pin_bytes"));
     }
     let snapshots: Vec<Value> = req.snapshots.iter().zip(&held).map(|(id, h)| json!({"id": id, "held": h})).collect();
-    let expires_in = if ids.is_empty() {
+    let expires_in = if ids.is_empty() && records.is_empty() {
         store.pins.remove(owner);
         Value::Null
     } else {
         let expires = store.now() + req.ttl_s;
-        store.pins.insert(owner.to_string(), Pins { snapshots: ids, expires });
+        store.pins.insert(owner.to_string(), Pins { snapshots: ids, contexts: records, expires });
         json!(req.ttl_s)
     };
     store.save();
-    Resp::Json(200, json!({"owner": owner, "snapshots": snapshots, "expires_in_s": expires_in}))
+    let mut out = json!({"owner": owner, "snapshots": snapshots, "expires_in_s": expires_in});
+    if !contexts.is_empty() {
+        out["contexts"] = json!(contexts);
+    }
+    Resp::Json(200, out)
 }
 
 // ---- reads

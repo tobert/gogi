@@ -8,6 +8,7 @@
 //!   (`message::validate`, `Context::check`, `spec::parse_spec`);
 //! - what a server checks of an open message, the seams of a continuation (`continuation`);
 //! - canonical JSON, content ids, and `spec_id` (`canon`);
+//! - context records: the context id, a `parent`, and the reply in a record (`record`);
 //! - the pooling math in `f64` and the check that a decision's numbers obey it
 //!   (`math::pool`, `math::verify`).
 
@@ -26,12 +27,14 @@ pub mod message;
 pub mod objects;
 pub mod pins;
 pub mod reads;
+pub mod record;
 pub mod spec;
 
 pub use canon::{canonical_json, content_id, spec_id_of};
 pub use context::{Context, ContextBuild, ContextBuilt, MediaCount, MediaUsage, SnapshotInfo, Tier, Tool, Usage};
 pub use error::{ErrorBody, ErrorDetail, ErrorType, Invalid};
-pub use ids::{ContentId, SnapshotId, SpecId, content_id_problem};
+pub use ids::{ContentId, ContextId, SnapshotId, SpecId, content_id_problem};
+pub use record::{Unresolved, context_id, record_text, resolve, resolve_request, with_reply};
 pub use message::{Content, Message, Part, Role, ToolCall};
 
 /// Accepts `null` or a value but, unlike a plain `Option`, requires the member.

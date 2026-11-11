@@ -30,6 +30,9 @@ pub fn validate_owner(owner: &str) -> Result<(), Invalid> {
 #[serde(deny_unknown_fields)]
 pub struct PinsPut {
     pub snapshots: Vec<String>,
+    /// The context records the pin keeps. Absent: none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contexts: Vec<String>,
     pub ttl_s: u64,
 }
 
@@ -39,9 +42,11 @@ impl PinsPut {
         if self.ttl_s == 0 || self.ttl_s > PIN_TTL_MAX_S {
             return Err(Invalid::param("ttl_s", format!("ttl_s is 1 to {}", PIN_TTL_MAX_S)));
         }
-        for (i, id) in self.snapshots.iter().enumerate() {
-            if let Some(problem) = crate::ids::content_id_problem(id) {
-                return Err(Invalid::param("snapshots", format!("nothing is pinned: snapshots[{}] {}", i, problem)));
+        for (list, ids) in [("snapshots", &self.snapshots), ("contexts", &self.contexts)] {
+            for (i, id) in ids.iter().enumerate() {
+                if let Some(problem) = crate::ids::content_id_problem(id) {
+                    return Err(Invalid::param(list, format!("nothing is pinned: {}[{}] {}", list, i, problem)));
+                }
             }
         }
         Ok(())
@@ -55,11 +60,21 @@ pub struct PinHeld {
     pub held: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordHeld {
+    pub id: crate::ids::ContextId,
+    /// `false`: the server does not hold the record, so the pin keeps nothing.
+    pub held: bool,
+}
+
 /// The response to `PUT /council/v2/pins/{owner}`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PinsPutResult {
     pub owner: String,
     pub snapshots: Vec<PinHeld>,
+    /// The context records of the request, each with whether the server holds it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contexts: Vec<RecordHeld>,
     /// `null` for an empty set, which pins nothing.
     #[serde(deserialize_with = "required_nullable")]
     pub expires_in_s: Option<u64>,
@@ -72,6 +87,9 @@ pub struct PinSet {
     pub owner: String,
     #[serde(deserialize_with = "pinned_ids")]
     pub snapshots: Vec<String>,
+    /// The pinned context records.
+    #[serde(default)]
+    pub contexts: Vec<String>,
     pub expires_in_s: u64,
 }
 
@@ -133,14 +151,17 @@ mod tests {
     #[test]
     fn a_pin_on_an_id_that_is_not_a_whole_content_id_is_refused_by_name() {
         let whole = format!("blake3:{}", "a".repeat(64));
-        PinsPut { snapshots: vec![whole.clone()], ttl_s: 60 }.validate().unwrap();
-        let e = PinsPut { snapshots: vec![whole, "blake3:aaaa".into()], ttl_s: 60 }.validate().unwrap_err();
+        PinsPut { snapshots: vec![whole.clone()], contexts: vec![whole.clone()], ttl_s: 60 }.validate().unwrap();
+        let e = PinsPut { snapshots: vec![], contexts: vec![whole.clone(), "blake3:aaaa".into()], ttl_s: 60 }.validate().unwrap_err();
+        assert_eq!(e.param.as_deref(), Some("contexts"));
+        assert!(e.message.contains("contexts[1]"), "{}", e.message);
+        let e = PinsPut { snapshots: vec![whole, "blake3:aaaa".into()], contexts: vec![], ttl_s: 60 }.validate().unwrap_err();
         assert!(e.param.as_deref() == Some("snapshots") && e.message.contains("snapshots[1] \"blake3:aaaa\""), "{e:?}");
     }
 
     #[test]
     fn ttl_is_one_second_to_a_day() {
-        let put = |ttl_s| PinsPut { snapshots: vec![], ttl_s };
+        let put = |ttl_s| PinsPut { snapshots: vec![], contexts: vec![], ttl_s };
         for ok in [1, 3600, PIN_TTL_MAX_S] {
             put(ok).validate().unwrap();
         }
