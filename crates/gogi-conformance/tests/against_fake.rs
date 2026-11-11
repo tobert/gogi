@@ -19,6 +19,49 @@ fn the_fake_passes_every_check() {
 }
 
 #[test]
+fn the_fake_passes_each_check_of_context_records() {
+    let server = Server::start(Config::default()).unwrap();
+    let r = run(Opts { url: server.url(), restart: None, model: None }, false);
+    assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
+    for name in [
+        "a build names the record of its context",
+        "the context id is the content id of the record's text",
+        "identity names context_records, at least 1",
+        "a record reads back as its context",
+        "a record reads back with its id and no parent",
+        "an unknown record is a 404",
+        "a record id that is not whole names id",
+        "a parent alone is the same context",
+        "a build from a parent starts from the parent's snapshots",
+        "a context sent with a parent and sent whole is one context",
+        "a member beside parent replaces the parent's",
+        "a dry run names no record",
+        "a dry run holds no record",
+        "a parent the server does not hold names context.parent and quotes the id",
+        "a parent that is not a whole content id is a 400 naming context.parent",
+        "a parent that is not text is a 400 naming context.parent",
+        "a member that does not stand beside parent is a 400 naming it",
+        "messages beside parent that are not a list are a 400 naming context.messages",
+        "a bad new message names its place in the whole context",
+        "a decision names the parent under contexts",
+        "a decision from a parent gives the numbers of the whole context",
+        "a decision holds the record of its context",
+        "a pin reports each record with whether it is held",
+        "a pin list names the held records only",
+        "a pin of a record id that is not whole names contexts",
+        "a generation names the record of its context and its reply",
+        "the reply in a record is the reply as a client sends it back, marked",
+        "the record of a reply builds to the head of the generation",
+        "a generation from a parent is the generation from the whole context",
+        "a cut reply is an open message in its record",
+        "a continuation from a record starts with the cut reply",
+        "a build reads the record of a cut reply closed",
+    ] {
+        assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name} did not pass: {:?}", r.checks.iter().filter(|c| c.name == name).map(|c| (&c.status, &c.detail)).collect::<Vec<_>>());
+    }
+}
+
+#[test]
 fn the_fake_passes_the_restart_checks_when_it_keeps_its_state() {
     let dir = std::env::temp_dir().join(format!("gogi-conf-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -29,6 +72,7 @@ fn the_fake_passes_the_restart_checks_when_it_keeps_its_state() {
     assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
     assert!(r.checks.iter().any(|c| c.name == "a pinned snapshot survives a restart" && c.status == Status::Ok));
     assert!(r.checks.iter().any(|c| c.name == "a kept object survives a restart bit for bit" && c.status == Status::Ok));
+    assert!(r.checks.iter().any(|c| c.name == "a context record survives a restart" && c.status == Status::Ok));
     let _ = std::fs::remove_dir_all(dir);
 }
 

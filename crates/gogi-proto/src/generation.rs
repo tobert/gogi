@@ -363,6 +363,10 @@ pub struct GenerationDone {
     /// The snapshot after the reply when the server holds it, else `null`.
     #[serde(deserialize_with = "required_nullable")]
     pub head: Option<SnapshotId>,
+    /// The record of the context with the reply after it: the `parent` of the next request.
+    /// Absent from a server that holds no records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::ids::ContextId>,
     /// The snapshots of the context with the reply appended.
     pub snapshots: Vec<SnapshotInfo>,
     /// Absent when the server does not report them.

@@ -70,6 +70,11 @@ impl Suite {
         if let Some(g) = self.expect("restart: spec get succeeds", "GET", &format!("/council/v2/specs/{}", spec_id), None, 200) {
             self.r.check("a held spec survives a restart", g["spec"] == spec && Some(g["spec_id"].as_str().unwrap_or("")) == spec_id_of(&spec).ok().as_deref(), &g);
         }
+        if let Some(record) = b["context"].as_str()
+            && let Some(g) = self.expect("restart: record get succeeds", "GET", &format!("/council/v2/contexts/{}", record), None, 200)
+        {
+            self.r.check("a context record survives a restart", g["id"] == b["context"] && g["context"]["messages"] == ctx["messages"], &g);
+        }
         if pinned {
             if let Some(p) = self.expect("restart: pins list succeeds", "GET", &format!("/council/v2/pins/{}", owner), None, 200) {
                 let ids: Vec<&str> = p["snapshots"].as_array().map(|a| a.iter().filter_map(|e| e.as_str().or_else(|| e["id"].as_str())).collect()).unwrap_or_default();

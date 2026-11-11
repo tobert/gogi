@@ -69,6 +69,8 @@ pub struct Config {
     /// The longest context a decision reads.
     pub decision_context_tokens: usize,
     pub pin_bytes: u64,
+    /// The most context records the fake holds.
+    pub context_records: usize,
     /// Past this many held snapshots, the oldest unpinned snapshots are evicted first.
     pub max_snapshots: usize,
     /// Hold a cut reply's head sealed: a build that starts from it reads a rounded model state, as
@@ -91,7 +93,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         let toy = FakeModel { aliases: vec!["toy".into()], ..FakeModel::ready("gogi-toy-1", 0) };
-        Config { addr: "127.0.0.1:0".into(), models: vec![toy], embed_tokens: 512, state_dir: None, context_tokens: 4096, decision_context_tokens: 3072, pin_bytes: 1 << 20, max_snapshots: 10_000, seal_cut_heads: false, object_bytes: 1 << 20, keep_bytes: 8 << 20, media_inputs: vec!["image/*".into(), "audio/*".into()], media_outputs: vec!["application/x-gogi-toy".into()] }
+        Config { addr: "127.0.0.1:0".into(), models: vec![toy], embed_tokens: 512, state_dir: None, context_tokens: 4096, decision_context_tokens: 3072, pin_bytes: 1 << 20, context_records: 10_000, max_snapshots: 10_000, seal_cut_heads: false, object_bytes: 1 << 20, keep_bytes: 8 << 20, media_inputs: vec!["image/*".into(), "audio/*".into()], media_outputs: vec!["application/x-gogi-toy".into()] }
     }
 }
 
@@ -109,6 +111,8 @@ pub struct Snap {
 
 pub struct Pins {
     pub snapshots: Vec<String>,
+    /// The pinned context records.
+    pub contexts: Vec<String>,
     /// Unix seconds.
     pub expires: u64,
 }
@@ -124,6 +128,8 @@ pub struct Store {
     pub snaps: HashMap<String, Snap>,
     pub pins: BTreeMap<String, Pins>,
     pub specs: indexmap::IndexMap<String, Value>,
+    /// Context id to its context, the least recently named first.
+    pub records: indexmap::IndexMap<String, gogi_proto::Context>,
     /// Object id to its media type and bytes. The fake never evicts an object.
     pub objects: HashMap<String, (String, Vec<u8>)>,
     pub keeps: BTreeMap<String, Keeps>,
@@ -161,7 +167,7 @@ pub fn snapshot_id(model: &FakeModel, control: &str, tokens: &[u32], counts: &[u
 
 impl Store {
     pub fn new(cfg: Config) -> Result<Store, String> {
-        let mut s = Store { cfg, snaps: HashMap::new(), pins: BTreeMap::new(), specs: Default::default(), objects: HashMap::new(), keeps: BTreeMap::new(), pending: HashMap::new(), skew: 0, next_born: 0 };
+        let mut s = Store { cfg, snaps: HashMap::new(), pins: BTreeMap::new(), specs: Default::default(), records: Default::default(), objects: HashMap::new(), keeps: BTreeMap::new(), pending: HashMap::new(), skew: 0, next_born: 0 };
         s.load()?;
         Ok(s)
     }
@@ -188,6 +194,29 @@ impl Store {
         if self.pins.len() + self.keeps.len() != before {
             self.save();
         }
+    }
+
+    /// Holds the record of a context and gives its id. Past `context_records`, the records that
+    /// no pin keeps go, the least recently named first.
+    pub fn hold_record(&mut self, context: &gogi_proto::Context) -> String {
+        let id = gogi_proto::context_id(context).to_string();
+        self.records.shift_remove(&id);
+        self.records.insert(id.clone(), context.clone());
+        let pinned: BTreeSet<&String> = self.pins.values().flat_map(|p| p.contexts.iter()).collect();
+        let over = self.records.len().saturating_sub(self.cfg.context_records);
+        let drop: Vec<String> = self.records.keys().filter(|k| **k != id && !pinned.contains(k)).take(over).cloned().collect();
+        for k in drop {
+            self.records.shift_remove(&k);
+        }
+        id
+    }
+
+    /// The context of a held record. A record that a request names becomes the most recently
+    /// named.
+    pub fn record(&mut self, id: &str) -> Option<gogi_proto::Context> {
+        let context = self.records.shift_remove(id)?;
+        self.records.insert(id.to_string(), context.clone());
+        Some(context)
     }
 
     pub fn has(&self, id: &str) -> bool {
@@ -277,11 +306,11 @@ impl Store {
         let kept = self.kept();
         let snaps: serde_json::Map<String, Value> =
             kept.iter().filter_map(|id| self.snaps.get(id).map(|s| (id.clone(), json!({"model": s.model, "control": s.control, "tokens": *s.tokens, "parent": s.parent, "sealed": s.sealed})))).collect();
-        let pins: serde_json::Map<String, Value> = self.pins.iter().map(|(o, p)| (o.clone(), json!({"snapshots": p.snapshots, "expires": p.expires}))).collect();
+        let pins: serde_json::Map<String, Value> = self.pins.iter().map(|(o, p)| (o.clone(), json!({"snapshots": p.snapshots, "contexts": p.contexts, "expires": p.expires}))).collect();
         let keeps: serde_json::Map<String, Value> = self.keeps.iter().map(|(o, k)| (o.clone(), json!({"objects": k.objects, "expires": k.expires}))).collect();
         let kept: BTreeSet<&String> = self.keeps.values().flat_map(|k| k.objects.iter()).collect();
         let objects: serde_json::Map<String, Value> = kept.iter().filter_map(|id| self.objects.get(*id).map(|(mime, _)| ((*id).clone(), json!(mime)))).collect();
-        let v = json!({"specs": self.specs, "pins": pins, "snapshots": snaps, "keeps": keeps, "objects": objects});
+        let v = json!({"specs": self.specs, "records": self.records, "pins": pins, "snapshots": snaps, "keeps": keeps, "objects": objects});
         let objects_dir = dir.join("objects");
         let _ = std::fs::create_dir_all(&objects_dir);
         for id in &kept {
@@ -314,13 +343,22 @@ impl Store {
         for (id, spec) in v["specs"].as_object().into_iter().flatten() {
             self.specs.insert(id.clone(), spec.clone());
         }
+        for (id, context) in v["records"].as_object().into_iter().flatten() {
+            match serde_json::from_value::<gogi_proto::Context>(context.clone()) {
+                Ok(c) if gogi_proto::context_id(&c).as_str() == id => {
+                    self.records.insert(id.clone(), c);
+                }
+                _ => eprintln!("gogi-fake: the record {} does not read as its context; the record is dropped", id),
+            }
+        }
         // Pins first, so that holding the snapshots below never evicts a pinned one.
         let now = self.now();
         for (o, p) in v["pins"].as_object().into_iter().flatten() {
             let expires = p["expires"].as_u64().unwrap_or(0);
             if expires > now {
                 let snapshots = p["snapshots"].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(String::from)).collect();
-                self.pins.insert(o.clone(), Pins { snapshots, expires });
+                let contexts = p["contexts"].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(String::from)).collect();
+                self.pins.insert(o.clone(), Pins { snapshots, contexts, expires });
             }
         }
         // Parents first: a parent has fewer tokens than the snapshots built on it.

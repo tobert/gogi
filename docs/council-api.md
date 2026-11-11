@@ -432,11 +432,12 @@ GET /council/v2/contexts/blake3:c4e2…
   context sent with `parent` have the same id, the same rendering, the same
   snapshots, and the same numbers. The server renders the whole context
   either way, and it starts from the longest snapshot it holds, as always.
-- **Every response that reads a context names its record in `context`.**
-  For a build, it is the context of the request. A decision, a raw read,
-  and a control-vector request name one for each context, in request order,
-  in `contexts`. For a generation, it is the context of the request with
-  the reply after it (see "The reply in a record").
+- **A build and a generation name a record in `context`.** For a build, it
+  is the context of the request. For a generation, it is the context of the
+  request with the reply after it (see "The reply in a record"). A
+  decision, a raw read, and a control-vector request hold the records of
+  their contexts and name none: a client that wants an id builds the
+  context first. A `dry_run` build has no `context`.
 - **A parent the server does not hold is a `404`** with `error.type`
   `not_found`, naming `context.parent`, or `contexts[i].parent` in a
   request with `contexts`. The message quotes the id. The client sends the
@@ -445,10 +446,13 @@ GET /council/v2/contexts/blake3:c4e2…
   cannot write a context again pins its record.
 - **A parent that is not a whole content id is a `400`** naming the same
   member (see Content ids).
-- **A parent that ends with an open message closes it.** A request that
-  adds messages after it, or that names it in a decision or a raw read,
-  reads the message without its `continue`. A generation that names it with
-  no new messages continues it.
+- **A parent that ends with an open message closes it.** A generation
+  that names it with no new messages continues it. Any other request reads
+  the message without its `continue`: a request that adds messages after
+  it, and a build, a decision, a raw read, or a control-vector request.
+- **Only these members stand beside `parent`:** `thinking`, `tools`,
+  `queue`, `control`, and `messages`. Any other member is a `400` naming
+  it.
 - **The checks of a context are the checks of the whole context.** A
   message of the request is checked as message `n + i`, where the parent
   has `n` messages, and an error names it so, such as
@@ -469,16 +473,19 @@ GET /council/v2/contexts/blake3:c4e2…
 
 - **A generation's `context` ends with the reply as an assistant message:**
   the `content`, `reasoning`, and `tool_calls` of `done`, each when it is
-  not empty, as a client would send the reply back. A reply with `outputs`
+  not empty, as a client would send the reply back. The text of a call that
+  did not parse follows the content, as the model wrote it, as a client
+  sends such a call back. A reply to an open message takes the place
+  of that message, because `done` is the whole message. A reply with `outputs`
   has an array `content`: its text part, when the text is not empty, then
   one object part for each output, in order. An output that is still
   pending is sealed before the record is held, so the stream's `done` may
   wait for it.
-- **The reply's message carries `snap: true`.** The server need not hold a
-  snapshot there when the generation ends. The next request that reads the
-  record passes the boundary and holds the snapshot then, when the
-  rendering keeps it. Thus a client that only names records still gets a
-  boundary at each of its replies.
+- **The reply's message carries `snap: true`.** A server that holds the
+  snapshot after the reply names it in `head`. A server that does not hold
+  it then holds it when the next request that reads the record passes the
+  boundary, when the rendering keeps it. Thus a client that only names
+  records still gets a boundary at each of its replies.
 - **A reply that ends with `max_tokens` is an open message in the record,**
   with `continue: true`, when its `phase` is `content` or `reasoning`: with
   a `content` member for `content`, and without one for `reasoning`. A
@@ -1649,11 +1656,6 @@ A server serves the model-specific rest under its own prefix and lists it in
   its whole context, also when it names a `parent`. On mkviolet, a
   32,480-token context renders, checks, and returns a `dry_run` response in
   79 ms; a server could cache renderings by record if that grows.
-- **A snapshot at the end of a reply.** A generation ends with the model
-  state of its reply, but a server holds no snapshot there unless the reply
-  was cut. The next request feeds the reply again to pass its boundary. A
-  server could hold the state it already has, when the closed rendering of
-  the reply begins with the sampled tokens.
 - **Records across machines.** Two servers that write a record's text the
   same way give a context the same id, so a server in a cluster could read
   a record from a peer on a miss, as it can an object.

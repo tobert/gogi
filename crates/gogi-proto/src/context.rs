@@ -276,6 +276,10 @@ pub struct ContextBuilt {
     #[serde(deserialize_with = "required_nullable")]
     pub from: Option<SnapshotId>,
     pub dry_run: bool,
+    /// The record of the context: the `parent` of a later request. Absent for a `dry_run`, which
+    /// holds no record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::ids::ContextId>,
     pub snapshots: Vec<SnapshotInfo>,
 }
 
