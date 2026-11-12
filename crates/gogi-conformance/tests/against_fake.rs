@@ -340,3 +340,32 @@ fn the_fake_passes_as_a_model_without_control_vectors() {
     }
     assert!(r.checks.iter().any(|c| c.name == "control vectors" && c.status == Status::Skip));
 }
+
+const PLAIN: [&str; 3] = ["a reply to an unmarked message holds a head", "the next turn by `parent` feeds only its new message", "the next turn sent whole feeds only its new message"];
+
+#[test]
+fn the_fake_passes_each_check_of_a_plain_turn() {
+    let server = Server::start(Config::default()).unwrap();
+    let r = run(Opts { url: server.url(), restart: None, model: None }, false);
+    assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
+    for name in PLAIN {
+        assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name} did not pass: {:?}", r.checks.iter().filter(|c| c.name == name).map(|c| (&c.status, &c.detail)).collect::<Vec<_>>());
+    }
+}
+
+#[test]
+fn a_server_that_loses_the_head_of_an_unmarked_reply_fails_the_plain_turn_checks() {
+    let server = Server::start(Config { lose_plain_heads: true, ..Config::default() }).unwrap();
+    let r = run(Opts { url: server.url(), restart: None, model: None }, false);
+    let failed = failures(&r);
+    for name in PLAIN {
+        assert!(failed.iter().any(|f| f.starts_with(name)), "{name} did not fail: {failed:#?}");
+    }
+    // The message says what the server did and what the contract asks.
+    let head = failed.iter().find(|f| f.starts_with(PLAIN[0])).unwrap();
+    assert!(head.contains("returned head null") && head.contains("no snap") && head.contains("the contract asks for a snapshot id"), "{head}");
+    let next = failed.iter().find(|f| f.starts_with(PLAIN[1])).unwrap();
+    assert!(next.contains("fed the first reply") && next.contains("the contract asks it to keep at least"), "{next}");
+    // Nothing else fails: the fault is one fault.
+    assert_eq!(failed.len(), 3, "{failed:#?}");
+}

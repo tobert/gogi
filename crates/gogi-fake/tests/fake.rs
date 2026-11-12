@@ -1132,3 +1132,40 @@ fn records_survive_a_restart() {
     assert_eq!((code, b["context"].clone()), (200, json!(a)));
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// ---- the head of a plain turn
+
+fn one_unmarked(text: &str) -> Vec<Value> {
+    vec![json!({"role": "user", "content": text})]
+}
+
+/// A plain turn with no message marked, then a second turn by `parent` with one unmarked message.
+fn plain_turns(s: &Server, text: &str) -> (GenerationDone, GenerationDone) {
+    let first = generate(s, json!({"thinking": false, "messages": one_unmarked(text)}), 300);
+    let second = generate(s, json!({"thinking": false, "parent": first.context.as_ref().unwrap().to_string(), "messages": [{"role": "user", "content": "And again?"}]}), 300);
+    (first, second)
+}
+
+#[test]
+fn a_reply_to_an_unmarked_message_holds_a_head_and_the_next_turn_feeds_only_its_new_message() {
+    let s = Server::start(Config::default()).unwrap();
+    let (first, second) = plain_turns(&s, "Say something plain.");
+    assert!(first.head.is_some(), "{first:?}");
+    assert!(first.usage.completion > 8, "the test needs a reply longer than the slack: {first:?}");
+    assert!(second.usage.kept + 8 >= first.usage.prompt + first.usage.completion, "{:?} {:?}", first.usage, second.usage);
+}
+
+#[test]
+fn a_fake_that_loses_the_head_of_an_unmarked_reply_feeds_the_reply_again() {
+    let s = Server::start(Config { lose_plain_heads: true, ..Config::default() }).unwrap();
+    let (first, second) = plain_turns(&s, "Say something plain.");
+    assert_eq!(first.head, None, "{first:?}");
+    assert!(second.usage.kept + 8 < first.usage.prompt + first.usage.completion, "{:?} {:?}", first.usage, second.usage);
+}
+
+#[test]
+fn a_fake_that_loses_the_head_of_an_unmarked_reply_keeps_the_head_of_a_marked_one() {
+    let s = Server::start(Config { lose_plain_heads: true, ..Config::default() }).unwrap();
+    let d = generate(&s, json!({"thinking": false, "messages": [{"role": "user", "content": "Marked.", "snap": true}]}), 300);
+    assert!(d.head.is_some(), "{d:?}");
+}

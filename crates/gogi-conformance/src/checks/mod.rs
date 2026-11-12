@@ -12,6 +12,7 @@ mod models;
 mod objects;
 mod outputs;
 mod pins;
+mod plain;
 mod reads;
 mod records;
 mod replies;

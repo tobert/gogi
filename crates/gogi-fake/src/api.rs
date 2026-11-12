@@ -1112,6 +1112,9 @@ fn generations(store: &mut Store, body: &[u8]) -> Resp {
     } else if unparsed {
         // A call that does not parse goes back as text, so the server cannot know its rendering.
         (Value::Null, b.infos(store))
+    } else if store.cfg.lose_plain_heads && !c.messages.last().is_some_and(|m| m.snap) {
+        // The fault of a server that loses the boundary at the end of an unmarked message.
+        (Value::Null, b.infos(store))
     } else {
         messages.push(reply);
         let held = build(store, &m, &Context { messages, ..c.clone() }, false);

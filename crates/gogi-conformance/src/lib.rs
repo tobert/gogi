@@ -78,6 +78,7 @@ pub fn run(mut opts: Opts, print: bool) -> Report {
         s.continuations();
         s.boundaries();
         s.records();
+        s.plain_turns();
         s.replies();
         s.pins();
         s.specs();

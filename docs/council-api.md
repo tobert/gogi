@@ -909,6 +909,17 @@ POST /council/v2/generations
   and what follows, starts there. Otherwise `head` is `null` and the next
   request starts from the last boundary. A reply that ends with
   `max_tokens` has the head of its open rendering (see Continuations).
+- **A reply to a plain chat has a head** (Proposed, Claude Sonnet 5.5,
+  2026-11-12). A generation of one reply that ends with `end_turn`, with
+  no `reasoning`, no tool call, and no white space at the edge of its
+  `content`, returns a `head` that is a string, whether or not the client
+  marked any message with `snap`. The next request, by `parent` or with the
+  context whole, that adds one user message then keeps at least the
+  `prompt` and the `completion` of this response, less 8 tokens, so it
+  feeds the new message and at most 8 more tokens. Any other reply may
+  have a `null` head. The reason: a client that marks no boundary is the
+  usual client, and a server that loses the head feeds each reply again
+  without any error to show it.
 - **`stats`** in `done`, when a server reports them, describe how the
   sampled tokens looked to the model: for the reply's `reasoning` and
   `content`, and for each tool call as its own `stats`,
