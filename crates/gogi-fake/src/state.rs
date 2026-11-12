@@ -76,6 +76,9 @@ pub struct Config {
     /// Hold a cut reply's head sealed: a build that starts from it reads a rounded model state, as
     /// a server that rounds model state at a boundary does.
     pub seal_cut_heads: bool,
+    /// Hold no head after a reply whose last message of the context carries no `snap`, as a server
+    /// does that loses the boundary at the end of an unmarked message. It breaks the contract.
+    pub lose_plain_heads: bool,
     /// The largest object, in bytes.
     pub object_bytes: u64,
     /// The most object bytes all keeps together hold.
@@ -93,7 +96,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         let toy = FakeModel { aliases: vec!["toy".into()], ..FakeModel::ready("gogi-toy-1", 0) };
-        Config { addr: "127.0.0.1:0".into(), models: vec![toy], embed_tokens: 512, state_dir: None, context_tokens: 4096, decision_context_tokens: 3072, pin_bytes: 1 << 20, context_records: 10_000, max_snapshots: 10_000, seal_cut_heads: false, object_bytes: 1 << 20, keep_bytes: 8 << 20, media_inputs: vec!["image/*".into(), "audio/*".into()], media_outputs: vec!["application/x-gogi-toy".into()] }
+        Config { addr: "127.0.0.1:0".into(), models: vec![toy], embed_tokens: 512, state_dir: None, context_tokens: 4096, decision_context_tokens: 3072, pin_bytes: 1 << 20, context_records: 10_000, max_snapshots: 10_000, seal_cut_heads: false, lose_plain_heads: false, object_bytes: 1 << 20, keep_bytes: 8 << 20, media_inputs: vec!["image/*".into(), "audio/*".into()], media_outputs: vec!["application/x-gogi-toy".into()] }
     }
 }
 

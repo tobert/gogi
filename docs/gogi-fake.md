@@ -199,6 +199,10 @@ function of that hash, between -6 and 6, so the same prefix gives the same bits.
   starts with the open text and replays from the same head, but can differ from the uncut reply.
   The fake's simplification: only a build whose `from` is the sealed snapshot reads it rounded,
   and the sealed head keeps the id of the same tokens unsealed. Off by default.
+- With `Config::lose_plain_heads` (`--lose-plain-heads`), the fake returns `head: null` for a reply
+  to a context whose last message has no `snap`. This breaks the contract ("A reply to a plain chat
+  has a head"). It exists so that a test can show that the suite fails a server with this fault.
+  Off by default.
 - Pins keep a snapshot and its parents. `pin_bytes` caps the bytes they keep together.
   `max_snapshots` drops the oldest unpinned snapshots first.
 - The fake holds a record of each context that a request reads, and a request names one as its
