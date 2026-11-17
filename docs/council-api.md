@@ -739,8 +739,11 @@ show: it is not a decision.
   `snapshot` it read after.
 - **The case goes where the context expects it.** For a queue context, it
   is the result of the last call. For any other context, it is a user
-  message of its own after the spec, under the spec's `input_label`. Either
-  way, how a spec is rendered is part of `template`.
+  message of its own, under the spec's `input_label`. A server puts it
+  before or after the text of the spec: a server that puts it first can
+  hold the state after the case, and then read each question, or another
+  spec, from that state. Either way, how a spec is rendered is part of
+  `template`.
 - **The client writes the queue tool's `answers` schema.** The tools render
   at the top of the context, before any spec, so the server cannot add them
   at decision time. Each asked question is a property of
