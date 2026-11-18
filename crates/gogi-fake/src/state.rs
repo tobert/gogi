@@ -33,17 +33,26 @@ pub struct FakeModel {
     /// It declares `control_vectors`: its contexts take `control`, and it makes control vectors
     /// (`gogi_toy::control`).
     pub controls: bool,
+    /// It declares `layer_loops`: its contexts take `loop` over the toy's layers
+    /// (`State::looped`).
+    pub loops: bool,
 }
 
 impl FakeModel {
     pub fn ready(name: &str, seed: u64) -> FakeModel {
-        FakeModel { name: name.into(), aliases: vec![], seed, status: ModelStatus::Ready, embeds: false, thinks: true, controls: true }
+        FakeModel { name: name.into(), aliases: vec![], seed, status: ModelStatus::Ready, embeds: false, thinks: true, controls: true, loops: true }
     }
 
     /// A ready served model that does not declare `control_vectors`: a context with a `control` is
     /// a `400` naming `control`, and `POST /council/v2/control-vectors` a `400` naming `model`.
     pub fn without_control_vectors(name: &str, seed: u64) -> FakeModel {
         FakeModel { controls: false, ..FakeModel::ready(name, seed) }
+    }
+
+    /// A ready served model that does not declare `layer_loops`: a context with a `loop` is a `400`
+    /// naming `loop`.
+    pub fn without_layer_loops(name: &str, seed: u64) -> FakeModel {
+        FakeModel { loops: false, ..FakeModel::ready(name, seed) }
     }
 
     /// A ready served model that does not declare `thinking`: a context with `thinking: true` is a
@@ -54,7 +63,7 @@ impl FakeModel {
 
     /// A ready served model that only embeds.
     pub fn embedding(name: &str, seed: u64) -> FakeModel {
-        FakeModel { embeds: true, thinks: false, controls: false, ..FakeModel::ready(name, seed) }
+        FakeModel { embeds: true, thinks: false, controls: false, loops: false, ..FakeModel::ready(name, seed) }
     }
 }
 

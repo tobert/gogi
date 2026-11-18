@@ -39,6 +39,11 @@ refuses a non-empty `control` with a `400` naming `control` (`contexts[i].contro
 or a raw read), and `POST /council/v2/control-vectors` with a `400` naming `model`. A served
 model that only embeds does not declare it.
 
+A served model declares capability `layer_loops` unless it is built with
+`FakeModel::without_layer_loops`, or with `"layer_loops": false` in Python. Such a model refuses a
+`loop` with a `400` naming `loop` (`contexts[i].loop` in a decision or a raw read). A served
+model that only embeds does not declare it.
+
 ## Tokens
 
 A token is one of the 256 byte values, or one of 16 template markers (ids 256 to 271).
@@ -135,6 +140,19 @@ has 4 layers and a residual of width 8. Its `limits.control_vector_contexts` is 
   written as float32. The vector has all 4 layers. The fake holds it as an object of
   `application/x-safetensors`, as it holds an output, and never evicts it.
 - `usage.media.read` counts each control vector a context names, once.
+
+## Layer loops
+
+The toy runs a `loop` over its 4 layers. Its `layer_loops` is `{"layers": 4, "bounds": [0, 1, 2,
+3, 4], "count": 4, "extra_runs": 6}`.
+
+- A loop with `count` above 1 reads every number at another model state: a hash of the state,
+  `start`, `end`, and `count` (`gogi_toy::State::looped`). Thus each loop is another model, and
+  `count` 1 gives the plain numbers bit for bit.
+- A control list under a loop applies to the residuals of the looped state.
+- A snapshot id hashes the loop as well as the control list, so a build starts only from a
+  snapshot of an equal loop. `count` 1 has its own snapshots. A context with no loop hashes no
+  loop, so its ids are the same as before loops.
 
 ## Reply parser
 
