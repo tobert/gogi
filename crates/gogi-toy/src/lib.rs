@@ -337,6 +337,15 @@ impl State {
         State(mix(self.0 ^ mix(u64::from(token) + 1)))
     }
 
+    /// The state under a layer loop that runs layers `start..end` `count` times: another state for
+    /// each loop with `count` above 1, and the same state for `count` 1, which is the plain model.
+    pub fn looped(self, start: u32, end: u32, count: u32) -> Self {
+        if count <= 1 {
+            return self;
+        }
+        State(mix(self.0 ^ mix(0x100F_0000_0000_0000 ^ (u64::from(start) << 40) ^ (u64::from(end) << 20) ^ u64::from(count))))
+    }
+
     /// The state a server holds when it rounds model state at a boundary, such as mk's seal: another
     /// state, the same each time.
     pub fn rounded(self) -> Self {

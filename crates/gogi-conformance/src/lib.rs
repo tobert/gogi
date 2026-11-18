@@ -90,6 +90,7 @@ pub fn run(mut opts: Opts, print: bool) -> Report {
         s.reads();
         s.embeddings();
         s.control();
+        s.layer_loops();
         s.ride();
         s.replay();
         s.tracing();

@@ -369,3 +369,33 @@ fn a_server_that_loses_the_head_of_an_unmarked_reply_fails_the_plain_turn_checks
     // Nothing else fails: the fault is one fault.
     assert_eq!(failed.len(), 3, "{failed:#?}");
 }
+
+#[test]
+fn the_fake_passes_the_checks_of_layer_loops() {
+    let server = Server::start(Config::default()).unwrap();
+    let r = run(Opts { url: server.url(), restart: None, model: None }, false);
+    assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
+    for name in [
+        "a loop with count 1 gives the numbers of no loop",
+        "a loop with count 1 still has model state of its own",
+        "a loop with count 2 never reuses the plain model state",
+        "an equal loop shares its model state",
+        "loop: null beside parent drops the parent's loop",
+        "a build with a count of 5 is a 400 naming loop.count",
+        "a build with more extra runs than extra_runs is a 400 naming loop",
+        "raw reads with a count of 0 are a 400 naming contexts[1].loop.count",
+        "a control vector request with a looped context is a 400 naming positive[0].loop",
+    ] {
+        assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name}: {:?}", r.checks.iter().find(|c| c.name == name));
+    }
+}
+
+#[test]
+fn the_fake_passes_as_a_model_without_layer_loops() {
+    let server = Server::start(Config { models: vec![FakeModel::ready("gogi-toy-1", 0), FakeModel::without_layer_loops("gogi-toy-plain", 3)], ..Config::default() }).unwrap();
+    let r = run(Opts { url: server.url(), restart: None, model: Some("gogi-toy-plain".into()) }, false);
+    assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
+    let name = "a build with a loop to a model without layer_loops is a 400 naming loop";
+    assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name}: {:?}", r.checks.iter().find(|c| c.name == name));
+    assert!(r.checks.iter().any(|c| c.name == "layer loops" && c.status == Status::Skip));
+}

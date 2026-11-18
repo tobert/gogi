@@ -392,6 +392,7 @@ mod tests {
                 "verdict": {"type": "string", "enum": ["A", "B"]}}}}}))],
             queue: Some("next".into()),
             control: vec![],
+            layer_loop: None,
             messages: vec![Message::user("u"), Message { tool_calls: vec![call], ..Message::assistant("") }],
         }
     }

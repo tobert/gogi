@@ -1169,3 +1169,95 @@ fn a_fake_that_loses_the_head_of_an_unmarked_reply_keeps_the_head_of_a_marked_on
     let d = generate(&s, json!({"thinking": false, "messages": [{"role": "user", "content": "Marked.", "snap": true}]}), 300);
     assert!(d.head.is_some(), "{d:?}");
 }
+
+// ---- layer loops
+
+/// A served model that declares layer_loops, beside one that does not.
+fn looped_and_plain() -> Server {
+    Server::start(Config { models: vec![FakeModel { aliases: vec!["toy".into()], ..FakeModel::ready("gogi-toy-1", 0) }, FakeModel::without_layer_loops("gogi-toy-plain", 3)], ..Config::default() }).unwrap()
+}
+
+fn with_loop(member: Value) -> Value {
+    let mut c = with_control(json!([]));
+    c["loop"] = member;
+    c
+}
+
+fn span(start: u32, end: u32, count: u32) -> Value {
+    json!({"start": start, "end": end, "count": count})
+}
+
+#[test]
+fn a_model_declares_layer_loops_with_its_spans_unless_built_without() {
+    let s = looped_and_plain();
+    let (_, id) = call(&s, "GET", "/council/v2/identity", None);
+    let caps = |i: usize| id["models"][i]["capabilities"].as_array().unwrap().contains(&json!("layer_loops"));
+    assert!(caps(0) && !caps(1), "{id}");
+    assert_eq!(id["models"][0]["layer_loops"], json!({"layers": 4, "bounds": [0, 1, 2, 3, 4], "count": 4, "extra_runs": 6}));
+    assert!(id["models"][1].get("layer_loops").is_none());
+    let served: gogi_proto::identity::ServerIdentity = serde_json::from_value(id).unwrap();
+    assert_eq!(served.models[0].layer_loops.as_ref().map(|l| l.count), Some(4));
+}
+
+#[test]
+fn count_1_gives_the_plain_numbers_and_a_loop_changes_them() {
+    let s = looped_and_plain();
+    let plain = letters_after(&s, with_control(json!([])));
+    assert_eq!(letters_after(&s, with_loop(span(1, 3, 1))), plain);
+    let twice = letters_after(&s, with_loop(span(1, 3, 2)));
+    assert_ne!(twice, plain);
+    assert_ne!(letters_after(&s, with_loop(span(1, 3, 3))), twice, "each count is another model");
+    assert_ne!(letters_after(&s, with_loop(span(2, 4, 2))), twice, "each span is another model");
+    assert_eq!(letters_after(&s, with_loop(span(1, 3, 2))), twice, "the same loop gives the same numbers");
+    let reply = |member: Value| generate(&s, with_loop(member), 24).content;
+    assert_eq!(reply(span(1, 3, 1)), generate(&s, with_control(json!([])), 24).content, "a generation with count 1 writes the plain reply");
+}
+
+#[test]
+fn a_loop_has_model_state_of_its_own() {
+    let s = looped_and_plain();
+    let build = |c: Value| post(&s, "/council/v2/contexts", json!({"model": "toy", "context": c})).1;
+    let plain = build(with_control(json!([])));
+    let once = build(with_loop(span(1, 3, 1)));
+    assert_ne!(once["head"], plain["head"], "count 1 still has its own snapshots");
+    assert_eq!(once["from"], Value::Null, "{once}");
+    let again = build(with_loop(span(1, 3, 1)));
+    assert_eq!((&again["head"], again["usage"]["fed"].as_u64()), (&once["head"], Some(0)), "an equal loop shares its model state");
+    let other = build(with_loop(span(1, 3, 2)));
+    assert!(other["head"] != once["head"] && other["from"] == Value::Null, "{other}");
+    // A request by parent with another loop reads under that loop.
+    let by_parent = build(json!({"parent": other["context"], "loop": null}));
+    assert_eq!(by_parent["head"], plain["head"], "loop: null drops the parent's loop: {by_parent}");
+}
+
+#[test]
+fn each_loop_refusal_names_its_member() {
+    let s = looped_and_plain();
+    let spec = post(&s, "/council/v2/specs", json!({"name": "s", "instructions": "i", "input_label": "x", "questions": [{"id": "q", "type": "noul", "instructions": "yes?"}]})).1;
+    let bodies = |model: &str, c: Value| {
+        [
+            ("/council/v2/contexts", json!({"model": model, "context": c}), ""),
+            ("/council/v2/generations", json!({"model": model, "context": c, "max_tokens": 4}), ""),
+            ("/council/v2/reads", json!({"model": model, "contexts": [c], "suffixes": ["x"], "letters": ["A", "B"]}), "contexts[0]."),
+            ("/council/v2/decisions", json!({"model": model, "spec_id": spec["spec_id"], "case": "x", "contexts": [c]}), "contexts[0]."),
+        ]
+    };
+    for (member, model, param) in [
+        (json!({"start": 1, "end": 3}), "toy", "loop.count"),
+        (json!([1, 3, 2]), "toy", "loop"),
+        (span(1, 3, 2), "gogi-toy-plain", "loop"),
+        (span(3, 1, 2), "toy", "loop.end"),
+        (span(1, 5, 2), "toy", "loop.end"),
+        (span(1, 3, 5), "toy", "loop.count"),
+        (span(0, 4, 3), "toy", "loop"),
+    ] {
+        for (path, body, under) in bodies(model, with_loop(member.clone())) {
+            assert_eq!(refused_param(&s, path, body), json!(format!("{under}{param}")), "{path} {member}");
+        }
+    }
+    let (code, r) = post(&s, "/council/v2/generations", json!({"model": "toy", "contexts": [with_control(json!([])), with_loop(span(1, 3, 9))], "max_tokens": 4}));
+    assert_eq!((code, &r["error"]["param"]), (400, &json!("contexts[1].loop.count")), "{r}");
+    let (code, r) = post(&s, "/council/v2/generations", json!({"model": "toy", "contexts": [with_control(json!([])), with_loop(span(1, 3, 2))], "max_tokens": 4}));
+    assert_eq!(code, 200, "contexts with other loops: {r}");
+}
+

@@ -10,6 +10,7 @@ use gogi_proto::embeddings::{Embedding, EmbeddingsRequest, EmbeddingsResponse};
 use gogi_proto::error::{ErrorBody, ErrorType};
 use gogi_proto::generation::{GenerationRequest, OutputEvent, Phase as EventPhase, PreviewEvent, ProgressEvent, StreamEvent, TokenEvent};
 use gogi_proto::identity::{ModelStatus, ServerIdentity};
+use gogi_proto::layer_loop::Loop;
 use gogi_proto::math::{self, Row, WeightSpec};
 use gogi_proto::message::{Message, ToolCall};
 use gogi_proto::objects::{Named, ObjectRef, objects_of};
@@ -51,6 +52,12 @@ pub enum Resp {
 
 /// The most replies one generation writes.
 const REPLIES_PER_GENERATION: u64 = 8;
+
+/// The spans of the toy's layers that a fake served model runs more than once: a span starts and
+/// ends at any layer edge, runs up to 4 times, and adds at most 6 runs.
+fn layer_loops() -> serde_json::Value {
+    json!({"layers": LAYERS, "bounds": (0..=LAYERS).collect::<Vec<_>>(), "count": 4, "extra_runs": 6})
+}
 
 fn err(status: u16, kind: &str, message: impl Into<String>, param: Option<&str>) -> Resp {
     let mut e = json!({"type": kind, "message": message.into()});
@@ -194,6 +201,10 @@ pub fn identity(store: &Store) -> Value {
                 v["capabilities"].as_array_mut().expect("an array").push(json!("control_vectors"));
                 v["limits"]["control_vector_contexts"] = json!(CONTROL_CONTEXTS);
             }
+            if m.loops {
+                v["capabilities"].as_array_mut().expect("an array").push(json!("layer_loops"));
+                v["layer_loops"] = layer_loops();
+            }
             if !store.cfg.media_inputs.is_empty() || !store.cfg.media_outputs.is_empty() {
                 v["media"] = json!({"inputs": store.cfg.media_inputs, "outputs": store.cfg.media_outputs});
             }
@@ -275,13 +286,22 @@ fn check_thinking(store: &Store, m: &FakeModel, contexts: &[&Context], several: 
     Ok(())
 }
 
-/// A context's control list as the toy applies it: each item's op, strength, and vector.
-type Steer = Vec<toy_control::LayeredItem>;
+/// How the toy reads a context: its control list, each item's op, strength, and vector, and its
+/// layer loop.
+#[derive(Default)]
+struct Steer {
+    items: Vec<toy_control::LayeredItem>,
+    layer_loop: Option<Loop>,
+}
 
-/// The key of a context's control list, which its snapshot ids hash: empty for the plain model.
-/// Equal lists have equal keys.
+/// The key of a context's control list and loop, which its snapshot ids hash: empty for the plain
+/// model. Equal lists with equal loops have equal keys.
 fn control_key(c: &Context) -> String {
-    c.control.iter().map(|i| format!("{} {:?} {:016x} {};", i.vector, i.op, i.strength.to_bits(), i.layers.iter().flatten().map(|(l, m)| format!("{}:{:016x}", l, m.to_bits())).collect::<Vec<_>>().join(","))).collect()
+    let items: String = c.control.iter().map(|i| format!("{} {:?} {:016x} {};", i.vector, i.op, i.strength.to_bits(), i.layers.iter().flatten().map(|(l, m)| format!("{}:{:016x}", l, m.to_bits())).collect::<Vec<_>>().join(","))).collect();
+    match c.layer_loop {
+        None => items,
+        Some(l) => format!("{}loop {} {} {};", items, l.start, l.end, l.count),
+    }
 }
 
 /// Reads each context's control list, checking it in the contract's order: `control_vectors` on
@@ -295,10 +315,13 @@ fn steer_of(store: &Store, m: &FakeModel, contexts: &[&Context], several: bool) 
         if let Err(e) = c.check_control(&served) {
             return Err(bad_param(&format!("{}control", under(k)), e.message));
         }
+        if let Err(e) = c.check_loop(&served) {
+            return Err(bad_param(&format!("{}{}", under(k), e.param.as_deref().unwrap_or("loop")), e.message));
+        }
     }
     let mut out = Vec::new();
     for (k, c) in contexts.iter().enumerate() {
-        let mut steer = Vec::new();
+        let mut steer = Steer { items: Vec::new(), layer_loop: c.layer_loop };
         for (i, item) in c.control.iter().enumerate() {
             let at = format!("{}control[{}].vector", under(k), i);
             let id = item.vector.as_str();
@@ -311,7 +334,7 @@ fn steer_of(store: &Store, m: &FakeModel, contexts: &[&Context], several: bool) 
             };
             let v = ControlVector::parse(bytes).map_err(|e| bad_param(&at, format!("nothing ran: {} names {}, which is not a control vector: {}", at, id, e)))?;
             v.check_fits(&weight_hash(m), LAYERS, WIDTH).map_err(|e| bad_param(&at, format!("nothing ran: {} names {}, which does not fit {}: {}", at, id, m.name, e)))?;
-            steer.push((item.op, item.strength, item.layers.clone(), v));
+            steer.items.push((item.op, item.strength, item.layers.clone(), v));
         }
         out.push(steer);
     }
@@ -323,9 +346,10 @@ fn vectors_in(contexts: &[&Context]) -> Vec<Named> {
     contexts.iter().flat_map(|c| c.control.iter().map(|i| Named { at: String::new(), object: ObjectRef { id: i.vector.to_string(), mime: MEDIA_TYPE.into() }, assistant: false })).collect()
 }
 
-/// The logits at model state `st` under a control list.
+/// The logits at model state `st` under a control list and a layer loop.
 fn logits_of(st: State, steer: &Steer) -> [f64; VOCAB] {
-    toy_control::logits_by_layer(st, steer)
+    let st = steer.layer_loop.map_or(st, |l| st.looped(l.start, l.end, l.count));
+    toy_control::logits_by_layer(st, &steer.items)
 }
 
 /// The objects of each context of a request with several, named `contexts[k].messages[i]...`.
@@ -1247,7 +1271,7 @@ fn decisions(store: &mut Store, body: &[u8]) -> Resp {
     let mut usage = Usage::default();
     let contexts: Vec<Option<&Context>> = if req.contexts.is_empty() { vec![None] } else { req.contexts.iter().map(Some).collect() };
     for (ci, c) in contexts.into_iter().enumerate() {
-        let plain = Steer::new();
+        let plain = Steer::default();
         let steer = if c.is_some() { &steers[ci] } else { &plain };
         // A read keeps what its build kept and feeds the rest of the context, then everything after it.
         let (head, base_tokens, queue, kept) = match c {
