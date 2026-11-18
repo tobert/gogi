@@ -2,6 +2,7 @@
 
 mod continuation;
 mod control;
+mod loops;
 mod decisions;
 mod embeddings;
 mod generations;

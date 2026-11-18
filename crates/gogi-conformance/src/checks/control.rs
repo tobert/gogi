@@ -33,7 +33,7 @@ impl Suite {
 
     /// The numbers a context gives: a raw read's letter log probabilities with `reads`, or else a
     /// greedy reply with `generate`. `None` when the served model has neither or the request fails.
-    fn numbers(&mut self, what: &str, ctx: &Value) -> Option<Value> {
+    pub(crate) fn numbers(&mut self, what: &str, ctx: &Value) -> Option<Value> {
         if self.has(Capability::Reads) {
             let body = json!({"contexts": [ctx], "suffixes": ["\nAnswer: "], "letters": ["A", "B", "C"]});
             return self.expect(what, "POST", "/council/v2/reads", Some(body), 200).map(|r| r["reads"][0]["logprobs"].clone());
