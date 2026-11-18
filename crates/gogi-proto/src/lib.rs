@@ -3,7 +3,7 @@
 //! `docs/council-api.md` is the contract; this crate is what a client or a server needs to
 //! speak it:
 //! - wire types for every council API request and response (`context`, `pins`, `objects`, `reads`,
-//!   `generation`, `decision`, `embeddings`, `control`, `identity`, `error`);
+//!   `generation`, `decision`, `embeddings`, `control`, `layer_loop`, `identity`, `error`);
 //! - the rules a request must meet, checked the way mkviolet checks them
 //!   (`message::validate`, `Context::check`, `spec::parse_spec`);
 //! - what a server checks of an open message, the seams of a continuation (`continuation`);
@@ -22,6 +22,7 @@ pub mod error;
 pub mod generation;
 pub mod identity;
 pub mod ids;
+pub mod layer_loop;
 pub mod math;
 pub mod message;
 pub mod objects;

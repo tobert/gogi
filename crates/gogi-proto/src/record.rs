@@ -13,7 +13,7 @@ use crate::generation::GenerationDone;
 use crate::ids::ContextId;
 
 /// The members that stand beside `parent`. A member of the first list replaces the parent's.
-const REPLACES: [&str; 4] = ["thinking", "tools", "queue", "control"];
+const REPLACES: [&str; 5] = ["thinking", "tools", "queue", "control", "loop"];
 
 /// The text of a context's record: the context as compact JSON, with each member in the order
 /// this crate writes it and a tool's `input_schema` and a call's `input` in the order they were
@@ -59,7 +59,7 @@ pub fn resolve(value: &mut Value, at: &str, close: bool, lookup: &dyn Fn(&Contex
     let id = ContextId::parse(text).map_err(|problem| invalid(param.clone(), format!("nothing was read: parent {:?} is {}", text, problem)))?;
     for name in sent.keys() {
         if name != "parent" && name != "messages" && !REPLACES.contains(&name.as_str()) {
-            return Err(invalid(format!("{}.{}", at, name), format!("nothing was read: {} does not stand beside parent; the members are thinking, tools, queue, control, and messages", name)));
+            return Err(invalid(format!("{}.{}", at, name), format!("nothing was read: {} does not stand beside parent; the members are thinking, tools, queue, control, loop, and messages", name)));
         }
     }
     let added = match sent.get("messages") {
@@ -72,7 +72,7 @@ pub fn resolve(value: &mut Value, at: &str, close: bool, lookup: &dyn Fn(&Contex
     for name in REPLACES {
         match sent.get(name) {
             None => {}
-            Some(Value::Null) if name == "queue" => {
+            Some(Value::Null) if name == "queue" || name == "loop" => {
                 whole.remove(name);
             }
             Some(v) => {
@@ -95,7 +95,7 @@ pub fn resolve(value: &mut Value, at: &str, close: bool, lookup: &dyn Fn(&Contex
 /// same however it was sent.
 fn ordered(mut whole: Map<String, Value>) -> Map<String, Value> {
     let mut out = Map::new();
-    for name in ["thinking", "tools", "queue", "control", "messages"] {
+    for name in ["thinking", "tools", "queue", "control", "loop", "messages"] {
         if let Some(v) = whole.remove(name) {
             out.insert(name.to_string(), v);
         }

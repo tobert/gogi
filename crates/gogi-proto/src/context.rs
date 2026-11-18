@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::control::Control;
+use crate::layer_loop::Loop;
 use crate::error::Invalid;
 use crate::identity::Class;
 use crate::ids::SnapshotId;
@@ -99,6 +100,10 @@ pub struct Context {
     /// applied in order. Empty: the plain model. A non-empty list needs `control_vectors`.
     #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "crate::control::control_list")]
     pub control: Vec<Control>,
+    /// The span of layers that runs more than once while the model reads this context. Absent:
+    /// each layer runs once. A loop needs `layer_loops`.
+    #[serde(rename = "loop", default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::layer_loop::loop_member")]
+    pub layer_loop: Option<Loop>,
     pub messages: Vec<Message>,
 }
 
@@ -114,7 +119,7 @@ fn thinking_flag<'de, D: serde::Deserializer<'de>>(de: D) -> Result<bool, D::Err
 impl Context {
     /// A context with no tools and no queue. Each caller says whether the model thinks.
     pub fn new(thinking: bool, messages: Vec<Message>) -> Context {
-        Context { thinking, tools: vec![], queue: None, control: vec![], messages }
+        Context { thinking, tools: vec![], queue: None, control: vec![], layer_loop: None, messages }
     }
 
     /// Checks the messages, that each tool has a distinct name, that `queue` names a tool, and that
@@ -170,7 +175,7 @@ impl Context {
         let named = |e: Invalid| {
             let param = match e.param.as_deref() {
                 Some("continue") => "continue".to_string(),
-                Some(p) if p.starts_with("messages[") || p.starts_with("control") => format!("{}.{}", at, p),
+                Some(p) if p.starts_with("messages[") || p.starts_with("control") || p.starts_with("loop") => format!("{}.{}", at, p),
                 _ => list.to_string(),
             };
             Invalid::param(param, format!("{}: {}", at, e.message))
@@ -189,6 +194,12 @@ impl Context {
             return Err(Invalid::param("control", format!("nothing ran: {} does not declare control_vectors; send no control", model.model)));
         }
         Ok(())
+    }
+
+    /// Checks the context's `loop` against served model `model` (`Loop::check`). A context with no
+    /// `loop` passes.
+    pub fn check_loop(&self, model: &crate::identity::ServedModel) -> Result<(), Invalid> {
+        self.layer_loop.map_or(Ok(()), |l| l.check(model))
     }
 
     /// Checks that served model `model` declares `thinking` when the context sets `thinking: true`.
@@ -313,7 +324,7 @@ mod tests {
 
     #[test]
     fn queue_names_a_tool() {
-        let mut c = Context { thinking: false, tools: vec![tool("next")], queue: Some("next".into()), control: vec![], messages: vec![Message::user("u")] };
+        let mut c = Context { thinking: false, tools: vec![tool("next")], queue: Some("next".into()), control: vec![], layer_loop: None, messages: vec![Message::user("u")] };
         c.check().unwrap();
         c.queue = Some("missing".into());
         assert_eq!(c.check().unwrap_err().message, "queue missing names no tool in tools");
@@ -323,7 +334,7 @@ mod tests {
 
     #[test]
     fn tool_names_are_distinct_and_not_empty() {
-        let mut c = Context { thinking: false, tools: vec![tool("a"), tool("b")], queue: None, control: vec![], messages: vec![Message::user("u")] };
+        let mut c = Context { thinking: false, tools: vec![tool("a"), tool("b")], queue: None, control: vec![], layer_loop: None, messages: vec![Message::user("u")] };
         c.check().unwrap();
         c.tools.push(tool("a"));
         assert_eq!(c.check().unwrap_err().message, "tools[2]: a tool needs a name no other tool has");
@@ -379,7 +390,7 @@ mod tests {
     #[test]
     fn thinking_true_needs_the_thinking_capability() {
         use crate::identity::Capability;
-        let on = Context { thinking: true, tools: vec![], queue: None, control: vec![], messages: vec![Message::user("u")] };
+        let on = Context { thinking: true, tools: vec![], queue: None, control: vec![], layer_loop: None, messages: vec![Message::user("u")] };
         let off = Context { thinking: false, ..on.clone() };
         let plain = served(vec![Capability::Generate]);
         let e = on.check_thinking(&plain).unwrap_err();

@@ -41,6 +41,8 @@ pub enum Capability {
     ControlVectors,
     /// Generations accept `forks` and `contexts`, and write several replies.
     Replies,
+    /// Contexts accept `loop`, as the served model's `layer_loops` describes.
+    LayerLoops,
     #[serde(other)]
     Unknown,
 }
@@ -160,6 +162,9 @@ pub struct ServedModel {
     /// What it embeds, with `embed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embeddings: Option<crate::embeddings::Embeddings>,
+    /// The spans of layers it runs more than once, with `layer_loops`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer_loops: Option<crate::layer_loop::LayerLoops>,
 }
 
 impl ServedModel {
