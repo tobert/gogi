@@ -1744,7 +1744,7 @@ decide. (Proposed)
   3. `cycles` is from `min` to `max`: the error names `cycles`, and the
      message names the range. Thus 0 is refused here.
   4. The context names no `loop`: the error names `cycles`, and the message
-     says whether the request or its parent holds the `loop`. No served
+     names both members, which the request or its parent holds. No served
      model declares both capabilities yet. The change that allows both
      writes how they join.
 - **A server checks the rules of each member first, then the members
