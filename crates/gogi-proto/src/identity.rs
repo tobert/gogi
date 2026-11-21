@@ -43,6 +43,8 @@ pub enum Capability {
     Replies,
     /// Contexts accept `loop`, as the served model's `layer_loops` describes.
     LayerLoops,
+    /// Contexts accept `cycles`, as the served model's `cycles` describes.
+    Cycles,
     #[serde(other)]
     Unknown,
 }
@@ -165,6 +167,9 @@ pub struct ServedModel {
     /// The spans of layers it runs more than once, with `layer_loops`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layer_loops: Option<crate::layer_loop::LayerLoops>,
+    /// The counts of cycles it runs, with `cycles`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycles: Option<crate::cycles::Cycles>,
 }
 
 impl ServedModel {

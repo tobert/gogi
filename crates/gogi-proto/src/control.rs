@@ -172,8 +172,8 @@ fn decode_layers(v: &Value, at: &str) -> Result<BTreeMap<u32, f64>, (String, Str
 }
 
 /// Decodes a request's list of contexts under `side`, such as `contexts`. An error that names a
-/// member of a context's `control` or `loop` names it under its context, such as
-/// `contexts[0].control[1].strength` or `contexts[0].loop.count`.
+/// member of a context's `control`, `loop`, or `cycles` names it under its context, such as
+/// `contexts[0].control[1].strength`, `contexts[0].loop.count`, or `contexts[0].cycles`.
 pub(crate) fn contexts_under<'de, D: serde::Deserializer<'de>>(de: D, side: &str) -> Result<Vec<Context>, D::Error> {
     let items = Vec::<Value>::deserialize(de)?;
     let mut out = Vec::with_capacity(items.len());
@@ -183,6 +183,7 @@ pub(crate) fn contexts_under<'de, D: serde::Deserializer<'de>>(de: D, side: &str
             Err(e) => {
                 let text = e.to_string().replacen("invalid field `control", &format!("invalid field `{}[{}].control", side, k), 1);
                 let text = text.replacen("invalid field `loop", &format!("invalid field `{}[{}].loop", side, k), 1);
+                let text = text.replacen("invalid field `cycles", &format!("invalid field `{}[{}].cycles", side, k), 1);
                 return Err(serde::de::Error::custom(format!("{}[{}]: {}", side, k, text)));
             }
         }
@@ -350,7 +351,7 @@ impl ControlVectorRequest {
     }
 
     /// Checks the rules a client can check without the server: at least one context on each
-    /// side, each valid and closed, and none with a `control` or a `loop` of its own.
+    /// side, each valid and closed, and none with a `control`, a `loop`, or `cycles` of its own.
     pub fn validate(&self) -> Result<(), Invalid> {
         for (side, list) in [("positive", &self.positive), ("negative", &self.negative)] {
             if list.is_empty() {
@@ -361,6 +362,10 @@ impl ControlVectorRequest {
                 if !c.control.is_empty() {
                     let at = format!("{}[{}].control", side, i);
                     return Err(Invalid::param(at.clone(), format!("nothing ran: {} is not empty; a control vector reads each context with the plain model, so send no control", at)));
+                }
+                if c.cycles.is_some() {
+                    let at = format!("{}[{}].cycles", side, i);
+                    return Err(Invalid::param(at.clone(), format!("nothing ran: {} is set; a control vector reads each context at the model's own count of cycles, so send no cycles", at)));
                 }
                 if c.layer_loop.is_some() {
                     let at = format!("{}[{}].loop", side, i);

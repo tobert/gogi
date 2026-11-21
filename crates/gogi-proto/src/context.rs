@@ -104,6 +104,10 @@ pub struct Context {
     /// each layer runs once. A loop needs `layer_loops`.
     #[serde(rename = "loop", default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::layer_loop::loop_member")]
     pub layer_loop: Option<Loop>,
+    /// The count of cycles the model runs while it reads this context. Absent: the served model's
+    /// own count, its `default`. Cycles need `cycles`.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::cycles::cycles_member")]
+    pub cycles: Option<u32>,
     pub messages: Vec<Message>,
 }
 
@@ -119,7 +123,7 @@ fn thinking_flag<'de, D: serde::Deserializer<'de>>(de: D) -> Result<bool, D::Err
 impl Context {
     /// A context with no tools and no queue. Each caller says whether the model thinks.
     pub fn new(thinking: bool, messages: Vec<Message>) -> Context {
-        Context { thinking, tools: vec![], queue: None, control: vec![], layer_loop: None, messages }
+        Context { thinking, tools: vec![], queue: None, control: vec![], layer_loop: None, cycles: None, messages }
     }
 
     /// Checks the messages, that each tool has a distinct name, that `queue` names a tool, and that
@@ -175,7 +179,7 @@ impl Context {
         let named = |e: Invalid| {
             let param = match e.param.as_deref() {
                 Some("continue") => "continue".to_string(),
-                Some(p) if p.starts_with("messages[") || p.starts_with("control") || p.starts_with("loop") => format!("{}.{}", at, p),
+                Some(p) if p.starts_with("messages[") || p.starts_with("control") || p.starts_with("loop") || p.starts_with("cycles") => format!("{}.{}", at, p),
                 _ => list.to_string(),
             };
             Invalid::param(param, format!("{}: {}", at, e.message))
@@ -200,6 +204,22 @@ impl Context {
     /// `loop` passes.
     pub fn check_loop(&self, model: &crate::identity::ServedModel) -> Result<(), Invalid> {
         self.layer_loop.map_or(Ok(()), |l| l.check(model))
+    }
+
+    /// Checks the context's `cycles` against served model `model` (`cycles::check`). A context with
+    /// no `cycles` passes.
+    pub fn check_cycles(&self, model: &crate::identity::ServedModel) -> Result<(), Invalid> {
+        self.cycles.map_or(Ok(()), |n| crate::cycles::check(n, model))
+    }
+
+    /// Checks the members of the context together, after the checks of each member: a context
+    /// names no `loop` and `cycles` both. The context here is whole, so the `loop` may come from
+    /// the request or from its parent.
+    pub fn check_members(&self) -> Result<(), Invalid> {
+        if self.layer_loop.is_some() && self.cycles.is_some() {
+            return Err(Invalid::param("cycles", "nothing ran: the context has a loop and cycles, the loop sent in the request or held by its parent; send no cycles, or send loop: null beside parent".to_string()));
+        }
+        Ok(())
     }
 
     /// Checks that served model `model` declares `thinking` when the context sets `thinking: true`.
@@ -324,7 +344,7 @@ mod tests {
 
     #[test]
     fn queue_names_a_tool() {
-        let mut c = Context { thinking: false, tools: vec![tool("next")], queue: Some("next".into()), control: vec![], layer_loop: None, messages: vec![Message::user("u")] };
+        let mut c = Context { thinking: false, tools: vec![tool("next")], queue: Some("next".into()), control: vec![], layer_loop: None, cycles: None, messages: vec![Message::user("u")] };
         c.check().unwrap();
         c.queue = Some("missing".into());
         assert_eq!(c.check().unwrap_err().message, "queue missing names no tool in tools");
@@ -334,7 +354,7 @@ mod tests {
 
     #[test]
     fn tool_names_are_distinct_and_not_empty() {
-        let mut c = Context { thinking: false, tools: vec![tool("a"), tool("b")], queue: None, control: vec![], layer_loop: None, messages: vec![Message::user("u")] };
+        let mut c = Context { thinking: false, tools: vec![tool("a"), tool("b")], queue: None, control: vec![], layer_loop: None, cycles: None, messages: vec![Message::user("u")] };
         c.check().unwrap();
         c.tools.push(tool("a"));
         assert_eq!(c.check().unwrap_err().message, "tools[2]: a tool needs a name no other tool has");
@@ -390,7 +410,7 @@ mod tests {
     #[test]
     fn thinking_true_needs_the_thinking_capability() {
         use crate::identity::Capability;
-        let on = Context { thinking: true, tools: vec![], queue: None, control: vec![], layer_loop: None, messages: vec![Message::user("u")] };
+        let on = Context { thinking: true, tools: vec![], queue: None, control: vec![], layer_loop: None, cycles: None, messages: vec![Message::user("u")] };
         let off = Context { thinking: false, ..on.clone() };
         let plain = served(vec![Capability::Generate]);
         let e = on.check_thinking(&plain).unwrap_err();

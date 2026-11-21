@@ -393,6 +393,7 @@ mod tests {
             queue: Some("next".into()),
             control: vec![],
             layer_loop: None,
+            cycles: None,
             messages: vec![Message::user("u"), Message { tool_calls: vec![call], ..Message::assistant("") }],
         }
     }

@@ -169,6 +169,7 @@ mod tests {
             media: Some(Media { inputs: vec![], outputs: vec![], text_replies: false }),
             embeddings: Some(Embeddings { tasks: vec!["query".into(), "document".into()], dimensions: vec![768, 512, 256, 128], inputs_per_request: 4 }),
             layer_loops: None,
+            cycles: None,
         }
     }
 

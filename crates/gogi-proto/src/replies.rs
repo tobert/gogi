@@ -123,7 +123,7 @@ pub fn split(body: &Value, limit: u64, first_seed: impl FnOnce() -> u64) -> Resu
 pub fn param_in(param: &str, i: usize) -> String {
     match param.strip_prefix("context.") {
         Some(rest) => format!("contexts[{}].{}", i, rest),
-        None if ["messages", "thinking", "tools", "queue", "control", "loop", "continue"].iter().any(|m| param == *m || param.starts_with(&format!("{}[", m)) || param.starts_with(&format!("{}.", m))) => format!("contexts[{}].{}", i, param),
+        None if ["messages", "thinking", "tools", "queue", "control", "loop", "cycles", "continue"].iter().any(|m| param == *m || param.starts_with(&format!("{}[", m)) || param.starts_with(&format!("{}.", m))) => format!("contexts[{}].{}", i, param),
         None => param.to_string(),
     }
 }
