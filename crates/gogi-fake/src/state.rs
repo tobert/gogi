@@ -36,11 +36,13 @@ pub struct FakeModel {
     /// It declares `layer_loops`: its contexts take `loop` over the toy's layers
     /// (`State::looped`).
     pub loops: bool,
+    /// It declares `cycles`: its contexts take `cycles` over the toy's layers (`State::cycled`).
+    pub cycles: bool,
 }
 
 impl FakeModel {
     pub fn ready(name: &str, seed: u64) -> FakeModel {
-        FakeModel { name: name.into(), aliases: vec![], seed, status: ModelStatus::Ready, embeds: false, thinks: true, controls: true, loops: true }
+        FakeModel { name: name.into(), aliases: vec![], seed, status: ModelStatus::Ready, embeds: false, thinks: true, controls: true, loops: true, cycles: true }
     }
 
     /// A ready served model that does not declare `control_vectors`: a context with a `control` is
@@ -55,6 +57,12 @@ impl FakeModel {
         FakeModel { loops: false, ..FakeModel::ready(name, seed) }
     }
 
+    /// A ready served model that does not declare `cycles`: a context with `cycles` is a `400`
+    /// naming `cycles`.
+    pub fn without_cycles(name: &str, seed: u64) -> FakeModel {
+        FakeModel { cycles: false, ..FakeModel::ready(name, seed) }
+    }
+
     /// A ready served model that does not declare `thinking`: a context with `thinking: true` is a
     /// `400` naming `thinking`.
     pub fn without_thinking(name: &str, seed: u64) -> FakeModel {
@@ -63,7 +71,7 @@ impl FakeModel {
 
     /// A ready served model that only embeds.
     pub fn embedding(name: &str, seed: u64) -> FakeModel {
-        FakeModel { embeds: true, thinks: false, controls: false, loops: false, ..FakeModel::ready(name, seed) }
+        FakeModel { embeds: true, thinks: false, controls: false, loops: false, cycles: false, ..FakeModel::ready(name, seed) }
     }
 }
 

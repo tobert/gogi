@@ -346,6 +346,15 @@ impl State {
         State(mix(self.0 ^ mix(0x100F_0000_0000_0000 ^ (u64::from(start) << 40) ^ (u64::from(end) << 20) ^ u64::from(count))))
     }
 
+    /// The state under `count` cycles of layers `start..end`, for a model whose own count is
+    /// `default`: another state for each count but `default`, which gives the same state.
+    pub fn cycled(self, start: u32, end: u32, count: u32, default: u32) -> Self {
+        if count == default {
+            return self;
+        }
+        State(mix(self.0 ^ mix(0x0C1C_0000_0000_0000 ^ (u64::from(start) << 40) ^ (u64::from(end) << 20) ^ u64::from(count))))
+    }
+
     /// The state a server holds when it rounds model state at a boundary, such as mk's seal: another
     /// state, the same each time.
     pub fn rounded(self) -> Self {
@@ -385,6 +394,16 @@ mod tests {
 
     fn with_reasoning(m: Message) -> Message {
         Message { reasoning: Some("hmm".into()), snap: true, ..m }
+    }
+
+    #[test]
+    fn the_default_count_of_cycles_is_the_plain_state_and_each_other_count_is_its_own() {
+        let st = State::after(7, &[1, 2, 3]);
+        assert_eq!(st.cycled(1, 3, 3, 3), st);
+        let others: Vec<State> = [1, 2, 4, 5].iter().map(|&n| st.cycled(1, 3, n, 3)).collect();
+        assert!(others.iter().all(|o| *o != st) && others.iter().enumerate().all(|(i, a)| others[i + 1..].iter().all(|b| a != b)));
+        assert_ne!(st.cycled(1, 3, 5, 3), st.cycled(2, 3, 5, 3), "each start is its own");
+        assert_ne!(st.cycled(1, 3, 5, 3), st.cycled(1, 4, 5, 3), "each end is its own");
     }
 
     #[test]

@@ -65,12 +65,12 @@ STATUSES = ("ready", "loading", "draining", "unloaded")
 def _served_model(m, i):
     if isinstance(m, str):
         m = {"name": m}
-    unknown = set(m) - {"name", "aliases", "seed", "status", "thinking", "control_vectors", "layer_loops"}
+    unknown = set(m) - {"name", "aliases", "seed", "status", "thinking", "control_vectors", "layer_loops", "cycles"}
     if unknown:
-        raise ValueError(f"models[{i}]: unknown members {sorted(unknown)}; a served model has name, aliases, seed, status, thinking, control_vectors, and layer_loops")
+        raise ValueError(f"models[{i}]: unknown members {sorted(unknown)}; a served model has name, aliases, seed, status, thinking, control_vectors, layer_loops, and cycles")
     return {"name": m.get("name"), "aliases": list(m.get("aliases", [])), "seed": m.get("seed", i), "status": m.get("status", "ready"),
             "thinking": m.get("thinking", True), "control_vectors": m.get("control_vectors", True),
-            "layer_loops": m.get("layer_loops", True)}
+            "layer_loops": m.get("layer_loops", True), "cycles": m.get("cycles", True)}
 
 
 class FakeServer:
@@ -84,7 +84,8 @@ class FakeServer:
     ``aliases`` (default none), ``seed`` (default its position; two seeds are two models), and
     ``status`` (default ``"ready"``), ``thinking`` (default true), and ``control_vectors``
     (default true: its contexts take ``control``, and it makes control vectors), and
-    ``layer_loops`` (default true: its contexts take ``loop``). Without ``models`` the fake serves ``gogi-toy-1``, alias
+    ``layer_loops`` (default true: its contexts take ``loop``), and ``cycles`` (default true: its
+    contexts take ``cycles``). Without ``models`` the fake serves ``gogi-toy-1``, alias
     ``toy``. Every request names its served model with ``model``. ``set_status`` changes one
     while it serves.
 

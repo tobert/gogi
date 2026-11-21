@@ -134,7 +134,7 @@ mod _gogi {
         }
     }
 
-    /// The served models from `[{name, aliases, seed, status, thinking, control_vectors, layer_loops}]`, every
+    /// The served models from `[{name, aliases, seed, status, thinking, control_vectors, layer_loops, cycles}]`, every
     /// member required.
     fn fake_models(v: &Value) -> PyResult<Vec<gogi_fake::FakeModel>> {
         let list = v.as_array().filter(|l| !l.is_empty()).ok_or_else(|| value_err("models is a non-empty list"))?;
@@ -148,11 +148,12 @@ mod _gogi {
             let thinks = m["thinking"].as_bool().ok_or_else(|| bad("thinking is true or false"))?;
             let controls = m["control_vectors"].as_bool().ok_or_else(|| bad("control_vectors is true or false"))?;
             let loops = m["layer_loops"].as_bool().ok_or_else(|| bad("layer_loops is true or false"))?;
+            let cycles = m["cycles"].as_bool().ok_or_else(|| bad("cycles is true or false"))?;
             let names = std::iter::once(name).chain(aliases.iter().map(String::as_str));
             if let Some(dup) = names.clone().find(|n| out.iter().any(|o| o.name == *n || o.aliases.iter().any(|a| a == n))) {
                 return Err(bad(&format!("{} already names another served model", dup)));
             }
-            out.push(gogi_fake::FakeModel { name: name.into(), aliases, seed, status, embeds: false, thinks, controls, loops });
+            out.push(gogi_fake::FakeModel { name: name.into(), aliases, seed, status, embeds: false, thinks, controls, loops, cycles });
         }
         Ok(out)
     }
