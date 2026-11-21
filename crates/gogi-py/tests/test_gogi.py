@@ -286,3 +286,17 @@ def test_the_fake_takes_a_loop_on_a_model_that_declares_layer_loops():
         assert status == 200
         status, e = _call(fake.url, "POST", "/council/v2/contexts", {"model": "plain", "context": context({"start": 1, "end": 3, "count": 2})})
         assert status == 400 and e["error"]["param"] == "loop"
+
+
+def test_the_fake_takes_cycles_on_a_model_that_declares_them():
+    context = lambda cycles: {"thinking": False, "cycles": cycles, "messages": [{"role": "user", "content": "Plan it."}]}
+    with gogi.FakeServer(models=["day", {"name": "plain", "cycles": False}]) as fake:
+        _, ident = _call(fake.url, "GET", "/council/v2/identity")
+        assert ["cycles" in m["capabilities"] for m in ident["models"]] == [True, False]
+        assert ident["models"][0]["cycles"] == {"min": 1, "max": 5, "default": 3, "start": 1, "end": 3}
+        status, _ = _call(fake.url, "POST", "/council/v2/contexts", {"model": "day", "context": context(5)})
+        assert status == 200
+        status, e = _call(fake.url, "POST", "/council/v2/contexts", {"model": "day", "context": context(6)})
+        assert status == 400 and e["error"]["param"] == "cycles"
+        status, e = _call(fake.url, "POST", "/council/v2/contexts", {"model": "plain", "context": context(3)})
+        assert status == 400 and e["error"]["param"] == "cycles"

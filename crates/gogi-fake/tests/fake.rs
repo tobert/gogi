@@ -1261,3 +1261,95 @@ fn each_loop_refusal_names_its_member() {
     assert_eq!(code, 200, "contexts with other loops: {r}");
 }
 
+
+// ---- cycles
+
+/// A served model that declares cycles, beside one that does not.
+fn cycled_and_plain() -> Server {
+    Server::start(Config { models: vec![FakeModel { aliases: vec!["toy".into()], ..FakeModel::ready("gogi-toy-1", 0) }, FakeModel::without_cycles("gogi-toy-plain", 3)], ..Config::default() }).unwrap()
+}
+
+fn with_cycles(count: Value) -> Value {
+    let mut c = with_control(json!([]));
+    c["cycles"] = count;
+    c
+}
+
+#[test]
+fn a_model_declares_cycles_with_its_counts_unless_built_without() {
+    let s = cycled_and_plain();
+    let (_, id) = call(&s, "GET", "/council/v2/identity", None);
+    let caps = |i: usize| id["models"][i]["capabilities"].as_array().unwrap().contains(&json!("cycles"));
+    assert!(caps(0) && !caps(1), "{id}");
+    assert_eq!(id["models"][0]["cycles"], json!({"min": 1, "max": 5, "default": 3, "start": 1, "end": 3}));
+    assert!(id["models"][1].get("cycles").is_none());
+    let served: gogi_proto::identity::ServerIdentity = serde_json::from_value(id).unwrap();
+    assert!(served.models[0].cycles.is_some_and(|c| c.is_sane()));
+}
+
+#[test]
+fn the_default_count_gives_the_numbers_of_no_cycles_and_another_count_changes_them() {
+    let s = cycled_and_plain();
+    let absent = letters_after(&s, with_control(json!([])));
+    assert_eq!(letters_after(&s, with_cycles(json!(3))), absent);
+    let five = letters_after(&s, with_cycles(json!(5)));
+    assert_ne!(five, absent);
+    assert_ne!(letters_after(&s, with_cycles(json!(1))), absent, "1 is a count of its own");
+    assert_ne!(letters_after(&s, with_cycles(json!(1))), five, "each count is another model");
+    assert_eq!(letters_after(&s, with_cycles(json!(5))), five, "the same count gives the same numbers");
+    let reply = |c: Value| generate(&s, c, 24).content;
+    assert_eq!(reply(with_cycles(json!(3))), reply(with_control(json!([]))), "a generation at the default writes the plain reply");
+}
+
+#[test]
+fn the_default_count_shares_a_snapshot_and_another_count_never_does() {
+    let s = cycled_and_plain();
+    let build = |c: Value| post(&s, "/council/v2/contexts", json!({"model": "toy", "context": c})).1;
+    let plain = build(with_control(json!([])));
+    let default = build(with_cycles(json!(3)));
+    assert_eq!((&default["head"], default["usage"]["fed"].as_u64()), (&plain["head"], Some(0)), "cycles: default shares the plain model state: {default}");
+    assert_ne!(default["context"], plain["context"], "but the records are two");
+    let five = build(with_cycles(json!(5)));
+    assert!(five["head"] != plain["head"] && five["from"] == Value::Null && five["usage"]["kept"] == json!(0), "{five}");
+    let again = build(with_cycles(json!(5)));
+    assert_eq!((&again["head"], again["usage"]["fed"].as_u64()), (&five["head"], Some(0)), "an equal count shares its model state");
+    let one = build(with_cycles(json!(1)));
+    assert!(one["head"] != five["head"] && one["head"] != plain["head"], "{one}");
+    // A request by parent with another count reads under that count; null drops it.
+    let by_parent = build(json!({"parent": five["context"], "cycles": null}));
+    assert_eq!(by_parent["head"], plain["head"], "cycles: null drops the parent's count: {by_parent}");
+    let kept = build(json!({"parent": five["context"]}));
+    assert_eq!(kept["head"], five["head"], "{kept}");
+}
+
+#[test]
+fn each_cycles_refusal_names_its_member() {
+    let s = cycled_and_plain();
+    let spec = post(&s, "/council/v2/specs", json!({"name": "s", "instructions": "i", "input_label": "x", "questions": [{"id": "q", "type": "noul", "instructions": "yes?"}]})).1;
+    let bodies = |model: &str, c: Value| {
+        [
+            ("/council/v2/contexts", json!({"model": model, "context": c}), ""),
+            ("/council/v2/generations", json!({"model": model, "context": c, "max_tokens": 4}), ""),
+            ("/council/v2/reads", json!({"model": model, "contexts": [c], "suffixes": ["x"], "letters": ["A", "B"]}), "contexts[0]."),
+            ("/council/v2/decisions", json!({"model": model, "spec_id": spec["spec_id"], "case": "x", "contexts": [c]}), "contexts[0]."),
+        ]
+    };
+    for (member, model) in [(json!(2.5), "toy"), (json!(-1), "toy"), (json!("3"), "toy"), (json!(3), "gogi-toy-plain"), (json!(0), "toy"), (json!(6), "toy")] {
+        for (path, body, under) in bodies(model, with_cycles(member.clone())) {
+            assert_eq!(refused_param(&s, path, body), json!(format!("{under}cycles")), "{path} {member}");
+        }
+    }
+    let (code, r) = post(&s, "/council/v2/generations", json!({"model": "toy", "contexts": [with_control(json!([])), with_cycles(json!(6))], "max_tokens": 4}));
+    assert_eq!((code, &r["error"]["param"]), (400, &json!("contexts[1].cycles")), "{r}");
+    let (code, r) = post(&s, "/council/v2/generations", json!({"model": "toy", "contexts": [with_control(json!([])), with_cycles(json!(5))], "max_tokens": 4}));
+    assert_eq!(code, 200, "contexts with other counts: {r}");
+    // A loop and cycles together: the checks of each member come first.
+    let both = |lp: Value, n: u32| {
+        let mut c = with_loop(lp);
+        c["cycles"] = json!(n);
+        c
+    };
+    assert_eq!(refused_param(&s, "/council/v2/contexts", json!({"model": "toy", "context": both(span(1, 3, 2), 3)})), json!("cycles"));
+    assert_eq!(refused_param(&s, "/council/v2/contexts", json!({"model": "toy", "context": both(span(1, 3, 9), 3)})), json!("loop.count"), "the loop's own check first");
+    assert_eq!(refused_param(&s, "/council/v2/contexts", json!({"model": "toy", "context": both(span(1, 3, 2), 9)})), json!("cycles"));
+}

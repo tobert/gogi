@@ -44,6 +44,11 @@ A served model declares capability `layer_loops` unless it is built with
 `loop` with a `400` naming `loop` (`contexts[i].loop` in a decision or a raw read). A served
 model that only embeds does not declare it.
 
+A served model declares capability `cycles` unless it is built with `FakeModel::without_cycles`,
+or with `"cycles": false` in Python. Such a model refuses a `cycles` with a `400` naming `cycles`
+(`contexts[i].cycles` in a decision or a raw read). A served model that only embeds does not
+declare it.
+
 ## Tokens
 
 A token is one of the 256 byte values, or one of 16 template markers (ids 256 to 271).
@@ -153,6 +158,24 @@ The toy runs a `loop` over its 4 layers. Its `layer_loops` is `{"layers": 4, "bo
 - A snapshot id hashes the loop as well as the control list, so a build starts only from a
   snapshot of an equal loop. `count` 1 has its own snapshots. A context with no loop hashes no
   loop, so its ids are the same as before loops.
+
+## Cycles
+
+The toy runs `cycles` over its layers 1 and 2. Its `cycles` is `{"min": 1, "max": 5, "default": 3,
+"start": 1, "end": 3}`.
+
+- A context with no `cycles` runs 3 cycles, the `default`, and reads the numbers of the toy. A
+  count other than 3 reads every number at another model state: a hash of the state, the span, and
+  the count (`gogi_toy::State::cycled`). Thus each count is another model, and `cycles: 3` gives the
+  numbers of no `cycles` bit for bit.
+- A control list under `cycles` applies to the residuals of the cycled state.
+- A snapshot id hashes the count that runs, as well as the control list and the loop. A context with
+  `cycles: 3` and the same context with none share their snapshots. Any other count has snapshots
+  of its own, so a build starts only from a snapshot of an equal count. A context at the default
+  count hashes nothing extra, so its ids are the same as before cycles.
+- A context that has a `loop` and `cycles` is a `400` naming `cycles`, after the checks of each member.
+- A record holds the `cycles` the client sent: a context with `cycles: 3` and the same context
+  with none are two records.
 
 ## Reply parser
 

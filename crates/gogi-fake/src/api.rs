@@ -59,6 +59,10 @@ fn layer_loops() -> serde_json::Value {
     json!({"layers": LAYERS, "bounds": (0..=LAYERS).collect::<Vec<_>>(), "count": 4, "extra_runs": 6})
 }
 
+/// The counts of cycles of a fake served model that declares `cycles`, over layers 1 to 2 of the
+/// toy's 4: from 1 to 5 cycles, 3 by default.
+const CYCLES: gogi_proto::cycles::Cycles = gogi_proto::cycles::Cycles { min: 1, max: 5, default: 3, start: 1, end: 3 };
+
 fn err(status: u16, kind: &str, message: impl Into<String>, param: Option<&str>) -> Resp {
     let mut e = json!({"type": kind, "message": message.into()});
     if let Some(p) = param {
@@ -205,6 +209,10 @@ pub fn identity(store: &Store) -> Value {
                 v["capabilities"].as_array_mut().expect("an array").push(json!("layer_loops"));
                 v["layer_loops"] = layer_loops();
             }
+            if m.cycles {
+                v["capabilities"].as_array_mut().expect("an array").push(json!("cycles"));
+                v["cycles"] = serde_json::to_value(CYCLES).expect("cycles are JSON");
+            }
             if !store.cfg.media_inputs.is_empty() || !store.cfg.media_outputs.is_empty() {
                 v["media"] = json!({"inputs": store.cfg.media_inputs, "outputs": store.cfg.media_outputs});
             }
@@ -286,21 +294,35 @@ fn check_thinking(store: &Store, m: &FakeModel, contexts: &[&Context], several: 
     Ok(())
 }
 
-/// How the toy reads a context: its control list, each item's op, strength, and vector, and its
-/// layer loop.
+/// How the toy reads a context: its control list, each item's op, strength, and vector, its
+/// layer loop, and the count of cycles it runs.
 #[derive(Default)]
 struct Steer {
     items: Vec<toy_control::LayeredItem>,
     layer_loop: Option<Loop>,
+    /// The count that runs: the context's `cycles`, or the default. `None` on a model with none.
+    cycles: Option<u32>,
 }
 
-/// The key of a context's control list and loop, which its snapshot ids hash: empty for the plain
-/// model. Equal lists with equal loops have equal keys.
-fn control_key(c: &Context) -> String {
+/// The count of cycles that runs for a context on model `m`: the context's, or the default. `None`
+/// when `m` declares no cycles.
+fn cycles_of(m: &FakeModel, c: &Context) -> Option<u32> {
+    m.cycles.then(|| CYCLES.resolve(c.cycles))
+}
+
+/// The key of a context's control list, loop, and count of cycles, which its snapshot ids hash:
+/// empty for the plain model. Equal lists with equal loops and equal counts have equal keys. The
+/// count that runs is hashed, so the default count and no count have one key, and the default
+/// count adds nothing to the key.
+fn control_key(m: &FakeModel, c: &Context) -> String {
     let items: String = c.control.iter().map(|i| format!("{} {:?} {:016x} {};", i.vector, i.op, i.strength.to_bits(), i.layers.iter().flatten().map(|(l, m)| format!("{}:{:016x}", l, m.to_bits())).collect::<Vec<_>>().join(","))).collect();
-    match c.layer_loop {
+    let items = match c.layer_loop {
         None => items,
         Some(l) => format!("{}loop {} {} {};", items, l.start, l.end, l.count),
+    };
+    match cycles_of(m, c) {
+        Some(n) if n != CYCLES.default => format!("{}cycles {};", items, n),
+        _ => items,
     }
 }
 
@@ -318,10 +340,13 @@ fn steer_of(store: &Store, m: &FakeModel, contexts: &[&Context], several: bool) 
         if let Err(e) = c.check_loop(&served) {
             return Err(bad_param(&format!("{}{}", under(k), e.param.as_deref().unwrap_or("loop")), e.message));
         }
+        if let Err(e) = c.check_cycles(&served).and_then(|()| c.check_members()) {
+            return Err(bad_param(&format!("{}cycles", under(k)), e.message));
+        }
     }
     let mut out = Vec::new();
     for (k, c) in contexts.iter().enumerate() {
-        let mut steer = Steer { items: Vec::new(), layer_loop: c.layer_loop };
+        let mut steer = Steer { items: Vec::new(), layer_loop: c.layer_loop, cycles: cycles_of(m, c) };
         for (i, item) in c.control.iter().enumerate() {
             let at = format!("{}control[{}].vector", under(k), i);
             let id = item.vector.as_str();
@@ -346,9 +371,10 @@ fn vectors_in(contexts: &[&Context]) -> Vec<Named> {
     contexts.iter().flat_map(|c| c.control.iter().map(|i| Named { at: String::new(), object: ObjectRef { id: i.vector.to_string(), mime: MEDIA_TYPE.into() }, assistant: false })).collect()
 }
 
-/// The logits at model state `st` under a control list and a layer loop.
+/// The logits at model state `st` under a control list, a layer loop, and a count of cycles.
 fn logits_of(st: State, steer: &Steer) -> [f64; VOCAB] {
     let st = steer.layer_loop.map_or(st, |l| st.looped(l.start, l.end, l.count));
+    let st = steer.cycles.map_or(st, |n| st.cycled(CYCLES.start, CYCLES.end, n, CYCLES.default));
     toy_control::logits_by_layer(st, &steer.items)
 }
 
@@ -681,7 +707,7 @@ impl Built {
 /// held whose tokens begin it, and holds a snapshot at each boundary and at the end unless `dry_run`.
 fn build(store: &mut Store, m: &FakeModel, c: &Context, dry_run: bool) -> Built {
     let r = model::render(&c.tools, c.thinking, &c.messages, false);
-    let key = control_key(c);
+    let key = control_key(m, c);
     let mut counts = Vec::new();
     let mut cuts = Vec::new();
     for cut in &r.cuts {

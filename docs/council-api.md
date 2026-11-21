@@ -53,7 +53,7 @@ thing, and each thing has one term.
 | Term | Meaning |
 |---|---|
 | council | Several contexts that read the same case with the same spec, each on its own, with their reads pooled into one set of answers. |
-| context | A chat a request reads: `messages`, `tools`, `thinking`, `queue`, `control`, and `loop`. It is a value: the same members are the same context, whoever sends them and however. |
+| context | A chat a request reads: `messages`, `tools`, `thinking`, `queue`, `control`, `loop`, and `cycles`. It is a value: the same members are the same context, whoever sends them and however. |
 | context record | A context the server holds, named by its context id. A request names one as its `parent`. |
 | context id | The content id of a context record's text. The same context has the same id for every served model. |
 | parent | The context record a request's context starts from. The request's context is the parent's context with the request's `messages` after it. |
@@ -113,7 +113,8 @@ thing, and each thing has one term.
 | control vector | An object that holds a vector for each layer of one served model's weights, made to change the residual while the model reads a context. Capability `control_vectors`. |
 | control item | One entry of a context's `control`: a control vector by its id, an op (`add`, `ablate`, or `clamp`), and a strength. The word `control` names this list only; "control text" (rule 2) is another thing. |
 | layer loop | A context's `loop`: a span of a served model's layers that runs more than once, one run after the other, while the model reads the context. Capability `layer_loops`. |
-| run | One execution of one layer for one token position. A layer outside a loop has one run; a layer inside it has `count` runs. |
+| cycle | One walk through a span of layers that a model was built to run several times. Each cycle after the first starts again from the input of the span and reads a message that the cycle before it wrote. A context's `cycles` is their count. Capability `cycles`. |
+| run | One execution of one layer for one token position. A layer outside a loop has one run; a layer inside it has `count` runs. A layer in the span of the cycles has one run in each cycle. |
 
 ## Endpoints
 
@@ -337,8 +338,9 @@ POST /council/v2/generations
   begin with the same tokens, while the server holds no snapshot of those
   tokens. Then the server feeds those tokens once when it can, up to the
   last boundary that both contexts mark, and the later request starts from
-  that snapshot. Thus a client never builds a context only so that other
-  requests find its snapshot. Each request gives the numbers that it gives
+  that snapshot. The two contexts also have the same `control`, `loop`, and
+  count of cycles, so they read with one model state. Thus a client never
+  builds a context only so that other requests find its snapshot. Each request gives the numbers that it gives
   alone, and its `kept` counts what it did not feed.
 - **A boundary exists only where the rendering keeps it.** A marked message
   whose rendering is not a prefix of the whole context is not a boundary,
@@ -401,6 +403,18 @@ POST /council/v2/generations
   A `loop` needs capability `layer_loops` on the served model; without it,
   the request is a `400` naming `loop`, or `contexts[i].loop` in a request
   with `contexts`.
+- **`cycles` is the count of cycles** of a model built to run its middle
+  layers several times (see Cycles). It is a whole number, and absent is
+  the served model's own count:
+
+  ```json
+  {"thinking": false, "cycles": 5,
+   "messages": [{"role": "user", "content": "Plan the heist."}]}
+  ```
+
+  A `cycles` needs capability `cycles` on the served model; without it, the
+  request is a `400` naming `cycles`, or `contexts[i].cycles` in a request
+  with `contexts`.
 - **`dry_run: true`** renders and reports `usage` and `from` without
   feeding. Capability `dry_run`.
 - **`tier`** says where a snapshot's model state is stored: `device`,
@@ -447,12 +461,13 @@ GET /council/v2/contexts/blake3:c4e2…
   parent's context. A context without `parent` is whole, as before, and
   needs one message or more.
 - **A member beside `parent` replaces the parent's.** `thinking`, `tools`,
-  `queue`, `control`, and `loop` are each the parent's when the request has
-  no such member, and the request's when it has one. Thus one record serves
-  a read with thinking and a read without it, or with another `control` or
-  `loop`. To drop the parent's `tools` or `control`, send an empty list.
-  `queue: null` drops the parent's `queue`, and `loop: null` drops the
-  parent's `loop`.
+  `queue`, `control`, `loop`, and `cycles` are each the parent's when the
+  request has no such member, and the request's when it has one. Thus one
+  record serves a read with thinking and a read without it, or with another
+  `control`, `loop`, or `cycles`. To drop the parent's `tools` or `control`,
+  send an empty list. `queue: null` drops the parent's `queue`, `loop: null`
+  drops the parent's `loop`, and `cycles: null` drops the parent's
+  `cycles`.
 - **The two forms are one context.** A context sent whole and the same
   context sent with `parent` have the same id, the same rendering, the same
   snapshots, and the same numbers. The server renders the whole context
@@ -476,8 +491,8 @@ GET /council/v2/contexts/blake3:c4e2…
   the message without its `continue`: a request that adds messages after
   it, and a build, a decision, a raw read, or a control-vector request.
 - **Only these members stand beside `parent`:** `thinking`, `tools`,
-  `queue`, `control`, `loop`, and `messages`. Any other member is a `400`
-  naming it.
+  `queue`, `control`, `loop`, `cycles`, and `messages`. Any other member is a
+  `400` naming it.
 - **The checks of a context are the checks of the whole context.** A
   message of the request is checked as message `n + i`, where the parent
   has `n` messages, and an error names it so, such as
@@ -543,8 +558,8 @@ PUT /council/v2/pins/kernel-7f3a
 
 - **A snapshot id is a content id:** `blake3:` and 64 lowercase hex
   digits. A client treats it as opaque text and never derives one. A server
-  hashes the build's tokens, boundaries, identity, `control`, and `loop`, or the
-  bytes of the model state; either way an id names one model state and is
+  hashes the build's tokens, boundaries, identity, `control`, `loop`, and
+  the count of cycles that runs, or the bytes of the model state; either way an id names one model state and is
   never used for another. When a server's feeding does not repeat bit for
   bit, the same context built twice may get two ids.
 - **A snapshot's model state depends on the context's `control`.** Two
@@ -561,6 +576,21 @@ PUT /council/v2/pins/kernel-7f3a
   `control`. This holds for `count` 1 too: its numbers are the plain
   model's, but its snapshots are its own. (Proposed, Claude Opus 5.5,
   2026-11-18: one rule for every member that changes how the model reads.)
+- **A snapshot's model state depends on the count of cycles the model
+  runs.** A server hashes the count that runs: the context's `cycles`, or
+  the served model's `default` when the context has none. Thus a context
+  with `cycles` equal to `default` and the same context with no `cycles`
+  may share model state, as any two contexts may, and two counts never do.
+  (Proposed, Claude Opus 5.5, 2026-11-21: the id names the computation. A
+  list or an object is hashed whole, so a server need not look inside it;
+  a count is resolved first, so a client that names the default feeds
+  nothing again.)
+- **Their records differ.** A record names no served model, so it cannot
+  hold the `default` of a model. A context with `cycles: 3` and the same
+  context with no `cycles` are two records, with one head on a model whose
+  `default` is 3. A client that means the model's own count leaves
+  `cycles` out, so its records match those of other clients that do the
+  same.
 - **An owner is any printable name a client chooses,** up to 128
   characters and without a slash, such as a kernel id. It names pins only.
   Any other owner is a `400` naming `owner`, on `PUT`, `GET`, and `DELETE`.
@@ -1667,6 +1697,75 @@ decide. (Proposed)
   two contexts with other loops in one pass in a way that changes a number
   of either (rule 1).
 
+## Cycles
+
+```json
+POST /council/v2/generations
+{"model": "inkling-2-mini", "max_tokens": 256,
+ "context": {"thinking": true, "cycles": 5,
+             "messages": [{"role": "user", "content": "Plan the heist."}]}}
+```
+
+A context's `cycles` is the count of cycles that a model runs for each
+token, for a model that was built to run a span of its layers several
+times. Inkling 2 Mini runs layers 6 to 17 three times. Each cycle after the
+first starts again from the residual before the span, and each of its
+layers reads a message that the cycle before it wrote. Capability `cycles`.
+
+Decided 2026-11-21 (Amy): cycles are not layer loops, so they have a member
+of their own. Each rule below is Claude Opus 5.5's, 2026-11-21, for Amy to
+decide. (Proposed)
+
+- **A cycle is not a layer loop.** A layer loop runs a span again on the
+  output of the run before it, in any model. A cycle is part of the model:
+  it reads the message of the cycle before it through weights that the
+  model learned. Thus the two have their own members, `loop` and `cycles`,
+  and their own capabilities.
+- **Absent is the model's own count.** A context with no `cycles` runs the
+  served model's `default`, the count it was trained for. The weights fix
+  `default`: two served models with the same `weight_hash` have the same
+  `default`. A server that runs another count by default serves it under
+  another `model`.
+- **`cycles: 1` is one cycle, not the plain model.** The model is built to
+  cycle, so one cycle is a pass of its own. This differs from a `loop` with
+  `count` 1, which gives the numbers of the plain model.
+- **Each cycle has model state of its own.** Each run of a layer in each
+  cycle writes its own KV cache, as each run of a layer loop does. Thus a
+  token's model state as a whole depends on its count.
+- **A served model with `cycles` describes the counts it runs** in its
+  `cycles` member (see Identity, limits, capabilities): `{min, max,
+  default}`.
+- **A server checks `cycles` in this order,** and the first rule that fails
+  gives the error. Each error is a `400`; in a request with `contexts`, the
+  name starts with `contexts[i].`:
+  1. `cycles` is a whole number from 0: the error names `cycles`.
+  2. The served model declares `cycles`: the error names `cycles`, as
+     "nothing ran: <model> does not declare cycles; send no cycles".
+  3. `cycles` is from `min` to `max`: the error names `cycles`, and the
+     message names the range. Thus 0 is refused here.
+  4. The context names no `loop`: the error names `cycles`, and the message
+     names both members, which the request or its parent holds. No served
+     model declares both capabilities yet. The change that allows both
+     writes how they join.
+- **A server checks the rules of each member first, then the members
+  together.** Thus a context with a bad `loop` and a `cycles` gets the
+  error of the `loop`, and the last check above is the only check of the
+  two together.
+- **A control item acts after each run of its layers,** in each cycle, as
+  in a layer loop. A control vector names the layers of the model, so a
+  vector fits a context whatever its `cycles`.
+- **A control-vector request reads contexts with no `cycles`,** so a vector
+  is fitted at the model's own count. A `cycles` there is a `400` naming it,
+  such as `positive[0].cycles`, also one equal to `default`.
+- **A number at one count is not a number at another.** A client fits its
+  thresholds for each count it uses, as it does for each control list. A
+  decision may read contexts with other counts.
+- **Each context of `contexts` has its own `cycles`** in a generation with
+  several replies. The forks of one context share its `cycles`.
+- **A server may run the contexts of one count together.** It never runs
+  two contexts with other counts in one pass in a way that changes a number
+  of either.
+
 ## Request ids and tracing
 
 - **Every response carries a `request-id` header,** a status response, an
@@ -1732,7 +1831,7 @@ next step when one is known.
    any of them changes its `template`, and with it its identity.
 7. **A snapshot never changes.** Its id names one model state, made by one
    identity from its tokens, the boundaries along them, and the context's
-   `control` and `loop`, so a read from it reads exactly the context that made it, and
+   `control`, `loop`, and count of cycles, so a read from it reads exactly the context that made it, and
    a number never comes from history the request did not send.
 8. **A control item that changes nothing changes no number.** An item with
    op `add` or `ablate` at strength 0 changes nothing, so a context whose
@@ -1804,11 +1903,26 @@ specs, which every served model shares.
   "layer_loops": {"layers": 24, "bounds": [2, 6, 10, 14, 18, 22], "count": 4, "extra_runs": 16}
   ```
 
+- **`cycles` describes the counts of cycles a served model runs**
+  (Proposed): `{min, max, default, start, end}`. A served model that
+  declares the capability `cycles` has it, and one that does not has none.
+  - `min`, `max`, and `default` are whole numbers from 1, with `min` ≤
+    `default` ≤ `max`. `default` is the count of a context with no
+    `cycles`. `max` is the most that the server runs, which can be less
+    than the model takes.
+  - `start` and `end` are the span: layers `start` to `end - 1` run in
+    each cycle. Thus a token at count `c` holds `(c - default) × (end -
+    start)` more runs than at `default`.
+
+  ```json
+  "cycles": {"min": 1, "max": 5, "default": 3, "start": 6, "end": 18}
+  ```
+
 | Limit | Where | Means |
 |---|---|---|
 | `context_tokens` | served model | The longest context, or a generation's prompt and reply, or an embedding input with its task prompt. |
 | `decision_context_tokens` | served model | The longest context a decision reads, not counting the spec and the case rendered after it. |
-| `snapshot_bytes` | served model | What one token of a snapshot costs. |
+| `snapshot_bytes` | served model | What one token of a snapshot costs, at the `default` count of cycles of a model with `cycles`. |
 | `contexts_per_decision` | served model | The most contexts one decision reads, at most 8. |
 | `replies_per_generation` | served model | The most replies one generation writes, with `replies`. (Proposed) |
 | `default_timeout_ms` | served model | A decision's `timeout_ms` when it sends none. |
@@ -1835,6 +1949,7 @@ specs, which every served model shares.
 | `embed` | served model | `POST /council/v2/embeddings`, as its `embeddings` member describes. |
 | `control_vectors` | served model | Contexts accept a non-empty `control`, and `POST /council/v2/control-vectors` makes control vectors. |
 | `layer_loops` | served model | Contexts accept `loop`, as its `layer_loops` member describes. (Proposed) |
+| `cycles` | served model | Contexts accept `cycles`, as its `cycles` member describes. (Proposed) |
 | `leave_one_out` | served model | Pooled answers carry `leave_one_out`. |
 | `describe` | served model | Specs may hold `text` questions. |
 | `pins` | server | `/council/v2/pins`. |

@@ -399,3 +399,40 @@ fn the_fake_passes_as_a_model_without_layer_loops() {
     assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name}: {:?}", r.checks.iter().find(|c| c.name == name));
     assert!(r.checks.iter().any(|c| c.name == "layer loops" && c.status == Status::Skip));
 }
+
+#[test]
+fn the_fake_passes_the_checks_of_cycles() {
+    let server = Server::start(Config::default()).unwrap();
+    let r = run(Opts { url: server.url(), restart: None, model: None }, false);
+    assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
+    for name in [
+        "cycles has 1 <= min <= default <= max and a span with start below end",
+        "cycles at the default gives the numbers of no cycles",
+        "a context at another count gives other numbers",
+        "cycles at the default shares the model state of no cycles",
+        "a context with cycles and one without are two records",
+        "another count never shares model state with the default",
+        "an equal count shares its model state",
+        "cycles: null beside parent drops the parent's count",
+        "a build with a count of 6, above the most is a 400 naming cycles",
+        "a build with a count of 0, below the least is a 400 naming cycles",
+        "a build with cycles that is not a whole number is a 400 naming cycles",
+        "raw reads with a count above the most are a 400 naming contexts[1].cycles",
+        "a control vector request with cycles is a 400 naming positive[0].cycles",
+        "a build with a loop and cycles is a 400 naming cycles",
+        "a build with a bad loop and cycles is a 400 naming loop.count, the member's own check first",
+    ] {
+        assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name}: {:?}", r.checks.iter().find(|c| c.name == name));
+    }
+}
+
+#[test]
+fn the_fake_passes_as_a_model_without_cycles() {
+    let server = Server::start(Config { models: vec![FakeModel::ready("gogi-toy-1", 0), FakeModel::without_cycles("gogi-toy-plain", 3)], ..Config::default() }).unwrap();
+    let r = run(Opts { url: server.url(), restart: None, model: Some("gogi-toy-plain".into()) }, false);
+    assert!(failures(&r).is_empty(), "{:#?}", failures(&r));
+    for name in ["a build with cycles to a model without cycles is a 400 naming cycles", "a count of 0 to a model without cycles is refused for the capability first"] {
+        assert!(r.checks.iter().any(|c| c.name == name && c.status == Status::Ok), "{name}: {:?}", r.checks.iter().find(|c| c.name == name));
+    }
+    assert!(r.checks.iter().any(|c| c.name == "cycles" && c.status == Status::Skip));
+}
