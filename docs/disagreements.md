@@ -1,16 +1,7 @@
-# Where the implementations disagree
+# Where implementations disagree
 
-This file lists where mkviolet or kaijutsu differ from `docs/council-api.md` and `gogi-proto`
-today. Each item is an observation from the code unless it says "inferred". An item leaves this
-file when the two agree.
+This file tracks known divergences between live implementations ([nagaya](https://github.com/tobert/nagaya), [kaijutsu](https://github.com/tobert/kaijutsu)) and `docs/council-api.md` / `gogi-proto`. Remove an entry once the implementation catches up.
 
-Both decode and validate with `gogi-proto` and pool with its `math`, so most of the contract
-cannot disagree. mkviolet runs `math::verify` on every decision before it responds, and passes
-`gogi-conformance` with 0 FAIL. kaijutsu pins a gogi rev, so it is behind whenever gogi moves
-ahead of that rev.
+Both `nagaya` and `kaijutsu` decode and validate with `gogi-proto` and pool with its `math` module, so most wire rules cannot diverge. `nagaya` runs `math::verify` on every decision response and passes `gogi-conformance` with 0 failures. `kaijutsu` pins a `gogi` revision, so it lags briefly whenever `gogi` advances ahead of its pin.
 
-- **kaijutsu's spec ids are SHA-256.** kaijutsu computes `sha256:` and the hex SHA-256 of a
-  spec's canonical JSON (`DOC_SPEC_ID`). The contract's spec id is the content id, `blake3:`
-  and the hex BLAKE3 of the same text. Inferred: kaijutsu's pinned `gogi-proto` also accepts
-  any snapshot id of the form `<scheme>:<hex>`, while the contract allows only `blake3:` and
-  64 digits.
+- **kaijutsu's spec IDs are SHA-256.** kaijutsu computes `sha256:` over a spec's canonical JSON (`DOC_SPEC_ID`), whereas the contract requires `blake3:` and 64 lowercase hex digits. Inferred: kaijutsu's pinned `gogi-proto` also accepts any `<scheme>:<hex>` snapshot ID.

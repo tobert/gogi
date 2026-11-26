@@ -20,7 +20,7 @@ fn json_of(text: &str) -> PyResult<Value> {
 mod _gogi {
     use super::*;
 
-    /// Checks a context (`{thinking, tools, queue, messages}`) the way mkviolet does.
+    /// Checks a context (`{thinking, tools, queue, messages}`) against the contract.
     /// Raises `ValueError` naming the first rule it breaks.
     #[pyfunction]
     fn check_context(context_json: &str) -> PyResult<()> {
@@ -51,7 +51,7 @@ mod _gogi {
         gogi_proto::spec_id_of(&json_of(spec_json)?).map_err(value_err)
     }
 
-    /// Parses a spec by mkviolet's rules and returns its id. `describe` allows `text` questions.
+    /// Parses a spec against the contract rules and returns its id. `describe` allows `text` questions.
     #[pyfunction]
     #[pyo3(signature = (spec_json, describe=false))]
     fn parse_spec_id(spec_json: &str, describe: bool) -> PyResult<String> {

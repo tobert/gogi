@@ -221,7 +221,7 @@ pub struct ServerIdentity {
     pub models: Vec<ServedModel>,
     pub limits: ServerLimits,
     pub capabilities: Vec<Capability>,
-    /// The server's own route prefixes, such as `["/mk/v1"]`.
+    /// The server's own route prefixes, such as `["/nagaya/v1"]`.
     #[serde(default)]
     pub extensions: Vec<String>,
 }
@@ -252,11 +252,11 @@ mod tests {
         assert!(!mime_matches("image/*", "audio/wav") && !mime_matches("image/*", "imagex/png") && !mime_matches("audio/wav", "audio/flac"));
     }
 
-    /// mkviolet's identity, as `GET /council/v2/identity` returned it on 2026-10-18.
-    const MKVIOLET: &str = r#"{"models":[{"model":"gemma-4-26b-a4b","weight_hash":"0x1EBEA246FC63EB7F","tokenizer_hash":"sha256:4d777ef5bdc1aa36","engine":"mkviolet:a93ed27853c9835c+numbers:e0cf8f63c78acb7a","device":"2x Intel(R) Arc(TM) Pro B70 Graphics","template":"mkv-letters-1:d71541e05da41620+gemma4-chat:344a60f6d8cc3423","aliases":[],"status":"ready","limits":{"context_tokens":65535,"decision_context_tokens":3072,"snapshot_bytes":450560,"contexts_per_decision":8,"default_timeout_ms":30000},"capabilities":["reads","generate","ride","dry_run","leave_one_out"]}],"limits":{"case_bytes":65536,"choice_options":26,"questions_per_spec":16,"pin_bytes":17179869184},"capabilities":["pins"],"extensions":["/mk/v1"]}"#;
+    /// Sample server identity payload returned by `GET /council/v2/identity`.
+    const SAMPLE_IDENTITY: &str = r#"{"models":[{"model":"gemma-4-26b-a4b","weight_hash":"0x1EBEA246FC63EB7F","tokenizer_hash":"sha256:4d777ef5bdc1aa36","engine":"nagaya:a93ed27853c9835c+numbers:e0cf8f63c78acb7a","device":"2x Intel(R) Arc(TM) Pro B70 Graphics","template":"nagaya-council:d71541e05da41620+gemma4-chat:344a60f6d8cc3423","aliases":[],"status":"ready","limits":{"context_tokens":65535,"decision_context_tokens":3072,"snapshot_bytes":450560,"contexts_per_decision":8,"default_timeout_ms":30000},"capabilities":["reads","generate","ride","dry_run","leave_one_out"]}],"limits":{"case_bytes":65536,"choice_options":26,"questions_per_spec":16,"pin_bytes":17179869184},"capabilities":["pins"],"extensions":["/nagaya/v1"]}"#;
 
     fn two_models() -> ServerIdentity {
-        let mut id: ServerIdentity = serde_json::from_str(MKVIOLET).unwrap();
+        let mut id: ServerIdentity = serde_json::from_str(SAMPLE_IDENTITY).unwrap();
         let mut night = id.models[0].clone();
         night.model = "qwen-3.8-mutant-636".into();
         night.aliases = vec!["mutant".into()];
@@ -266,12 +266,12 @@ mod tests {
     }
 
     #[test]
-    fn mkviolets_identity_decodes_and_round_trips() {
-        let id: ServerIdentity = serde_json::from_str(MKVIOLET).unwrap();
+    fn server_identity_decodes_and_round_trips() {
+        let id: ServerIdentity = serde_json::from_str(SAMPLE_IDENTITY).unwrap();
         let m = &id.models[0];
         assert!(m.has(Capability::Reads) && id.has(Capability::Pins) && !m.has(Capability::Pins) && !m.has(Capability::Think));
         assert_eq!((m.status, m.limits.decision_context_tokens), (ModelStatus::Ready, 3072));
-        let a: serde_json::Value = serde_json::from_str(MKVIOLET).unwrap();
+        let a: serde_json::Value = serde_json::from_str(SAMPLE_IDENTITY).unwrap();
         assert_eq!(serde_json::to_value(&id).unwrap(), a);
     }
 

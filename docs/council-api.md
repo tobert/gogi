@@ -10,7 +10,7 @@ implements the contract serves kaijutsu's chats and its council from one
 store, so the two share one KV cache and one eviction policy. One server
 serves one or more models, and each request names the model it reads.
 
-mkviolet serves this contract, and kaijutsu's mk provider and council speak
+nagaya serves this contract, and kaijutsu's council client speaks
 it. `gogi-proto` is the contract as code, and `gogi-conformance` checks a
 server against it.
 
@@ -27,8 +27,8 @@ server against it.
   only its new messages. A client that keeps its own copy may still send a
   context whole at any time; the two forms mean the same context.
 - **Contexts are native chat.** A context is `messages` in the model's own
-  chat shape, tool calls and tool results included. The council bench
-  measured why (mkviolet's `web/council.html`): Gemma 4 keeps its own
+  chat shape, tool calls and tool results included. Measurements on Gemma 4
+  showed why: Gemma 4 keeps its own
   thinking in view only inside one agent turn, and queue contexts built
   that way put more than 0.9999 of the probability on the answer letters on
   every case tried.
@@ -167,7 +167,7 @@ GET /council/v2/identity
 -> {"models": [
       {"model": "gemma-4-26b-a4b", "aliases": ["gemma4"], "status": "ready",
        "weight_hash": "0x1EBEA246FC63EB7F", "tokenizer_hash": "sha256:4d777ef5bdc1aa36",
-       "template": "mkv-letters-1:a57f…+gemma4-chat:ae53…", "engine": "mkviolet:a93e…",
+       "template": "nagaya-council:a57f…+gemma4-chat:ae53…", "engine": "nagaya:a93e…",
        "device": "2x Intel(R) Arc(TM) Pro B70 Graphics",
        "limits": {"context_tokens": 65535, "decision_context_tokens": 3072, "snapshot_bytes": 450560,
                   "contexts_per_decision": 8, "default_timeout_ms": 30000},
@@ -176,7 +176,7 @@ GET /council/v2/identity
       {"model": "qwen-3.8-mutant-636", "aliases": [], "status": "unloaded", …}],
     "limits": {"pin_bytes": 17179869184, "case_bytes": 65536, "questions_per_spec": 16, "choice_options": 26},
     "capabilities": ["pins"],
-    "extensions": ["/mk/v1"]}
+    "extensions": ["/nagaya/v1"]}
 ```
 
 - **`models` lists every model the server serves, loaded or not,** so a
@@ -321,7 +321,7 @@ POST /council/v2/generations
   Like a user message, it carries no `reasoning` or `tool_calls`.
 - **The server renders thinking where the model was trained to see it.**
   The rule is the template's, so it is part of `template` in identity.
-  mkviolet renders Gemma 4 with the template's `preserve_thinking` on: an
+  nagaya renders Gemma 4 with the template's `preserve_thinking` on: an
   assistant message with tool calls keeps its `reasoning` for the rest of
   the context, so an agent turn renders the same after the next user message
   and a held prefix stays a prefix; the `reasoning` of an assistant message
@@ -756,7 +756,7 @@ POST /council/v2/decisions
  "pool": {"method": "loglinear", "weights": "mass", "normalized": {"undo": [0.5, 0.5], "verdict": [0.5, 0.5]}},
  "signals": {"control_text": []},
  "identity": {"model": "gemma-4-26b-a4b", "weight_hash": "…", "tokenizer_hash": "…",
-              "template": "mkv-letters-1:…", "engine": "…", "spec_id": "blake3:9c1f…"},
+              "template": "nagaya-council:…", "engine": "…", "spec_id": "blake3:9c1f…"},
  "usage": {"prompt": 1252, "kept": 1040, "fed": 212, "completion": 26, "reasoning": 0}}
 ```
 
@@ -807,7 +807,7 @@ show: it is not a decision.
   likely letters of the ones before it, so these answers condition each
   other. A decision's contexts are all queue contexts, or none are.
 - **A decision's contexts fit the decision limit,** `decision_context_tokens`
-  in identity, which can be shorter than `context_tokens`. mkviolet reads
+  in identity, which can be shorter than `context_tokens`. For example, a server may read
   decisions in a 4,096-position slot, of which a context may take 3,072.
 - **`pool`** is `{method, weights, values?}`.
   - `method`: `linear`, the weighted mean of probabilities (some context
@@ -1261,7 +1261,7 @@ POST /council/v2/generations
  "decisions": [{"spec_id": "blake3:77c0…", "ask": ["on_track"], "when": "before"},
                {"spec_id": "blake3:77c0…", "when": "after"}],
  "stream": true}
--> done: {"content": "```toml\n[http]\nbind = \"100.83.138.103:8090\"\n```",
+-> done: {"content": "```toml\n[http]\nbind = \"198.51.100.10:8090\"\n```",
           "reasoning": "The unit needs Type=notify and the 8090 address.",
           "finish": "end_turn",
           "usage": {"prompt": 412, "kept": 398, "fed": 14, "completion": 21, "reasoning": 0},
@@ -1468,7 +1468,7 @@ a candidate chunk, with the task prompt counted, and a dry run gives that.
 It does not need token ids or text pieces: a chunk is text, and the server
 tokenizes it again. Token ids are part of one tokenizer, so a client that
 kept them would break when `tokenizer_hash` changes. A server that serves
-`tokenize` for its own tools keeps it as an extension, as mkviolet does.
+`tokenize` for its own tools keeps it as an extension, as nagaya does.
 
 ## Control vectors
 
@@ -1858,8 +1858,8 @@ specs, which every served model shares.
 - **`engine` names what computes the numbers:** the engine binary and the
   server code that turns its output into answers, each by content hash. It
   never names a source commit, so a deploy that changes only plumbing or
-  docs keeps the identity and the thresholds fitted under it. mkviolet
-  writes `mkviolet:<binary hash>+numbers:<hash of its answer code>`.
+  docs keeps the identity and the thresholds fitted under it. nagaya
+  writes `nagaya:<binary hash>`.
 - **`text_stop`** is the rule that ends a `text` answer, so a client can
   tell why two servers' descriptions differ in length.
 - **`media.text_replies: false` marks a served model whose replies hold no
@@ -1960,21 +1960,18 @@ specs, which every served model shares.
 ## Extensions
 
 A server serves the model-specific rest under its own prefix and lists it in
-`identity.extensions`. mkviolet serves these under `/mk/v1`:
+`identity.extensions`. For example, nagaya serves these under `/nagaya/v1`:
 
-| mkviolet route | Why it is not in the council API |
+| Extension route | Why it is not in the council API |
 |---|---|
 | `render`, `tokenize`, `detokenize` | The template and tokenizer, for debugging and bench tools. |
-| `cases` | The last 32 decisions' cases and answers, for labeling. |
-| `embeddings` | Gemma 4's last hidden state; quality unmeasured. It came before the council API's own `POST /embeddings`. |
-| `status` (event stream), `metrics` | Engine passes per card. |
-| `traces` | Residual and attention traces. |
-| `jlens`, `steer`, `routing` | Jacobian Lens, residual steering, and MoE routing introspection (mkviolet's `docs/06-council-jlens-extensions.md`). |
+| `cluster`, `profile`, `engines/*/load`, `devices/*/release` | Machine inventory, placement profiles, and GPU lifecycle management. |
+| `lab/project`, `lab/trace`, `lab/ensemble`, `lab/compose` | Logit-lens / Jacobian Lens projections, activation traces, and vector composition. |
 
 ## Open questions
 
 - **The cost of rendering everything.** Each request renders and tokenizes
-  its whole context, also when it names a `parent`. On mkviolet, a
+  its whole context, also when it names a `parent`. In practice, a
   32,480-token context renders, checks, and returns a `dry_run` response in
   79 ms; a server could cache renderings by record if that grows.
 - **Records across machines.** Two servers that write a record's text the
@@ -1994,9 +1991,9 @@ A server serves the model-specific rest under its own prefix and lists it in
   tool-call template responds to `queue` with a `400`; whether the server
   should instead deliver the case as a user message, without saying so, is
   open.
-- **Thinking at decision time.** `think` costs about 21 ms a token on
-  mkviolet, which does not serve it yet. Whether it pays, and at what
-  length, is the bench's next measurement.
+- **Thinking at decision time.** `think` adds per-token decode latency at
+  decision time and is not yet served by nagaya. Whether it pays, and at what
+  length, remains to be measured.
 - **Describe first on a thinking model.** Whether `text` questions before
   the others help a model that thinks is not measured.
 - **Riding decisions at each tool call.** `when: "each_call"` would ask

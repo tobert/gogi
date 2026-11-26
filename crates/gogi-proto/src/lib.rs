@@ -4,8 +4,7 @@
 //! speak it:
 //! - wire types for every council API request and response (`context`, `pins`, `objects`, `reads`,
 //!   `generation`, `decision`, `embeddings`, `control`, `layer_loop`, `cycles`, `identity`, `error`);
-//! - the rules a request must meet, checked the way mkviolet checks them
-//!   (`message::validate`, `Context::check`, `spec::parse_spec`);
+//! - the rules a request must meet (`message::validate`, `Context::check`, `spec::parse_spec`);
 //! - what a server checks of an open message, the seams of a continuation (`continuation`);
 //! - canonical JSON, content ids, and `spec_id` (`canon`);
 //! - context records: the context id, a `parent`, and the reply in a record (`record`);

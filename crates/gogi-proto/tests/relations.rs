@@ -1,7 +1,7 @@
 //! Property-style checks of the pooling relations over seeded random reads, a differential
-//! check against mkviolet's own algorithm, and `verify` over responses built from the math.
-// The reference pooling follows mkviolet's algorithm line for line, its index loops and its
-// `!(x > 0.0)` included, so a difference from mkviolet is easy to see.
+//! check against an independent reference implementation, and `verify` over responses built from the math.
+// The reference pooling uses an independent index-loop implementation (including `!(x > 0.0)`)
+// so any numerical or edge-case divergence is caught immediately.
 #![allow(clippy::needless_range_loop, clippy::neg_cmp_op_on_partial_ord)]
 
 use gogi_proto::decision::{DecisionResponse, Expect, Pool, PoolMethod, PoolWeights};
@@ -168,10 +168,9 @@ fn a_loglinear_pool_lets_one_read_veto() {
     assert_eq!(argmax(&log.probs), 1);
 }
 
-// ---- mkviolet's algorithm, copied from its src/council.rs: the second implementation
-// the math must agree with.
+// ---- Independent reference pooling implementation the math must agree with.
 
-mod mkviolet {
+mod reference_pool {
     #[derive(Clone, Copy)]
     pub enum Method {
         Linear,
@@ -277,13 +276,13 @@ mod mkviolet {
 }
 
 #[test]
-fn gogi_agrees_with_mkviolets_algorithm_within_1e_9() {
+fn gogi_agrees_with_reference_pooling_within_1e_9() {
     let mut r = Rng(7);
     for _ in 0..CASES {
         let (n, k) = (1 + r.below(5), 2 + r.below(6));
         let lps = random_reads(&mut r, n, k);
         let mine = rows(&lps);
-        let theirs: Vec<mkviolet::Read> = lps.iter().map(|l| mkviolet::Read::from_logprobs(l)).collect();
+        let theirs: Vec<reference_pool::Read> = lps.iter().map(|l| reference_pool::Read::from_logprobs(l)).collect();
         let kind = r.below(3);
         let given: Vec<f64> = (0..n).map(|_| if r.below(4) == 0 { 0.0 } else { 0.1 + r.unit() }).collect();
         let (spec, raw) = match kind {
@@ -292,9 +291,9 @@ fn gogi_agrees_with_mkviolets_algorithm_within_1e_9() {
             _ if given.iter().sum::<f64>() > 0.0 => (WeightSpec::Given(given.clone()), given),
             _ => (WeightSpec::Uniform, vec![1.0; n]),
         };
-        for (m, t) in [(PoolMethod::Linear, mkviolet::Method::Linear), (PoolMethod::Loglinear, mkviolet::Method::LogLinear)] {
+        for (m, t) in [(PoolMethod::Linear, reference_pool::Method::Linear), (PoolMethod::Loglinear, reference_pool::Method::LogLinear)] {
             let a = math::pool(&mine, m, &spec).unwrap();
-            let b = mkviolet::evaluate(&theirs, t, raw.clone());
+            let b = reference_pool::evaluate(&theirs, t, raw.clone());
             for o in 0..k {
                 near(a.probs[o], b.probabilities[o], 1e-9);
             }

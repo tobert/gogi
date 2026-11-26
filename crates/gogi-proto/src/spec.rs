@@ -1,6 +1,6 @@
 //! Specs: held sets of questions, content-addressed by their canonical JSON.
 //!
-//! `parse_spec` accepts exactly what mkviolet accepts: unknown fields are refused, and a
+//! `parse_spec` enforces the contract rules: unknown fields are refused, and a
 //! `text` question needs the `describe` capability.
 
 use std::collections::HashSet;
@@ -23,7 +23,7 @@ pub struct SpecRules {
 }
 
 impl Default for SpecRules {
-    /// mkviolet's limits: 16 questions, 26 options, no `text`.
+    /// Default limits: 16 questions, 26 options, no `text`.
     fn default() -> Self {
         SpecRules { questions_per_spec: 16, choice_options: 26, describe: false, text_tokens: 0 }
     }

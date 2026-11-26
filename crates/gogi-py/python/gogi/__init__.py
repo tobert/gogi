@@ -1,7 +1,7 @@
 """The council API contract: validation, spec ids, the pooling math, and a fake server.
 
 Contexts, specs, and requests may be Python values or JSON text. A rule broken raises
-``ValueError`` with the message mkviolet would return.
+``ValueError`` with the error message a conforming server returns.
 """
 
 import json as _json
